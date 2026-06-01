@@ -1,0 +1,3 @@
+npmRegistryServer: "${ENDOR_NPM_REGISTRY_URL}"
+npmAlwaysAuth: true
+npmAuthIdent: "${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}"
