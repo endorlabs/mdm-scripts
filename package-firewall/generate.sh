@@ -19,10 +19,8 @@
 #   ENDOR_API_SECRET   Required. API secret  (Basic Auth password)
 #   ENDOR_FQDN         Optional. Base URL (default: https://factory.endorlabs.com)
 #
-# Overrides:
-#   overrides/blocks/<name>.txt  replaces a config block (e.g. overrides/blocks/npmrc.txt)
-#   overrides/<name>.sh          replaces a full template  (e.g. overrides/js.sh)
-#   Override files go through the same {{PLACEHOLDER}} substitution as defaults.
+# To customise config blocks, edit templates/blocks/*.txt directly.
+# To customise orchestration logic, edit templates/*.sh directly.
 #
 # Output (out/<namespace>/):
 #   endor-js.sh       — JavaScript: npm · pnpm · yarn classic · yarn 2+ · bun
@@ -39,7 +37,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/lib"
 TMPL_DIR="$SCRIPT_DIR/templates"
 BLOCKS_DIR="$SCRIPT_DIR/templates/blocks"
-OVERRIDES_DIR="$SCRIPT_DIR/overrides"
 
 # ─── Validate required env vars ───────────────────────────────────────────────
 : "${ENDOR_NAMESPACE:?ENDOR_NAMESPACE is required}"
@@ -86,32 +83,6 @@ inline_common() {
     || cat "$LIB_DIR/common.sh"
 }
 
-# resolve_template <name>
-# Returns overrides/<name> if it exists, else templates/<name>.
-resolve_template() {
-  local name="$1"
-  local override="$OVERRIDES_DIR/$name"
-  if [[ -f "$override" ]]; then
-    echo "[override] using overrides/${name}" >&2
-    echo "$override"
-  else
-    echo "$TMPL_DIR/$name"
-  fi
-}
-
-# resolve_block <name>
-# Returns overrides/blocks/<name> if it exists, else templates/blocks/<name>.
-resolve_block() {
-  local name="$1"
-  local override="$OVERRIDES_DIR/blocks/$name"
-  if [[ -f "$override" ]]; then
-    echo "[override] using overrides/blocks/${name}" >&2
-    echo "$override"
-  else
-    echo "$BLOCKS_DIR/$name"
-  fi
-}
-
 # emit_block_assignment <varname> <file>
 # Reads a block file, applies substitutions, and emits a quoted heredoc
 # assignment for embedding in generated scripts. The quoted delimiter prevents
@@ -128,14 +99,14 @@ emit_block_assignment() {
 
 # emit_all_blocks
 # Emits all block variable assignments into the generated script.
-# All block vars are always emitted — templates use whichever they need.
+# Edit templates/blocks/*.txt to change what gets written to config files.
 emit_all_blocks() {
-  echo "# ── Block content (from templates/blocks/ — edit to customise) ───────────────"
-  emit_block_assignment "ENVSH_BLOCK"  "$(resolve_block envsh.txt)"
-  emit_block_assignment "NPMRC_BLOCK"  "$(resolve_block npmrc.txt)"
-  emit_block_assignment "YARNRC_BLOCK" "$(resolve_block yarnrc.txt)"
-  emit_block_assignment "PIP_BLOCK"    "$(resolve_block pipconf.txt)"
-  emit_block_assignment "UV_BLOCK"     "$(resolve_block uvtoml.txt)"
+  echo "# ── Block content (from templates/blocks/) ───────────────────────────────────"
+  emit_block_assignment "ENVSH_BLOCK"  "$BLOCKS_DIR/envsh.txt"
+  emit_block_assignment "NPMRC_BLOCK"  "$BLOCKS_DIR/npmrc.txt"
+  emit_block_assignment "YARNRC_BLOCK" "$BLOCKS_DIR/yarnrc.txt"
+  emit_block_assignment "PIP_BLOCK"    "$BLOCKS_DIR/pipconf.txt"
+  emit_block_assignment "UV_BLOCK"     "$BLOCKS_DIR/uvtoml.txt"
   echo "# ─────────────────────────────────────────────────────────────────────────────"
   echo ""
 }
@@ -210,12 +181,10 @@ build_script() {
 # Remove script has no block content to write — skips emit_all_blocks and env setup.
 build_remove_script() {
   local output="$1"
-  local template
-  template="$(resolve_template remove.sh)"
 
   {
     script_header "$output" "Removes Endor Package Firewall configuration from all managed config files."
-    substitute < "$template"
+    substitute < "$TMPL_DIR/remove.sh"
   } > "$output"
 
   chmod 700 "$output"
@@ -223,12 +192,12 @@ build_remove_script() {
 
 # ─── Generate per-ecosystem install scripts ────────────────────────────────────
 build_script \
-  "$(resolve_template js.sh)" \
+  "$TMPL_DIR/js.sh" \
   "$OUT_DIR/endor-js.sh" \
   "Configures JavaScript package managers (npm, pnpm, yarn, bun) for Endor Package Firewall."
 
 build_script \
-  "$(resolve_template python.sh)" \
+  "$TMPL_DIR/python.sh" \
   "$OUT_DIR/endor-python.sh" \
   "Configures Python package managers (pip, uv, poetry) for Endor Package Firewall."
 
@@ -248,12 +217,12 @@ build_remove_script "$OUT_DIR/endor-remove.sh"
   echo "# ════════════════════════════════════════════════════════════════════════════"
   echo "# JavaScript"
   echo "# ════════════════════════════════════════════════════════════════════════════"
-  substitute < "$(resolve_template js.sh)"
+  substitute < "$TMPL_DIR/js.sh"
   echo ""
   echo "# ════════════════════════════════════════════════════════════════════════════"
   echo "# Python"
   echo "# ════════════════════════════════════════════════════════════════════════════"
-  substitute < "$(resolve_template python.sh)"
+  substitute < "$TMPL_DIR/python.sh"
   echo ""
   echo "echo \"\""
   echo "echo \"[endor] ✓ All package managers configured for ${ENDOR_NAMESPACE}.\""
@@ -272,25 +241,7 @@ echo ""
 echo "   All scripts accept --dry-run to preview changes without writing anything."
 echo "   Upload to your MDM tool. Each script is self-contained and idempotent."
 echo ""
-_HAS_OVERRIDES=0
-if [[ -d "$OVERRIDES_DIR" ]]; then
-  if compgen -G "$OVERRIDES_DIR/blocks/*.txt" > /dev/null 2>&1; then
-    _HAS_OVERRIDES=1
-    echo "   Active block overrides (from overrides/blocks/):"
-    for _f in "$OVERRIDES_DIR"/blocks/*.txt; do
-      printf "     %s\n" "$(basename "$_f")"
-    done
-    unset _f
-  fi
-  if compgen -G "$OVERRIDES_DIR/*.sh" > /dev/null 2>&1; then
-    _HAS_OVERRIDES=1
-    echo "   Active template overrides (from overrides/):"
-    for _f in "$OVERRIDES_DIR"/*.sh; do
-      printf "     %s\n" "$(basename "$_f")"
-    done
-    unset _f
-  fi
-fi
-[[ $_HAS_OVERRIDES -eq 0 ]] || echo ""
-unset _HAS_OVERRIDES
-echo "   Re-running this script overwrites the same output directory."
+echo "   To customise: edit templates/blocks/*.txt (config content)"
+echo "                 or templates/*.sh (orchestration logic)"
+echo ""
+echo "   Re-running overwrites the same output directory."

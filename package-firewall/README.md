@@ -22,7 +22,6 @@ endor-package-firewall/
 │   ├── js.sh                ← orchestration: npm / yarn config file writes
 │   ├── python.sh            ← orchestration: pip / uv config file writes
 │   └── remove.sh            ← orchestration: sentinel block removal
-├── overrides/               ← optional: custom blocks or templates (see Overrides section)
 └── out/                     ← generated scripts (gitignore this)
     └── my-team/
         ├── endor-js.sh
@@ -169,48 +168,28 @@ Key behaviour:
 
 ---
 
-## Overrides
+## Customising
 
-Two levels of override are supported, from least to most invasive:
+To change what gets written to a config file on target machines, edit the relevant file in `templates/blocks/` directly:
 
-### Block overrides (recommended)
-
-To customise what gets written to a specific config file, drop a replacement in `overrides/blocks/`:
-
-| File | Overrides |
+| File | Written to |
 |---|---|
-| `overrides/blocks/npmrc.txt` | Content written to `~/.npmrc` |
-| `overrides/blocks/yarnrc.txt` | Content written to `~/.yarnrc.yml` |
-| `overrides/blocks/pipconf.txt` | Content written to `pip.conf` |
-| `overrides/blocks/uvtoml.txt` | Content written to `~/.config/uv/uv.toml` |
-| `overrides/blocks/envsh.txt` | Content written to `~/.config/endor/env.sh` |
+| `templates/blocks/npmrc.txt` | `~/.npmrc` |
+| `templates/blocks/yarnrc.txt` | `~/.yarnrc.yml` |
+| `templates/blocks/pipconf.txt` | `~/.pip/pip.conf`, `~/.config/pip/pip.conf`, `~/Library/Application Support/pip/pip.conf` |
+| `templates/blocks/uvtoml.txt` | `~/.config/uv/uv.toml` |
+| `templates/blocks/envsh.txt` | `~/.config/endor/env.sh` |
 
-Override files support the same `{{PLACEHOLDER}}` substitutions as defaults. Available placeholders:
+To change orchestration logic (which files get written, in what order, with what warnings), edit the relevant `templates/*.sh` file directly.
 
-| Placeholder | Value |
-|---|---|
-| `{{API_KEY_ID}}` | API key ID |
-| `{{API_SECRET}}` | API secret |
-| `{{NPM_REGISTRY_URL}}` | Full npm registry URL |
-| `{{NPM_REGISTRY_HOST}}` | Registry host+path (for npmrc auth scope key) |
-| `{{NPM_AUTH_B64}}` | base64(key:secret) |
-| `{{PYPI_URL}}` | PyPI URL without credentials |
-| `{{PIP_INDEX_URL}}` | PyPI URL with credentials embedded |
-| `{{TRUSTED_HOST}}` | Hostname only (for pip trusted-host) |
-| `{{NAMESPACE}}` | Endor namespace |
-| `{{FQDN}}` | Base URL |
+Both support `{{PLACEHOLDER}}` substitution at generation time and `${ENDOR_VAR}` env var references at runtime:
 
-### Template overrides
+| Syntax | When resolved | Use for |
+|---|---|---|
+| `{{PLACEHOLDER}}` | Generation time by `generate.sh` | Values baked into the config file (e.g. registry host in a key position) |
+| `${ENDOR_VAR}` | Runtime by the tool reading the config file | Credential values — kept out of config files, resolved from `env.sh` |
 
-To replace the entire orchestration logic for an ecosystem, drop a `.sh` file in `overrides/`:
-
-| File | Overrides |
-|---|---|
-| `overrides/js.sh` | `templates/js.sh` |
-| `overrides/python.sh` | `templates/python.sh` |
-| `overrides/remove.sh` | `templates/remove.sh` |
-
-`generate.sh` prints a notice for each active override and lists them in the summary.
+Available placeholders: `{{API_KEY_ID}}`, `{{API_SECRET}}`, `{{NPM_REGISTRY_URL}}`, `{{NPM_REGISTRY_HOST}}`, `{{NPM_AUTH_B64}}`, `{{PYPI_URL}}`, `{{PIP_INDEX_URL}}`, `{{TRUSTED_HOST}}`, `{{NAMESPACE}}`, `{{FQDN}}`
 
 ---
 

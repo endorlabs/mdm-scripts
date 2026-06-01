@@ -140,13 +140,13 @@ This is an accepted tradeoff for MDM-managed developer workstations where intera
 
 ---
 
-### 8. Overrides directory
+### 8. Edit templates directly — no override indirection
 
-**Decision:** IT admins can place custom template files in `overrides/` to completely replace the default JS, Python, or remove templates. `generate.sh` checks for overrides before falling back to defaults.
+**Decision:** Customisation is done by editing `templates/blocks/*.txt` and `templates/*.sh` directly. There is no `overrides/` shadow directory.
 
-**Why:** Teams may have non-standard requirements — additional registry scopes, custom auth formats, extra config keys. Rather than adding an ever-growing list of env vars and flags, a full template override gives complete control. Override files go through the same `{{PLACEHOLDER}}` substitution as the defaults.
+**Why:** An overrides directory creates two concepts for the same thing — "the template" and "the override of the template". It adds a lookup step, makes it unclear which file is actually in use, and raises the question of how to diff them. Direct editing is simpler: what you see in `templates/` is exactly what runs. Version control handles history and rollback.
 
-**What overrides cannot do:** `envsh.sh` (the credential setup template) is not overridable by design. It is infrastructure, not configuration. Overriding it would risk breaking the credential sourcing that all other templates depend on.
+**Consequence:** Teams that fork this repository customise their fork. Upstream changes are pulled in via git and merged. This is standard practice and does not require a separate mechanism.
 
 ---
 
@@ -229,9 +229,9 @@ Three goals were defined for this system. This section scores the current state 
 | Idempotent — safe to retrigger on MDM check-in | ✓ Done |
 | `--dry-run` to preview before deploying | ✓ Done |
 | Plain-text block files (`templates/blocks/*.txt`) — no bash needed to customise config | ✓ Done |
+| Direct template editing — no override indirection | ✓ Done |
 | Credential rotation without full script redeploy | ✗ Not done |
 | Validation before deployment (smoke-test against firewall) | ✗ Not done |
-| Two-level override system (`overrides/` vs `overrides/blocks/`) — distinction not obvious | ⚠ Friction |
 
 **Key gaps**
 
@@ -510,9 +510,9 @@ Add a section to `DESIGN.md` with exact steps for adding Go (as a worked example
 
 This makes the path explicit and reduces the chance of missing a step.
 
-#### 3d. Separate `envsh.sh` into overridable infrastructure
+#### 3d. Shell detection in `envsh.sh` as a named list
 
-Currently `envsh.sh` is not overridable by design. But the `SOURCE_BLOCK` (the `source ~/.config/endor/env.sh` line) is hardcoded. As more shells are added (fish via 2d), the shell detection logic grows. Moving the per-shell sourcing logic into its own template (or making the list of profiles configurable) would make this extensible without touching `envsh.sh` orchestration.
+As more shells are added (fish via 2d), the shell detection loop in `envsh.sh` grows in-line. Extracting the list of profiles to detect into a named constant at the top of the file makes it obvious what to edit when adding a new shell.
 
 Low priority — only matters when adding non-bash shell support.
 
