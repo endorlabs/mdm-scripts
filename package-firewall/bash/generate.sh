@@ -54,6 +54,7 @@ TRUSTED_HOST="${FQDN_HOST%%:*}"
 NPM_REGISTRY_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/npm/"
 NPM_REGISTRY_HOST="${FQDN_HOST}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/npm/"
 NPM_AUTH_B64=$(printf '%s' "${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}" | base64 | tr -d '\n')
+API_SECRET_B64=$(printf '%s' "${ENDOR_API_SECRET}" | base64 | tr -d '\n')
 
 PYPI_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/pypi/simple/"
 PIP_INDEX_URL="https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/pypi/simple/"
@@ -72,6 +73,7 @@ substitute() {
     -e "s|{{NPM_REGISTRY_URL}}|${NPM_REGISTRY_URL}|g" \
     -e "s|{{NPM_REGISTRY_HOST}}|${NPM_REGISTRY_HOST}|g" \
     -e "s|{{NPM_AUTH_B64}}|${NPM_AUTH_B64}|g" \
+    -e "s|{{API_SECRET_B64}}|${API_SECRET_B64}|g" \
     -e "s|{{PYPI_URL}}|${PYPI_URL}|g" \
     -e "s|{{PIP_INDEX_URL}}|${PIP_INDEX_URL}|g" \
     -e "s|{{ENDOR_PYPI_URL}}|${PIP_INDEX_URL}|g" \
@@ -94,6 +96,7 @@ emit_block_assignment() {
   local delim="ENDOR_${varname}"
   echo "${varname}=\$(cat <<'${delim}'"
   substitute < "$file"
+  echo ""
   echo "${delim}"
   echo ")"
 }
@@ -104,11 +107,12 @@ emit_block_assignment() {
 # Edit templates/envsh.txt to change the bash-only env var block.
 emit_all_blocks() {
   echo "# ── Block content (from shared/blocks/) ─────────────────────────────────────"
-  emit_block_assignment "ENVSH_BLOCK"  "$SHARED_BLOCKS_DIR/envsh.txt"
-  emit_block_assignment "NPMRC_BLOCK"  "$SHARED_BLOCKS_DIR/npmrc.txt"
-  emit_block_assignment "YARNRC_BLOCK" "$SHARED_BLOCKS_DIR/yarnrc.txt"
-  emit_block_assignment "PIP_BLOCK"    "$SHARED_BLOCKS_DIR/pipconf.txt"
-  emit_block_assignment "UV_BLOCK"     "$SHARED_BLOCKS_DIR/uvtoml.txt"
+  emit_block_assignment "ENVSH_BLOCK"         "$SHARED_BLOCKS_DIR/envsh.txt"
+  emit_block_assignment "NPMRC_BLOCK"         "$SHARED_BLOCKS_DIR/npmrc.txt"
+  emit_block_assignment "YARNRC_CLASSIC_BLOCK" "$SHARED_BLOCKS_DIR/yarnrc_classic.txt"
+  emit_block_assignment "YARNRC_BLOCK"        "$SHARED_BLOCKS_DIR/yarnrc.txt"
+  emit_block_assignment "PIP_BLOCK"           "$SHARED_BLOCKS_DIR/pipconf.txt"
+  emit_block_assignment "UV_BLOCK"            "$SHARED_BLOCKS_DIR/uvtoml.txt"
   echo "# ─────────────────────────────────────────────────────────────────────────────"
   echo ""
 }

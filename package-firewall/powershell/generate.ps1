@@ -65,9 +65,11 @@ $TRUSTED_HOST     = $FQDN_HOST -replace ':.*', ''
 $NPM_REGISTRY_URL  = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/npm/"
 $NPM_REGISTRY_HOST = "$FQDN_HOST/v1/namespaces/$ENDOR_NAMESPACE/firewall/npm/"
 
-$_bytes       = [System.Text.Encoding]::UTF8.GetBytes("${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}")
-$NPM_AUTH_B64 = [System.Convert]::ToBase64String($_bytes)
-Remove-Variable _bytes
+$_bytes          = [System.Text.Encoding]::UTF8.GetBytes("${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}")
+$NPM_AUTH_B64    = [System.Convert]::ToBase64String($_bytes)
+$_secretBytes    = [System.Text.Encoding]::UTF8.GetBytes($ENDOR_API_SECRET)
+$API_SECRET_B64  = [System.Convert]::ToBase64String($_secretBytes)
+Remove-Variable _bytes, _secretBytes
 
 $PYPI_URL      = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/pypi/simple/"
 $PIP_INDEX_URL = "https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/$ENDOR_NAMESPACE/firewall/pypi/simple/"
@@ -88,6 +90,7 @@ function Invoke-Substitute {
     $r = $r.Replace('{{NPM_REGISTRY_URL}}',  $NPM_REGISTRY_URL)
     $r = $r.Replace('{{NPM_REGISTRY_HOST}}', $NPM_REGISTRY_HOST)
     $r = $r.Replace('{{NPM_AUTH_B64}}',      $NPM_AUTH_B64)
+    $r = $r.Replace('{{API_SECRET_B64}}',   $API_SECRET_B64)
     $r = $r.Replace('{{PYPI_URL}}',          $PYPI_URL)
     $r = $r.Replace('{{PIP_INDEX_URL}}',     $PIP_INDEX_URL)
     $r = $r.Replace('{{TRUSTED_HOST}}',      $TRUSTED_HOST)
@@ -109,10 +112,11 @@ function Get-BlockAssignment {
 function Get-AllBlocks {
     (
         '# -- Block content (from shared/blocks/) --',
-        (Get-BlockAssignment 'NPMRC_BLOCK'   (Join-Path $SharedBlocksDir 'npmrc.txt')),
-        (Get-BlockAssignment 'YARNRC_BLOCK'  (Join-Path $SharedBlocksDir 'yarnrc.txt')),
-        (Get-BlockAssignment 'PIP_BLOCK'     (Join-Path $SharedBlocksDir 'pipconf.txt')),
-        (Get-BlockAssignment 'UV_BLOCK'      (Join-Path $SharedBlocksDir 'uvtoml.txt')),
+        (Get-BlockAssignment 'NPMRC_BLOCK'          (Join-Path $SharedBlocksDir 'npmrc.txt')),
+        (Get-BlockAssignment 'YARNRC_CLASSIC_BLOCK' (Join-Path $SharedBlocksDir 'yarnrc_classic.txt')),
+        (Get-BlockAssignment 'YARNRC_BLOCK'         (Join-Path $SharedBlocksDir 'yarnrc.txt')),
+        (Get-BlockAssignment 'PIP_BLOCK'            (Join-Path $SharedBlocksDir 'pipconf.txt')),
+        (Get-BlockAssignment 'UV_BLOCK'             (Join-Path $SharedBlocksDir 'uvtoml.txt')),
         '# --',
         ''
     ) -join "`n"

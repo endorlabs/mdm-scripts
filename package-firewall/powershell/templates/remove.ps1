@@ -6,6 +6,7 @@
 #
 #   JavaScript:
 #     %USERPROFILE%\.npmrc
+#     %USERPROFILE%\.yarnrc
 #     %USERPROFILE%\.yarnrc.yml
 #
 #   Python:
@@ -38,6 +39,7 @@ $_removeVars = @(
     'ENDOR_API_KEY_ID'
     'ENDOR_API_SECRET'
     'ENDOR_AUTH_B64'
+    'ENDOR_API_SECRET_B64'
     'ENDOR_NPM_REGISTRY_URL'
     'ENDOR_PYPI_URL'
     'POETRY_HTTP_BASIC_ENDOR_FIREWALL_USERNAME'
@@ -59,6 +61,7 @@ Write-Host ''
 Write-Host '[endor-remove] -- JavaScript ---------------------------------------------'
 
 Invoke-RemoveBlock -FilePath (Join-Path $UserHome '.npmrc')      -DryRun:$DryRun
+Invoke-RemoveBlock -FilePath (Join-Path $UserHome '.yarnrc')     -DryRun:$DryRun
 Invoke-RemoveBlock -FilePath (Join-Path $UserHome '.yarnrc.yml') -DryRun:$DryRun
 Write-Host ''
 

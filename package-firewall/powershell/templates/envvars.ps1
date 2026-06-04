@@ -16,6 +16,7 @@ $_envVars = [ordered]@{
     'ENDOR_API_KEY_ID'                          = '{{API_KEY_ID}}'
     'ENDOR_API_SECRET'                          = '{{API_SECRET}}'
     'ENDOR_AUTH_B64'                            = '{{NPM_AUTH_B64}}'
+    'ENDOR_API_SECRET_B64'                      = '{{API_SECRET_B64}}'
     'ENDOR_NPM_REGISTRY_URL'                    = '{{NPM_REGISTRY_URL}}'
     'ENDOR_PYPI_URL'                            = '{{PIP_INDEX_URL}}'
     'POETRY_HTTP_BASIC_ENDOR_FIREWALL_USERNAME' = '{{API_KEY_ID}}'

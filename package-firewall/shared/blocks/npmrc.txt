@@ -1,3 +1,5 @@
 registry=${ENDOR_NPM_REGISTRY_URL}
 always-auth=true
-//{{ENDOR_NPM_REGISTRY_URL}}:_auth=${ENDOR_AUTH_B64}
+//{{NPM_REGISTRY_HOST}}:_auth=${ENDOR_AUTH_B64}
+//{{NPM_REGISTRY_HOST}}:_username=${ENDOR_API_KEY_ID}
+//{{NPM_REGISTRY_HOST}}:_password=${ENDOR_API_SECRET_B64}

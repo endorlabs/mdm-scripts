@@ -3,15 +3,16 @@
 #
 # Config files written to the console user's home:
 #   ~/.npmrc       covers: npm, pnpm, yarn classic (1.x), bun
+#   ~/.yarnrc      covers: yarn classic (1.x) registry redirect
 #   ~/.yarnrc.yml  covers: yarn 2+ / berry (does NOT read .npmrc for auth)
 #
-# Block content is defined in templates/blocks/npmrc.txt and yarnrc.txt.
+# Block content is defined in shared/blocks/npmrc.txt, yarnrc_classic.txt, yarnrc.txt.
 # ${ENDOR_...} values in those files are env var refs — tools expand them at runtime.
 #
-# Auth note: uses _auth (base64-encoded key:secret) throughout for .npmrc.
+# Auth note: .npmrc uses _auth, _username, _password (base64-encoded key:secret).
 #   _authToken causes 401 for bun. _auth is verified working for all tools above.
 #
-# Yarn classic + .yarnrc alone = FAIL. Yarn classic needs .npmrc for auth — covered here.
+# Yarn classic reads .npmrc for auth and .yarnrc for registry — both written here.
 # bunfig.toml is project-level only; skip for MDM (document separately for devs).
 
 echo ""
@@ -31,7 +32,23 @@ upsert_block \
   "$USER_GROUP"
 
 echo "[endor-js] .npmrc          → $USER_HOME/.npmrc"
-echo "[endor-js]   covers: npm · pnpm · yarn classic · bun"
+echo "[endor-js]   covers: npm · pnpm · yarn classic (auth) · bun"
+
+# ── .yarnrc ───────────────────────────────────────────────────────────────────
+# Covers: yarn classic (1.x) — registry redirect only; auth comes from .npmrc above
+warn_if_key_conflict \
+  "$USER_HOME/.yarnrc" \
+  "^registry " \
+  "registry"
+
+upsert_block \
+  "$USER_HOME/.yarnrc" \
+  "$YARNRC_CLASSIC_BLOCK" \
+  "$CONSOLE_USER" \
+  "$USER_GROUP"
+
+echo "[endor-js] .yarnrc         → $USER_HOME/.yarnrc"
+echo "[endor-js]   covers: yarn classic (1.x)"
 
 # ── .yarnrc.yml ───────────────────────────────────────────────────────────────
 # Covers: yarn 2+ / berry only

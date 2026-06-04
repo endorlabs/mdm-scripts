@@ -6,6 +6,7 @@
 #
 #   JavaScript:
 #     ~/.npmrc
+#     ~/.yarnrc
 #     ~/.yarnrc.yml
 #
 #   Python:
@@ -57,6 +58,7 @@ echo ""
 echo "[endor-remove] ── JavaScript ───────────────────────────────────────────────"
 
 remove_block "$USER_HOME/.npmrc"      "$CONSOLE_USER" "$USER_GROUP"
+remove_block "$USER_HOME/.yarnrc"     "$CONSOLE_USER" "$USER_GROUP"
 remove_block "$USER_HOME/.yarnrc.yml" "$CONSOLE_USER" "$USER_GROUP"
 
 # ── Python config files ───────────────────────────────────────────────────────
