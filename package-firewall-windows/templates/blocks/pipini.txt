@@ -1,3 +1,3 @@
-[endor-firewall]
+[global]
 index-url = {{PIP_INDEX_URL}}
 trusted-host = {{TRUSTED_HOST}}

@@ -74,6 +74,7 @@ substitute() {
     -e "s|{{NPM_AUTH_B64}}|${NPM_AUTH_B64}|g" \
     -e "s|{{PYPI_URL}}|${PYPI_URL}|g" \
     -e "s|{{PIP_INDEX_URL}}|${PIP_INDEX_URL}|g" \
+    -e "s|{{ENDOR_PYPI_URL}}|${PIP_INDEX_URL}|g" \
     -e "s|{{TRUSTED_HOST}}|${TRUSTED_HOST}|g"
 }
 
