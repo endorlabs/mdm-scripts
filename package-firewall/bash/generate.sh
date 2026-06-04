@@ -19,7 +19,7 @@
 #   ENDOR_API_SECRET   Required. API secret  (Basic Auth password)
 #   ENDOR_FQDN         Optional. Base URL (default: https://factory.endorlabs.com)
 #
-# To customise config blocks, edit templates/blocks/*.txt directly.
+# To customise config blocks, edit shared/blocks/*.txt directly.
 # To customise orchestration logic, edit templates/*.sh directly.
 #
 # Output (out/<namespace>/):
@@ -36,7 +36,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/lib"
 TMPL_DIR="$SCRIPT_DIR/templates"
-BLOCKS_DIR="$SCRIPT_DIR/templates/blocks"
+SHARED_BLOCKS_DIR="$SCRIPT_DIR/../shared/blocks"
 
 # ─── Validate required env vars ───────────────────────────────────────────────
 : "${ENDOR_NAMESPACE:?ENDOR_NAMESPACE is required}"
@@ -100,14 +100,15 @@ emit_block_assignment() {
 
 # emit_all_blocks
 # Emits all block variable assignments into the generated script.
-# Edit templates/blocks/*.txt to change what gets written to config files.
+# Edit shared/blocks/*.txt to change shared config content.
+# Edit templates/envsh.txt to change the bash-only env var block.
 emit_all_blocks() {
-  echo "# ── Block content (from templates/blocks/) ───────────────────────────────────"
-  emit_block_assignment "ENVSH_BLOCK"  "$BLOCKS_DIR/envsh.txt"
-  emit_block_assignment "NPMRC_BLOCK"  "$BLOCKS_DIR/npmrc.txt"
-  emit_block_assignment "YARNRC_BLOCK" "$BLOCKS_DIR/yarnrc.txt"
-  emit_block_assignment "PIP_BLOCK"    "$BLOCKS_DIR/pipconf.txt"
-  emit_block_assignment "UV_BLOCK"     "$BLOCKS_DIR/uvtoml.txt"
+  echo "# ── Block content (from shared/blocks/) ─────────────────────────────────────"
+  emit_block_assignment "ENVSH_BLOCK"  "$TMPL_DIR/envsh.txt"
+  emit_block_assignment "NPMRC_BLOCK"  "$SHARED_BLOCKS_DIR/npmrc.txt"
+  emit_block_assignment "YARNRC_BLOCK" "$SHARED_BLOCKS_DIR/yarnrc.txt"
+  emit_block_assignment "PIP_BLOCK"    "$SHARED_BLOCKS_DIR/pipconf.txt"
+  emit_block_assignment "UV_BLOCK"     "$SHARED_BLOCKS_DIR/uvtoml.txt"
   echo "# ─────────────────────────────────────────────────────────────────────────────"
   echo ""
 }
@@ -242,7 +243,8 @@ echo ""
 echo "   All scripts accept --dry-run to preview changes without writing anything."
 echo "   Upload to your MDM tool. Each script is self-contained and idempotent."
 echo ""
-echo "   To customise: edit templates/blocks/*.txt (config content)"
+echo "   To customise: edit shared/blocks/*.txt (shared config content)"
+echo "                 or templates/envsh.txt (bash env var block)"
 echo "                 or templates/*.sh (orchestration logic)"
 echo ""
 echo "   Re-running overwrites the same output directory."

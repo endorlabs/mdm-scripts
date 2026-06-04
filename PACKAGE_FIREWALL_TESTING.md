@@ -157,7 +157,7 @@ Source (endor-firewall): Failed to retrieve metadata at https://factory.endorlab
 | Tool | Config file | Auto-detects pip.conf | Credential method |
 |------|-------------|----------------------|-------------------|
 | pip | `~/.pip/pip.conf` | ✅ Yes | Embedded in URL |
-| uv | `uv.toml` in project dir | ❌ No | Embedded in URL |
+| uv | `~/.config/uv/uv.toml` in home dir | ❌ No | Embedded in URL |
 | poetry | `pyproject.toml` + env vars | ❌ No | Env vars (`POETRY_HTTP_BASIC_*`) |
 
 ## Firewall behavior

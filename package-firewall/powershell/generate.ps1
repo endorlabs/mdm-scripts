@@ -23,7 +23,7 @@
 #   ENDOR_API_SECRET   Required. API secret  (Basic Auth password)
 #   ENDOR_FQDN         Optional. Base URL (default: https://factory.endorlabs.com)
 #
-# To customise config blocks, edit templates/blocks/*.txt directly.
+# To customise config blocks, edit shared/blocks/*.txt directly.
 # To customise orchestration logic, edit templates/*.ps1 directly.
 #
 # Output (out/<namespace>/):
@@ -40,10 +40,10 @@ param()
 
 $ErrorActionPreference = 'Stop'
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$LibDir    = Join-Path $ScriptDir 'lib'
-$TmplDir   = Join-Path $ScriptDir 'templates'
-$BlocksDir = Join-Path $TmplDir 'blocks'
+$ScriptDir       = Split-Path -Parent $MyInvocation.MyCommand.Path
+$LibDir          = Join-Path $ScriptDir 'lib'
+$TmplDir         = Join-Path $ScriptDir 'templates'
+$SharedBlocksDir = Join-Path $ScriptDir '..\shared\blocks'
 
 # -- Validate required env vars ------------------------------------------------
 foreach ($var in @('ENDOR_NAMESPACE', 'ENDOR_API_KEY_ID', 'ENDOR_API_SECRET')) {
@@ -108,11 +108,11 @@ function Get-BlockAssignment {
 
 function Get-AllBlocks {
     (
-        '# -- Block content (from templates/blocks/) --',
-        (Get-BlockAssignment 'NPMRC_BLOCK'   (Join-Path $BlocksDir 'npmrc.txt')),
-        (Get-BlockAssignment 'YARNRC_BLOCK'  (Join-Path $BlocksDir 'yarnrc.txt')),
-        (Get-BlockAssignment 'PIP_BLOCK'     (Join-Path $BlocksDir 'pipini.txt')),
-        (Get-BlockAssignment 'UV_BLOCK'      (Join-Path $BlocksDir 'uvtoml.txt')),
+        '# -- Block content (from shared/blocks/) --',
+        (Get-BlockAssignment 'NPMRC_BLOCK'   (Join-Path $SharedBlocksDir 'npmrc.txt')),
+        (Get-BlockAssignment 'YARNRC_BLOCK'  (Join-Path $SharedBlocksDir 'yarnrc.txt')),
+        (Get-BlockAssignment 'PIP_BLOCK'     (Join-Path $SharedBlocksDir 'pipconf.txt')),
+        (Get-BlockAssignment 'UV_BLOCK'      (Join-Path $SharedBlocksDir 'uvtoml.txt')),
         '# --',
         ''
     ) -join "`n"
@@ -205,7 +205,7 @@ Write-Host ''
 Write-Host '   All scripts accept -DryRun to preview changes without writing anything.'
 Write-Host '   Upload to your MDM tool (Intune). Each script is self-contained and idempotent.'
 Write-Host ''
-Write-Host '   To customise: edit templates/blocks/*.txt (config content)'
+Write-Host '   To customise: edit shared/blocks/*.txt (shared config content)'
 Write-Host '                 or templates/*.ps1 (orchestration logic)'
 Write-Host ''
 Write-Host '   Re-running overwrites the same output directory.'
