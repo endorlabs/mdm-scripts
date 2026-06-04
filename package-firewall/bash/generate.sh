@@ -117,6 +117,7 @@ arg_parsing_block() {
   cat << 'ARGBLOCK'
 # ── Argument parsing ──────────────────────────────────────────────────────────
 DRY_RUN=0
+_ENDOR_WARNED=0
 for _arg in "$@"; do
   case "$_arg" in
     --dry-run) DRY_RUN=1 ;;
@@ -126,6 +127,17 @@ done
 unset _arg
 [[ "$DRY_RUN" == "1" ]] && echo "[endor] DRY RUN — no files will be modified."
 ARGBLOCK
+}
+
+script_footer() {
+  cat << 'FOOTERBLOCK'
+# ── Exit non-zero if any warnings were emitted (MDM alert hook) ───────────────
+if [[ "$_ENDOR_WARNED" -eq 1 ]]; then
+  echo "" >&2
+  echo "[endor] Script completed with warnings — review output above." >&2
+  exit 1
+fi
+FOOTERBLOCK
 }
 
 user_detection_block() {
@@ -174,6 +186,8 @@ build_script() {
     substitute < "$TMPL_DIR/envsh.sh"
     echo ""
     substitute < "$template"
+    echo ""
+    script_footer
   } > "$output"
 
   chmod 700 "$output"
@@ -228,6 +242,8 @@ build_remove_script "$OUT_DIR/endor-remove.sh"
   echo ""
   echo "echo \"\""
   echo "echo \"[endor] ✓ All package managers configured for ${ENDOR_NAMESPACE}.\""
+  echo ""
+  script_footer
 } > "$OUT_DIR/endor-all.sh"
 chmod 700 "$OUT_DIR/endor-all.sh"
 

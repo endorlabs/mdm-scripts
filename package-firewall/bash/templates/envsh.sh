@@ -44,6 +44,7 @@ if [[ $_PROFILE_UPDATED -eq 0 ]]; then
   echo "[endor] WARNING: no shell profile found (.zshrc / .bash_profile / .bashrc)." >&2
   echo "[endor]   Add this line manually to your shell profile:" >&2
   echo "[endor]     [ -f \"\$HOME/.config/endor/env.sh\" ] && source \"\$HOME/.config/endor/env.sh\"" >&2
+  _ENDOR_WARNED=1
 fi
 
 unset _profile _PROFILE_UPDATED

@@ -190,5 +190,6 @@ warn_if_key_conflict() {
   if awk "/$pattern/" "$file" 2>/dev/null | grep -q .; then
     echo "[endor] WARNING: existing '${label}' found in ${file}." >&2
     echo "[endor]          Endor block will be appended — verify key precedence with your tool." >&2
+    _ENDOR_WARNED=1
   fi
 }
