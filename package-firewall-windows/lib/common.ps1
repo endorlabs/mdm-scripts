@@ -6,6 +6,8 @@
 #   Get-ConsoleUser                              — finds the logged-in user when running as SYSTEM
 #   Set-UserEnvVar        <name> <value> <sid>   — writes persistent HKCU env var via user SID
 #   Remove-UserEnvVar     <name> <sid>           — removes HKCU env var
+#   Set-ProfileEnvBlock   <profilepath> <vars>   — upserts env var block into PowerShell profile
+#   Remove-ProfileEnvBlock <profilepath>         — removes env var block from PowerShell profile
 #   Set-FileRestrictedAcl <path> <username>      — restricts file to owner only
 #   Invoke-UpsertBlock    <path> <content> ...   — idempotent sentinel-block writer
 #   Invoke-RemoveBlock    <path> ...             — strips Endor sentinel block from a file
@@ -105,6 +107,83 @@ function Remove-UserEnvVar {
     $regPath = "Registry::HKEY_USERS\$UserSID\Environment"
     if (Test-Path $regPath) {
         Remove-ItemProperty -Path $regPath -Name $Name -ErrorAction SilentlyContinue
+    }
+}
+
+# Set-ProfileEnvBlock <profilepath> <hashtable of name=value>
+# Upserts a sentinel-guarded block of $env:VAR = 'value' assignments into the
+# PowerShell profile so env vars are available in every new PS session immediately,
+# without requiring a full logout/login cycle (unlike HKCU:\Environment).
+function Set-ProfileEnvBlock {
+    param([string]$ProfilePath, [hashtable]$Vars, [switch]$DryRun)
+
+    $lines = $Vars.GetEnumerator() | ForEach-Object {
+        "`$env:$($_.Key) = '$($_.Value)'"
+    }
+    $block = ($lines -join "`n")
+
+    if ($DryRun) {
+        Write-Host "[dry-run]   Set-ProfileEnvBlock : $ProfilePath"
+        $lines | ForEach-Object { Write-Host "[dry-run]     $_" }
+        return
+    }
+
+    $profileDir = Split-Path $ProfilePath
+    if ($profileDir -and -not (Test-Path $profileDir)) {
+        New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+    }
+    if (-not (Test-Path $ProfilePath)) {
+        New-Item -ItemType File -Path $ProfilePath -Force | Out-Null
+    }
+
+    $raw      = Get-Content $ProfilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    $hasBlock = $raw -match [regex]::Escape($ENDOR_BLOCK_START)
+
+    if ($hasBlock) {
+        $existing = Get-Content $ProfilePath -Encoding UTF8
+        $inBlock  = $false
+        $kept     = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in $existing) {
+            if ($line -eq $ENDOR_BLOCK_START) { $inBlock = $true;  continue }
+            if ($line -eq $ENDOR_BLOCK_END)   { $inBlock = $false; continue }
+            if (-not $inBlock) { $kept.Add($line) }
+        }
+        Set-Content -Path $ProfilePath -Value $kept -Encoding UTF8
+    }
+
+    $entry = "`n$ENDOR_BLOCK_START`n$block`n$ENDOR_BLOCK_END"
+    Add-Content -Path $ProfilePath -Value $entry -Encoding UTF8 -NoNewline
+}
+
+# Remove-ProfileEnvBlock <profilepath>
+# Strips the Endor sentinel block from the PowerShell profile.
+function Remove-ProfileEnvBlock {
+    param([string]$ProfilePath, [switch]$DryRun)
+
+    if (-not (Test-Path $ProfilePath)) { return }
+    $raw = Get-Content $ProfilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    if (-not ($raw -match [regex]::Escape($ENDOR_BLOCK_START))) { return }
+
+    $lines    = Get-Content $ProfilePath -Encoding UTF8
+    $inBlock  = $false
+    $kept     = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in $lines) {
+        if ($line -eq $ENDOR_BLOCK_START) { $inBlock = $true;  continue }
+        if ($line -eq $ENDOR_BLOCK_END)   { $inBlock = $false; continue }
+        if (-not $inBlock) { $kept.Add($line) }
+    }
+
+    $remaining = ($kept -join '') -replace '\s', ''
+
+    if ($DryRun) {
+        Write-Host "[dry-run]   Remove-ProfileEnvBlock : $ProfilePath"
+        return
+    }
+
+    if (-not $remaining) {
+        Remove-Item $ProfilePath -Force
+    } else {
+        Set-Content -Path $ProfilePath -Value $kept -Encoding UTF8
     }
 }
 

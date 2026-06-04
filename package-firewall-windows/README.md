@@ -55,9 +55,9 @@ ENDOR_API_SECRET=your-key-secret
 ```
 
 ```powershell
-Get-Content .env | ForEach-Object {
+Get-Content .env | Where-Object { $_ -match '^\s*[^#\s]' } | ForEach-Object {
     $k, $v = $_ -split '=', 2
-    [System.Environment]::SetEnvironmentVariable($k, $v)
+    [System.Environment]::SetEnvironmentVariable($k.Trim(), $v.Trim())
 }
 ./generate.ps1
 ```

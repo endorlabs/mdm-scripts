@@ -191,7 +191,7 @@ $_allParts = @(
     "Write-Host '[endor] [done] All package managers configured for $ENDOR_NAMESPACE.'"
 )
 Set-Content -Path (Join-Path $OutDir $_allName) -Value ($_allParts -join "`n") -Encoding UTF8
-Remove-Variable _allName _allParts
+Remove-Variable -Name _allName, _allParts
 
 # -- Summary -------------------------------------------------------------------
 Write-Host ''
