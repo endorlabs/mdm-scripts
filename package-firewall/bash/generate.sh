@@ -104,7 +104,7 @@ emit_block_assignment() {
 # Edit templates/envsh.txt to change the bash-only env var block.
 emit_all_blocks() {
   echo "# ── Block content (from shared/blocks/) ─────────────────────────────────────"
-  emit_block_assignment "ENVSH_BLOCK"  "$TMPL_DIR/envsh.txt"
+  emit_block_assignment "ENVSH_BLOCK"  "$SHARED_BLOCKS_DIR/envsh.txt"
   emit_block_assignment "NPMRC_BLOCK"  "$SHARED_BLOCKS_DIR/npmrc.txt"
   emit_block_assignment "YARNRC_BLOCK" "$SHARED_BLOCKS_DIR/yarnrc.txt"
   emit_block_assignment "PIP_BLOCK"    "$SHARED_BLOCKS_DIR/pipconf.txt"
