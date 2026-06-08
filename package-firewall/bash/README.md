@@ -7,27 +7,29 @@ Generates self-contained shell scripts for IT admins to push via MDM (Kandji, Ja
 ## Directory layout
 
 ```
-endor-package-firewall/
+bash/
 ├── generate.sh
 ├── lib/
 │   └── common.sh
 ├── templates/
-│   ├── blocks/              ← edit these to customise what gets written to config files
-│   │   ├── envsh.txt        ← ~/.config/endor/env.sh content
-│   │   ├── npmrc.txt        ← ~/.npmrc content
-│   │   ├── yarnrc.txt       ← ~/.yarnrc.yml content
-│   │   ├── pipconf.txt      ← pip.conf content
-│   │   └── uvtoml.txt       ← ~/.config/uv/uv.toml content
 │   ├── envsh.sh             ← orchestration: writes env.sh, sources from shell profiles
 │   ├── js.sh                ← orchestration: npm / yarn config file writes
 │   ├── python.sh            ← orchestration: pip / uv config file writes
 │   └── remove.sh            ← orchestration: sentinel block removal
 └── out/                     ← generated scripts (gitignore this)
-    └── my-team/
+    └── <namespace>/
         ├── endor-js.sh
         ├── endor-python.sh
         ├── endor-all.sh
         └── endor-remove.sh
+
+../shared/blocks/            ← edit these to customise what gets written to config files
+├── envsh.txt                ← ~/.config/endor/env.sh content
+├── npmrc.txt                ← ~/.npmrc content
+├── yarnrc_classic.txt       ← ~/.yarnrc (yarn 1.x) content
+├── yarnrc.txt               ← ~/.yarnrc.yml (yarn 2+) content
+├── pipconf.txt              ← pip.conf content
+└── uvtoml.txt               ← ~/.config/uv/uv.toml content
 ```
 
 ---
@@ -170,15 +172,16 @@ Key behaviour:
 
 ## Customising
 
-To change what gets written to a config file on target machines, edit the relevant file in `templates/blocks/` directly:
+To change what gets written to a config file on target machines, edit the relevant file in `../shared/blocks/` directly:
 
 | File | Written to |
 |---|---|
-| `templates/blocks/npmrc.txt` | `~/.npmrc` |
-| `templates/blocks/yarnrc.txt` | `~/.yarnrc.yml` |
-| `templates/blocks/pipconf.txt` | `~/.pip/pip.conf`, `~/.config/pip/pip.conf`, `~/Library/Application Support/pip/pip.conf` |
-| `templates/blocks/uvtoml.txt` | `~/.config/uv/uv.toml` |
-| `templates/blocks/envsh.txt` | `~/.config/endor/env.sh` |
+| `../shared/blocks/envsh.txt` | `~/.config/endor/env.sh` |
+| `../shared/blocks/npmrc.txt` | `~/.npmrc` |
+| `../shared/blocks/yarnrc_classic.txt` | `~/.yarnrc` (yarn 1.x) |
+| `../shared/blocks/yarnrc.txt` | `~/.yarnrc.yml` (yarn 2+) |
+| `../shared/blocks/pipconf.txt` | `~/.pip/pip.conf`, `~/.config/pip/pip.conf`, `~/Library/Application Support/pip/pip.conf` |
+| `../shared/blocks/uvtoml.txt` | `~/.config/uv/uv.toml` |
 
 To change orchestration logic (which files get written, in what order, with what warnings), edit the relevant `templates/*.sh` file directly.
 

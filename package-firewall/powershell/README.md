@@ -7,27 +7,29 @@ Generates self-contained PowerShell scripts for IT admins to push via MDM (Intun
 ## Directory layout
 
 ```
-package-firewall-windows/
+powershell/
 ├── generate.ps1
 ├── lib/
 │   └── common.ps1
 ├── templates/
-│   ├── blocks/              ← edit these to customise what gets written to config files
-│   │   ├── npmrc.txt        ← %USERPROFILE%\.npmrc content
-│   │   ├── yarnrc.txt       ← %USERPROFILE%\.yarnrc.yml content
-│   │   ├── pipini.txt       ← %APPDATA%\pip\pip.ini content
-│   │   └── uvtoml.txt       ← %APPDATA%\uv\uv.toml content
 │   ├── script-header.ps1    ← generated script preamble (user detection, arg parsing)
 │   ├── envvars.ps1          ← orchestration: writes persistent env vars to HKCU registry
 │   ├── js.ps1               ← orchestration: npm / yarn config file writes
 │   ├── python.ps1           ← orchestration: pip / uv config file writes
 │   └── remove.ps1           ← orchestration: sentinel block + registry env var removal
 └── out/                     ← generated scripts (gitignore this)
-    └── my-team/
+    └── <namespace>/
         ├── endor-js.ps1
         ├── endor-python.ps1
         ├── endor-all.ps1
         └── endor-remove.ps1
+
+../shared/blocks/            ← edit these to customise what gets written to config files
+├── npmrc.txt                ← %USERPROFILE%\.npmrc content
+├── yarnrc_classic.txt       ← %USERPROFILE%\.yarnrc (yarn 1.x) content
+├── yarnrc.txt               ← %USERPROFILE%\.yarnrc.yml (yarn 2+) content
+├── pipconf.txt              ← %APPDATA%\pip\pip.ini content
+└── uvtoml.txt               ← %APPDATA%\uv\uv.toml content
 ```
 
 ---
@@ -163,14 +165,15 @@ Poetry credentials (`POETRY_HTTP_BASIC_ENDOR_FIREWALL_*`) are written to the reg
 
 ## Customising
 
-To change what gets written to a config file on target machines, edit the relevant file in `templates/blocks/` directly:
+To change what gets written to a config file on target machines, edit the relevant file in `../shared/blocks/` directly:
 
 | File | Written to |
 |---|---|
-| `templates/blocks/npmrc.txt` | `%USERPROFILE%\.npmrc` |
-| `templates/blocks/yarnrc.txt` | `%USERPROFILE%\.yarnrc.yml` |
-| `templates/blocks/pipini.txt` | `%APPDATA%\pip\pip.ini` |
-| `templates/blocks/uvtoml.txt` | `%APPDATA%\uv\uv.toml` |
+| `../shared/blocks/npmrc.txt` | `%USERPROFILE%\.npmrc` |
+| `../shared/blocks/yarnrc_classic.txt` | `%USERPROFILE%\.yarnrc` (yarn 1.x) |
+| `../shared/blocks/yarnrc.txt` | `%USERPROFILE%\.yarnrc.yml` (yarn 2+) |
+| `../shared/blocks/pipconf.txt` | `%APPDATA%\pip\pip.ini` |
+| `../shared/blocks/uvtoml.txt` | `%APPDATA%\uv\uv.toml` |
 
 To change orchestration logic (which files get written, in what order), edit the relevant `templates/*.ps1` file directly.
 
