@@ -4,7 +4,7 @@ Scripts and generators for deploying Endor Labs configuration via MDM.
 
 ---
 
-## Contents
+## Contents of this repo
 
 ### [`package-firewall/`](package-firewall/README.md)
 
