@@ -25,6 +25,7 @@
 # Output (out/<namespace>/):
 #   endor-js.sh       — JavaScript: npm · pnpm · yarn classic · yarn 2+ · bun
 #   endor-python.sh   — Python:     pip · uv · poetry
+#   endor-go.sh       — Go:         go modules (GOPROXY → ~/.config/go/env)
 #   endor-all.sh      — All of the above (single-script MDM deploy)
 #   endor-remove.sh   — Offboarding: strips Endor config from all files
 #
@@ -59,6 +60,8 @@ API_SECRET_B64=$(printf '%s' "${ENDOR_API_SECRET}" | base64 | tr -d '\n')
 PYPI_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/pypi/simple/"
 PIP_INDEX_URL="https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/pypi/simple/"
 
+GO_PROXY_URL="https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/go/,direct"
+
 # ─── Output directory ─────────────────────────────────────────────────────────
 OUT_DIR="${SCRIPT_DIR}/out/${ENDOR_NAMESPACE}"
 mkdir -p "$OUT_DIR"
@@ -77,7 +80,8 @@ substitute() {
     -e "s|{{PYPI_URL}}|${PYPI_URL}|g" \
     -e "s|{{PIP_INDEX_URL}}|${PIP_INDEX_URL}|g" \
     -e "s|{{ENDOR_PYPI_URL}}|${PIP_INDEX_URL}|g" \
-    -e "s|{{TRUSTED_HOST}}|${TRUSTED_HOST}|g"
+    -e "s|{{TRUSTED_HOST}}|${TRUSTED_HOST}|g" \
+    -e "s|{{GO_PROXY_URL}}|${GO_PROXY_URL}|g"
 }
 
 # inline_common
@@ -113,6 +117,7 @@ emit_all_blocks() {
   emit_block_assignment "YARNRC_BLOCK"        "$SHARED_BLOCKS_DIR/yarnrc.txt"
   emit_block_assignment "PIP_BLOCK"           "$SHARED_BLOCKS_DIR/pipconf.txt"
   emit_block_assignment "UV_BLOCK"            "$SHARED_BLOCKS_DIR/uvtoml.txt"
+  emit_block_assignment "GO_BLOCK"            "$SHARED_BLOCKS_DIR/goenv.txt"
   echo "# ─────────────────────────────────────────────────────────────────────────────"
   echo ""
 }
@@ -221,13 +226,18 @@ build_script \
   "$OUT_DIR/endor-python.sh" \
   "Configures Python package managers (pip, uv, poetry) for Endor Package Firewall."
 
+build_script \
+  "$TMPL_DIR/go.sh" \
+  "$OUT_DIR/endor-go.sh" \
+  "Configures Go modules (GOPROXY) for Endor Package Firewall."
+
 # ─── Generate remove script ───────────────────────────────────────────────────
 build_remove_script "$OUT_DIR/endor-remove.sh"
 
 # ─── Generate combined all.sh ─────────────────────────────────────────────────
 {
   script_header "$OUT_DIR/endor-all.sh" \
-    "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry"
+    "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry · go"
   emit_all_blocks
   echo "# ════════════════════════════════════════════════════════════════════════════"
   echo "# Env setup"
@@ -244,6 +254,11 @@ build_remove_script "$OUT_DIR/endor-remove.sh"
   echo "# ════════════════════════════════════════════════════════════════════════════"
   substitute < "$TMPL_DIR/python.sh"
   echo ""
+  echo "# ════════════════════════════════════════════════════════════════════════════"
+  echo "# Go"
+  echo "# ════════════════════════════════════════════════════════════════════════════"
+  substitute < "$TMPL_DIR/go.sh"
+  echo ""
   echo "echo \"\""
   echo "echo \"[endor] ✓ All package managers configured for ${ENDOR_NAMESPACE}.\""
   echo ""
@@ -257,6 +272,7 @@ echo "✓  Generated → $OUT_DIR"
 echo ""
 printf "   %-24s  %s\n" "endor-js.sh"     "npm · pnpm · yarn classic · yarn 2+ · bun"
 printf "   %-24s  %s\n" "endor-python.sh" "pip · uv · poetry"
+printf "   %-24s  %s\n" "endor-go.sh"     "go modules (GOPROXY)"
 printf "   %-24s  %s\n" "endor-all.sh"    "all of the above (single-script deploy)"
 printf "   %-24s  %s\n" "endor-remove.sh" "offboarding — strips all Endor config"
 echo ""

@@ -14,6 +14,11 @@
 #     ~/.config/pip/pip.conf
 #     ~/Library/Application Support/pip/pip.conf
 #     ~/.config/uv/uv.toml
+#
+#   Go:
+#     ~/.config/go/env
+#
+#   Shell profiles (env.sh source line):
 #     ~/.zshrc
 #     ~/.bash_profile
 #     ~/.bashrc
@@ -74,6 +79,35 @@ done
 unset pip_conf
 
 remove_block "$USER_HOME/.config/uv/uv.toml" "$CONSOLE_USER" "$USER_GROUP"
+
+# ── Go config file ────────────────────────────────────────────────────────────
+echo ""
+echo "[endor-remove] ── Go ────────────────────────────────────────────────────────────"
+
+# Resolve go env file path the same way the install script does.
+_GO_ENV_FILE=""
+for _go_bin in \
+  /usr/local/go/bin/go \
+  /opt/homebrew/bin/go \
+  /opt/homebrew/opt/go/bin/go \
+  /usr/local/bin/go \
+  /usr/bin/go; do
+  if [[ -x "$_go_bin" ]]; then
+    _GO_ENV_FILE=$(HOME="$USER_HOME" GOENV="" "$_go_bin" env GOENV 2>/dev/null || true)
+    break
+  fi
+done
+if [[ -z "$_GO_ENV_FILE" ]]; then
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    _GO_ENV_FILE="$USER_HOME/Library/Application Support/go/env"
+  else
+    _GO_ENV_FILE="${XDG_CONFIG_HOME:-$USER_HOME/.config}/go/env"
+  fi
+fi
+unset _go_bin
+
+remove_block "$_GO_ENV_FILE" "$CONSOLE_USER" "$USER_GROUP"
+unset _GO_ENV_FILE
 
 echo ""
 if [[ "${DRY_RUN:-0}" == "1" ]]; then

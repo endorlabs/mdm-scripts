@@ -16,11 +16,13 @@ powershell/
 │   ├── envvars.ps1          ← orchestration: writes persistent env vars to HKCU registry
 │   ├── js.ps1               ← orchestration: npm / yarn config file writes
 │   ├── python.ps1           ← orchestration: pip / uv config file writes
+│   ├── go.ps1               ← orchestration: go env file write
 │   └── remove.ps1           ← orchestration: sentinel block + registry env var removal
 └── out/                     ← generated scripts (gitignore this)
     └── <namespace>/
         ├── endor-js.ps1
         ├── endor-python.ps1
+        ├── endor-go.ps1
         ├── endor-all.ps1
         └── endor-remove.ps1
 
@@ -29,7 +31,8 @@ powershell/
 ├── yarnrc_classic.txt       ← %USERPROFILE%\.yarnrc (yarn 1.x) content
 ├── yarnrc.txt               ← %USERPROFILE%\.yarnrc.yml (yarn 2+) content
 ├── pipconf.txt              ← %APPDATA%\pip\pip.ini content
-└── uvtoml.txt               ← %APPDATA%\uv\uv.toml content
+├── uvtoml.txt               ← %APPDATA%\uv\uv.toml content
+└── goenv.txt                ← go env file content  (path resolved via `go env GOENV`)
 ```
 
 ---
@@ -88,7 +91,8 @@ Each script in `out/<namespace>/` is **fully self-contained** — no external fi
 |---|---|
 | `endor-js.ps1` | Team uses JavaScript (npm, pnpm, yarn, bun) only |
 | `endor-python.ps1` | Team uses Python (pip, uv, poetry) only |
-| `endor-all.ps1` | Team uses both — single-script deploy |
+| `endor-go.ps1` | Team uses Go only |
+| `endor-all.ps1` | Team uses multiple ecosystems — single-script deploy |
 
 ### Microsoft Intune
 
@@ -142,6 +146,24 @@ Writes registry env vars and an Endor-managed block to:
 | `%USERPROFILE%\.npmrc` | npm (all), pnpm (8–11.x), yarn classic (1.x), bun | `${ENDOR_AUTH_B64}` env var ref |
 | `%USERPROFILE%\.yarnrc.yml` | yarn 2+ / berry (v3.1+) | `${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}` env var refs |
 
+### `endor-go.ps1`
+
+Writes `ENDOR_GO_PROXY_URL` to `HKCU:\Environment` and an Endor-managed block to:
+
+| File | Covers | Credentials |
+|---|---|---|
+| Go env file (path from `go env GOENV`) | go modules (all versions) | Literal — baked into `GOPROXY` URL at generation time |
+
+Key behaviour:
+- **Path detection**: the script runs `go env GOENV` (with the user's `APPDATA`) to find the correct path — Windows default is `%APPDATA%\go\env`. Falls back to this default if `go` is not installed.
+- **GOPROXY** is set to `https://<key>:<secret>@factory.endorlabs.com/.../firewall/go/,direct` — the `,direct` suffix falls back to the upstream module proxy if a module is not blocked
+- Credentials are baked in at generation time because Go env files do not support env var expansion
+- The go env file is read by all `go` commands regardless of shell or terminal — covers IDE terminals, Makefiles, git hooks, and non-interactive scripts
+- The go env file takes lower precedence than the `GOPROXY` process env var, so project-level overrides (`go env -w` in a workspace) remain possible
+- Sentinel comment lines (`# ...`) are silently skipped by `go env` parsing
+
+---
+
 ### `endor-python.ps1`
 
 Writes registry env vars and an Endor-managed block to:
@@ -174,6 +196,7 @@ To change what gets written to a config file on target machines, edit the releva
 | `../shared/blocks/yarnrc.txt` | `%USERPROFILE%\.yarnrc.yml` (yarn 2+) |
 | `../shared/blocks/pipconf.txt` | `%APPDATA%\pip\pip.ini` |
 | `../shared/blocks/uvtoml.txt` | `%APPDATA%\uv\uv.toml` |
+| `../shared/blocks/goenv.txt` | `%APPDATA%\go\env` |
 
 To change orchestration logic (which files get written, in what order), edit the relevant `templates/*.ps1` file directly.
 

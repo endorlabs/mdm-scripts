@@ -29,6 +29,7 @@
 # Output (out/<namespace>/):
 #   endor-js.ps1       — JavaScript: npm . pnpm . yarn classic · yarn 2+ . bun
 #   endor-python.ps1   — Python:     pip . uv . poetry
+#   endor-go.ps1       — Go:         go modules (GOPROXY -> %APPDATA%\go\env)
 #   endor-all.ps1      — All of the above (single-script MDM deploy)
 #   endor-remove.ps1   — Offboarding: strips Endor config + registry env vars
 #
@@ -74,6 +75,8 @@ Remove-Variable _bytes, _secretBytes
 $PYPI_URL      = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/pypi/simple/"
 $PIP_INDEX_URL = "https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/$ENDOR_NAMESPACE/firewall/pypi/simple/"
 
+$GO_PROXY_URL  = "https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/$ENDOR_NAMESPACE/firewall/go/,direct"
+
 # -- Output directory ----------------------------------------------------------
 $OutDir = Join-Path $ScriptDir "out\$ENDOR_NAMESPACE"
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
@@ -94,6 +97,7 @@ function Invoke-Substitute {
     $r = $r.Replace('{{PYPI_URL}}',          $PYPI_URL)
     $r = $r.Replace('{{PIP_INDEX_URL}}',     $PIP_INDEX_URL)
     $r = $r.Replace('{{TRUSTED_HOST}}',      $TRUSTED_HOST)
+    $r = $r.Replace('{{GO_PROXY_URL}}',      $GO_PROXY_URL)
     $r
 }
 
@@ -117,6 +121,7 @@ function Get-AllBlocks {
         (Get-BlockAssignment 'YARNRC_BLOCK'         (Join-Path $SharedBlocksDir 'yarnrc.txt')),
         (Get-BlockAssignment 'PIP_BLOCK'            (Join-Path $SharedBlocksDir 'pipconf.txt')),
         (Get-BlockAssignment 'UV_BLOCK'             (Join-Path $SharedBlocksDir 'uvtoml.txt')),
+        (Get-BlockAssignment 'GO_BLOCK'             (Join-Path $SharedBlocksDir 'goenv.txt')),
         '# --',
         ''
     ) -join "`n"
@@ -174,13 +179,18 @@ Build-Script `
     (Join-Path $OutDir  'endor-python.ps1') `
     'Configures Python package managers (pip, uv, poetry) for Endor Package Firewall.'
 
+Build-Script `
+    (Join-Path $TmplDir 'go.ps1') `
+    (Join-Path $OutDir  'endor-go.ps1') `
+    'Configures Go modules (GOPROXY) for Endor Package Firewall.'
+
 # -- Generate remove script ----------------------------------------------------
 Build-RemoveScript (Join-Path $OutDir 'endor-remove.ps1')
 
 # -- Generate combined all.ps1 -------------------------------------------------
 $_allName  = 'endor-all.ps1'
 $_allParts = @(
-    (Get-ScriptHeader -ScriptName $_allName -Description 'Configures all package managers for Endor Package Firewall. Covers: npm . pnpm . yarn classic . yarn 2+ . bun . pip . uv . poetry'),
+    (Get-ScriptHeader -ScriptName $_allName -Description 'Configures all package managers for Endor Package Firewall. Covers: npm . pnpm . yarn classic . yarn 2+ . bun . pip . uv . poetry . go'),
     (Get-AllBlocks),
     '# == Env vars setup =====================================================',
     (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'envvars.ps1') -Raw -Encoding UTF8)),
@@ -191,8 +201,11 @@ $_allParts = @(
     '# == Python =============================================================',
     (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'python.ps1') -Raw -Encoding UTF8)),
     '',
+    '# == Go =================================================================',
+    (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'go.ps1') -Raw -Encoding UTF8)),
+    '',
     "Write-Host ''",
-    "Write-Host '[endor] [done] All package managers configured for $ENDOR_NAMESPACE.'"
+    "Write-Host '[endor] [done] All package managers configured for $ENDOR_NAMESPACE (js + python + go).'"
 )
 Set-Content -Path (Join-Path $OutDir $_allName) -Value ($_allParts -join "`n") -Encoding UTF8
 Remove-Variable -Name _allName, _allParts
@@ -203,6 +216,7 @@ Write-Host "OK  Generated -> $OutDir"
 Write-Host ''
 Write-Host ('   {0,-24}  {1}' -f 'endor-js.ps1',     'npm . pnpm . yarn classic . yarn 2+ . bun')
 Write-Host ('   {0,-24}  {1}' -f 'endor-python.ps1', 'pip . uv . poetry')
+Write-Host ('   {0,-24}  {1}' -f 'endor-go.ps1',     'go modules (GOPROXY)')
 Write-Host ('   {0,-24}  {1}' -f 'endor-all.ps1',    'all of the above (single-script deploy)')
 Write-Host ('   {0,-24}  {1}' -f 'endor-remove.ps1', 'offboarding -- strips all Endor config + registry env vars')
 Write-Host ''

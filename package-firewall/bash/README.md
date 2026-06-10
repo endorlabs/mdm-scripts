@@ -15,11 +15,13 @@ bash/
 │   ├── envsh.sh             ← orchestration: writes env.sh, sources from shell profiles
 │   ├── js.sh                ← orchestration: npm / yarn config file writes
 │   ├── python.sh            ← orchestration: pip / uv config file writes
+│   ├── go.sh                ← orchestration: go env file write
 │   └── remove.sh            ← orchestration: sentinel block removal
 └── out/                     ← generated scripts (gitignore this)
     └── <namespace>/
         ├── endor-js.sh
         ├── endor-python.sh
+        ├── endor-go.sh
         ├── endor-all.sh
         └── endor-remove.sh
 
@@ -29,7 +31,8 @@ bash/
 ├── yarnrc_classic.txt       ← ~/.yarnrc (yarn 1.x) content
 ├── yarnrc.txt               ← ~/.yarnrc.yml (yarn 2+) content
 ├── pipconf.txt              ← pip.conf content
-└── uvtoml.txt               ← ~/.config/uv/uv.toml content
+├── uvtoml.txt               ← ~/.config/uv/uv.toml content
+└── goenv.txt                ← go env file content  (path resolved via `go env GOENV`)
 ```
 
 ---
@@ -83,7 +86,8 @@ Each script in `out/<env>-<namespace>/` is **fully self-contained** — no exter
 |---|---|
 | `endor-js.sh` | Team uses JavaScript (npm, pnpm, yarn, bun) only |
 | `endor-python.sh` | Team uses Python (pip, uv, poetry) only |
-| `endor-all.sh` | Team uses both — single-script deploy |
+| `endor-go.sh` | Team uses Go only |
+| `endor-all.sh` | Team uses multiple ecosystems — single-script deploy |
 
 ### Kandji
 
@@ -144,6 +148,24 @@ Key behaviour:
 - Yarn classic needs `.npmrc` for auth (`.yarnrc` alone fails) — covered by `.npmrc` write
 - `bunfig.toml` is project-level and intentionally not written by MDM; document separately for devs who prefer it
 
+### `endor-go.sh`
+
+Writes `~/.config/endor/env.sh` and an Endor-managed block to:
+
+| File | Covers | Credentials |
+|---|---|---|
+| Go env file (path from `go env GOENV`) | go modules (all versions) | Literal — baked into `GOPROXY` URL at generation time |
+
+Key behaviour:
+- **Path detection**: the script runs `go env GOENV` (with the user's `HOME`) to find the correct path — on macOS this is `~/Library/Application Support/go/env`, on Linux `~/.config/go/env`. Falls back to the OS default if `go` is not installed.
+- **GOPROXY** is set to `https://<key>:<secret>@factory.endorlabs.com/.../firewall/go/,direct` — the `,direct` suffix falls back to the upstream module proxy if a module is not blocked
+- Credentials are baked in at generation time because Go env files do not support env var expansion
+- The go env file is read by all `go` commands regardless of shell — covers IDE terminals, Makefiles, git hooks, and non-interactive scripts
+- The go env file takes lower precedence than the `GOPROXY` process env var, so project-level overrides (`go env -w` in a workspace) remain possible
+- Sentinel comment lines (`# ...`) are silently skipped by `go env` parsing
+
+---
+
 ### `endor-python.sh`
 
 Writes `~/.config/endor/env.sh` and an Endor-managed block to:
@@ -182,6 +204,7 @@ To change what gets written to a config file on target machines, edit the releva
 | `../shared/blocks/yarnrc.txt` | `~/.yarnrc.yml` (yarn 2+) |
 | `../shared/blocks/pipconf.txt` | `~/.pip/pip.conf`, `~/.config/pip/pip.conf`, `~/Library/Application Support/pip/pip.conf` |
 | `../shared/blocks/uvtoml.txt` | `~/.config/uv/uv.toml` |
+| `../shared/blocks/goenv.txt` | `~/.config/go/env` |
 
 To change orchestration logic (which files get written, in what order, with what warnings), edit the relevant `templates/*.sh` file directly.
 

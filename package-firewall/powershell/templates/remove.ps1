@@ -13,9 +13,12 @@
 #     %APPDATA%\pip\pip.ini
 #     %APPDATA%\uv\uv.toml
 #
+#   Go:
+#     %APPDATA%\go\env
+#
 # Registry env vars removed:
 #   ENDOR_API_KEY_ID, ENDOR_API_SECRET, ENDOR_AUTH_B64
-#   ENDOR_NPM_REGISTRY_URL, ENDOR_PYPI_URL
+#   ENDOR_NPM_REGISTRY_URL, ENDOR_PYPI_URL, ENDOR_GO_PROXY_URL
 #   POETRY_HTTP_BASIC_ENDOR_FIREWALL_USERNAME/PASSWORD
 #
 # Behaviour:
@@ -42,6 +45,7 @@ $_removeVars = @(
     'ENDOR_API_SECRET_B64'
     'ENDOR_NPM_REGISTRY_URL'
     'ENDOR_PYPI_URL'
+    'ENDOR_GO_PROXY_URL'
     'POETRY_HTTP_BASIC_ENDOR_FIREWALL_USERNAME'
     'POETRY_HTTP_BASIC_ENDOR_FIREWALL_PASSWORD'
 )
@@ -70,6 +74,25 @@ Write-Host '[endor-remove] -- Python -------------------------------------------
 
 Invoke-RemoveBlock -FilePath (Join-Path $AppData 'pip\pip.ini') -DryRun:$DryRun
 Invoke-RemoveBlock -FilePath (Join-Path $AppData 'uv\uv.toml')  -DryRun:$DryRun
+Write-Host ''
+
+# -- Go config file --
+Write-Host '[endor-remove] -- Go -----------------------------------------------------'
+
+# Resolve go env file path the same way the install script does.
+$_goEnvFile = $null
+$_goExe = Get-Command 'go' -ErrorAction SilentlyContinue
+if ($_goExe) {
+    try {
+        $env:APPDATA = $AppData; $env:USERPROFILE = $UserHome; $env:GOENV = ''
+        $_goEnvFile = (& go env GOENV 2>$null) | Select-Object -First 1
+    } catch { $_goEnvFile = $null } finally { Remove-Item Env:\GOENV -ErrorAction SilentlyContinue }
+}
+if (-not $_goEnvFile) { $_goEnvFile = Join-Path $AppData 'go\env' }
+$_goEnvFile = $_goEnvFile.Trim()
+
+Invoke-RemoveBlock -FilePath $_goEnvFile -DryRun:$DryRun
+Remove-Variable _goEnvFile, _goExe
 Write-Host ''
 
 if ($DryRun) {
