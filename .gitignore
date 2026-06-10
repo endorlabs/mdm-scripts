@@ -1,0 +1,4 @@
+package-firewall/out/
+.env
+**/out/
+.DS_Store

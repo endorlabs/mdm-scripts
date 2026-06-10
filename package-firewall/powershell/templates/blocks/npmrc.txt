@@ -1,0 +1,3 @@
+registry=${ENDOR_NPM_REGISTRY_URL}
+always-auth=true
+//{{ENDOR_NPM_REGISTRY_URL}}:_auth=${ENDOR_AUTH_B64}

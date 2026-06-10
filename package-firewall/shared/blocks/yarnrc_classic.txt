@@ -1,0 +1,2 @@
+registry "{{NPM_REGISTRY_URL}}"
+always-auth true
