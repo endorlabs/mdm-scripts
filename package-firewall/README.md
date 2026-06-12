@@ -9,9 +9,10 @@ Scripts are **idempotent** and safe to re-push on MDM check-in cycles.
 ## Platforms
 
 | Directory | Platform |
-|---|---|---|
+|---|---|
 | [`bash/`](bash/README.md) | macOS / Linux  |
-| [`powershell/`](powershell/README.md) | Windows | m
+| [`powershell/`](powershell/README.md) | Windows | 
+
 See each directory's README for generation and deployment instructions.
 
 ---
