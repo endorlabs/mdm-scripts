@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>PayloadDescription</key>
+			<string>Managed settings (env + hooks) for Endor Labs AI governance auditing.</string>
+			<key>PayloadDisplayName</key>
+			<string>Claude Code — Endor AI Governance</string>
+			<key>PayloadEnabled</key>
+			<true/>
+			<key>PayloadIdentifier</key>
+			<string>com.endorlabs.ai-governance.claudecode.settings</string>
+			<key>PayloadType</key>
+			<string>com.anthropic.claudecode</string>
+			<key>PayloadUUID</key>
+			<string>00000000-0000-0000-0000-BBBBBBBBBBBB</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>env</key>
+			<dict>
+				<key>AGENT_HOOK_ENDOR_API</key>
+				<string>https://api.endorlabs.com</string>
+				<key>AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY</key>
+				<string>PEPE</string>
+				<key>AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET</key>
+				<string>PAPA</string>
+				<key>AGENT_HOOK_ENDOR_NAMESPACE</key>
+				<string>spiderman</string>
+				<key>ENDOR_AI_AUDIT_CACHE_ENABLED</key>
+				<string>true</string>
+			</dict>
+			<key>hooks</key>
+			<dict>
+				<key>PostToolUse</key>
+				<array>
+					<dict>
+						<key>hooks</key>
+						<array>
+							<dict>
+								<key>command</key>
+								<string>$HOME/.endorctl/endorctl --api $AGENT_HOOK_ENDOR_API --namespace $AGENT_HOOK_ENDOR_NAMESPACE --api-key $AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY --api-secret $AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET ai-audit claudecode</string>
+								<key>type</key>
+								<string>command</string>
+							</dict>
+						</array>
+						<key>matcher</key>
+						<string>.*</string>
+					</dict>
+				</array>
+				<key>PostToolUseFailure</key>
+				<array>
+					<dict>
+						<key>hooks</key>
+						<array>
+							<dict>
+								<key>command</key>
+								<string>$HOME/.endorctl/endorctl --api $AGENT_HOOK_ENDOR_API --namespace $AGENT_HOOK_ENDOR_NAMESPACE --api-key $AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY --api-secret $AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET ai-audit claudecode</string>
+								<key>type</key>
+								<string>command</string>
+							</dict>
+						</array>
+						<key>matcher</key>
+						<string>.*</string>
+					</dict>
+				</array>
+				<key>PreToolUse</key>
+				<array>
+					<dict>
+						<key>hooks</key>
+						<array>
+							<dict>
+								<key>command</key>
+								<string>$HOME/.endorctl/endorctl --api $AGENT_HOOK_ENDOR_API --namespace $AGENT_HOOK_ENDOR_NAMESPACE --api-key $AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY --api-secret $AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET ai-audit claudecode</string>
+								<key>type</key>
+								<string>command</string>
+							</dict>
+						</array>
+						<key>matcher</key>
+						<string>.*</string>
+					</dict>
+				</array>
+				<key>SessionStart</key>
+				<array>
+					<dict>
+						<key>hooks</key>
+						<array>
+							<dict>
+								<key>command</key>
+								<string>BIN="${HOME}/.endorctl/endorctl"
+skip=
+[ -n "${ENDORCTL_SKIP_UPDATE:-}" ] &amp;&amp; [ -x "$BIN" ] &amp;&amp; skip=1
+if [ -z "$skip" ]; then
+  case "$(uname -s)" in Darwin) os=macos ;; Linux) os=linux ;; *) exit 1 ;; esac
+  case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) exit 1 ;; esac
+  URL="https://api.endorlabs.com/download/latest/endorctl_${os}_${arch}"
+  ARCH_KEY="ARCH_TYPE_$(echo "${os}_${arch}" | tr '[:lower:]' '[:upper:]')"
+  current=$([ -x "$BIN" ] &amp;&amp; "$BIN" --version 2&gt;/dev/null | awk '/version/ {print $NF; exit}')
+  meta=$(curl -fsSL --retry 5 --retry-connrefused --retry-all-errors https://api.endorlabs.com/meta/version)
+  latest=$(echo "$meta" | sed -n 's/.*"ClientVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+  expected_sha=$(echo "$meta" | sed -n "s/.*\"${ARCH_KEY}\"[[:space:]]*:[[:space:]]*\"\([a-f0-9]*\)\".*/\1/p")
+  uptodate=
+  [ -n "$current" ] &amp;&amp; { [ -z "$latest" ] || [ "$current" = "$latest" ]; } &amp;&amp; uptodate=1
+  if [ -z "$uptodate" ]; then
+    DIR=$(dirname "$BIN")
+    mkdir -p "$DIR"
+    # Sweep leftovers from interrupted past runs. Age-gated so a concurrent
+    # session's in-flight download is never deleted; the name cannot match the
+    # installed binary ("endorctl").
+    find "$DIR" -name 'endorctl-download-*' -mmin +60 -delete 2&gt;/dev/null
+    TMP=$(mktemp "$DIR/endorctl-download-XXXXXX") || exit 1
+    curl -fsSL --retry 5 --retry-connrefused --retry-all-errors -o "$TMP" "$URL" || { rm -f "$TMP"; exit 1; }
+    [ ${#expected_sha} -eq 64 ] || { rm -f "$TMP"; exit 1; }
+    case "$expected_sha" in *[!0-9a-f]*) rm -f "$TMP"; exit 1 ;; esac
+    [ "$(shasum -a 256 "$TMP" | awk '{print $1}')" = "$expected_sha" ] || { rm -f "$TMP"; exit 1; }
+    chmod +x "$TMP" || { rm -f "$TMP"; exit 1; }
+    mv "$TMP" "$BIN"
+  fi
+fi
+$HOME/.endorctl/endorctl --api $AGENT_HOOK_ENDOR_API --namespace $AGENT_HOOK_ENDOR_NAMESPACE --api-key $AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY --api-secret $AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET ai-audit claudecode</string>
+								<key>type</key>
+								<string>command</string>
+							</dict>
+						</array>
+					</dict>
+				</array>
+				<key>Stop</key>
+				<array>
+					<dict>
+						<key>hooks</key>
+						<array>
+							<dict>
+								<key>command</key>
+								<string>$HOME/.endorctl/endorctl --api $AGENT_HOOK_ENDOR_API --namespace $AGENT_HOOK_ENDOR_NAMESPACE --api-key $AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY --api-secret $AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET ai-audit claudecode</string>
+								<key>type</key>
+								<string>command</string>
+							</dict>
+						</array>
+					</dict>
+				</array>
+				<key>UserPromptSubmit</key>
+				<array>
+					<dict>
+						<key>hooks</key>
+						<array>
+							<dict>
+								<key>command</key>
+								<string>$HOME/.endorctl/endorctl --api $AGENT_HOOK_ENDOR_API --namespace $AGENT_HOOK_ENDOR_NAMESPACE --api-key $AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY --api-secret $AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET ai-audit claudecode</string>
+								<key>type</key>
+								<string>command</string>
+							</dict>
+						</array>
+					</dict>
+				</array>
+			</dict>
+		</dict>
+	</array>
+	<key>PayloadDescription</key>
+	<string>Deploys managed AI-tool settings for Endor Labs AI auditing.</string>
+	<key>PayloadDisplayName</key>
+	<string>Claude Code — Endor AI Governance</string>
+	<key>PayloadIdentifier</key>
+	<string>com.endorlabs.ai-governance.claudecode</string>
+	<key>PayloadOrganization</key>
+	<string>Endor Labs</string>
+	<key>PayloadScope</key>
+	<string>System</string>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadUUID</key>
+	<string>00000000-0000-0000-0000-AAAAAAAAAAAA</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>
+</dict>
+</plist>

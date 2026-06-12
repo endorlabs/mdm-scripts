@@ -1,0 +1,74 @@
+{
+  "env": {
+    "AGENT_HOOK_ENDOR_API": "https://api.endorlabs.com",
+    "AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY": "PEPE",
+    "AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET": "PAPA",
+    "AGENT_HOOK_ENDOR_NAMESPACE": "spiderman",
+    "ENDOR_AI_AUDIT_CACHE_ENABLED": "true"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "BIN=\"${HOME}/.endorctl/endorctl\"\nskip=\n[ -n \"${ENDORCTL_SKIP_UPDATE:-}\" ] && [ -x \"$BIN\" ] && skip=1\nif [ -z \"$skip\" ]; then\n  case \"$(uname -s)\" in Darwin) os=macos ;; Linux) os=linux ;; *) exit 1 ;; esac\n  case \"$(uname -m)\" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) exit 1 ;; esac\n  URL=\"https://api.endorlabs.com/download/latest/endorctl_${os}_${arch}\"\n  ARCH_KEY=\"ARCH_TYPE_$(echo \"${os}_${arch}\" | tr '[:lower:]' '[:upper:]')\"\n  current=$([ -x \"$BIN\" ] && \"$BIN\" --version 2>/dev/null | awk '/version/ {print $NF; exit}')\n  meta=$(curl -fsSL --retry 5 --retry-connrefused --retry-all-errors https://api.endorlabs.com/meta/version)\n  latest=$(echo \"$meta\" | sed -n 's/.*\"ClientVersion\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p')\n  expected_sha=$(echo \"$meta\" | sed -n \"s/.*\\\"${ARCH_KEY}\\\"[[:space:]]*:[[:space:]]*\\\"\\([a-f0-9]*\\)\\\".*/\\1/p\")\n  uptodate=\n  [ -n \"$current\" ] && { [ -z \"$latest\" ] || [ \"$current\" = \"$latest\" ]; } && uptodate=1\n  if [ -z \"$uptodate\" ]; then\n    DIR=$(dirname \"$BIN\")\n    mkdir -p \"$DIR\"\n    # Sweep leftovers from interrupted past runs. Age-gated so a concurrent\n    # session's in-flight download is never deleted; the name cannot match the\n    # installed binary (\"endorctl\").\n    find \"$DIR\" -name 'endorctl-download-*' -mmin +60 -delete 2>/dev/null\n    TMP=$(mktemp \"$DIR/endorctl-download-XXXXXX\") || exit 1\n    curl -fsSL --retry 5 --retry-connrefused --retry-all-errors -o \"$TMP\" \"$URL\" || { rm -f \"$TMP\"; exit 1; }\n    [ ${#expected_sha} -eq 64 ] || { rm -f \"$TMP\"; exit 1; }\n    case \"$expected_sha\" in *[!0-9a-f]*) rm -f \"$TMP\"; exit 1 ;; esac\n    [ \"$(shasum -a 256 \"$TMP\" | awk '{print $1}')\" = \"$expected_sha\" ] || { rm -f \"$TMP\"; exit 1; }\n    chmod +x \"$TMP\" || { rm -f \"$TMP\"; exit 1; }\n    mv \"$TMP\" \"$BIN\"\n  fi\nfi\n$HOME/.endorctl/endorctl --api $AGENT_HOOK_ENDOR_API --namespace $AGENT_HOOK_ENDOR_NAMESPACE --api-key $AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY --api-secret $AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET ai-audit claudecode"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.endorctl/endorctl --api $AGENT_HOOK_ENDOR_API --namespace $AGENT_HOOK_ENDOR_NAMESPACE --api-key $AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY --api-secret $AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET ai-audit claudecode"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.endorctl/endorctl --api $AGENT_HOOK_ENDOR_API --namespace $AGENT_HOOK_ENDOR_NAMESPACE --api-key $AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY --api-secret $AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET ai-audit claudecode"
+          }
+        ],
+        "matcher": ".*"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.endorctl/endorctl --api $AGENT_HOOK_ENDOR_API --namespace $AGENT_HOOK_ENDOR_NAMESPACE --api-key $AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY --api-secret $AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET ai-audit claudecode"
+          }
+        ],
+        "matcher": ".*"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.endorctl/endorctl --api $AGENT_HOOK_ENDOR_API --namespace $AGENT_HOOK_ENDOR_NAMESPACE --api-key $AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY --api-secret $AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET ai-audit claudecode"
+          }
+        ],
+        "matcher": ".*"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.endorctl/endorctl --api $AGENT_HOOK_ENDOR_API --namespace $AGENT_HOOK_ENDOR_NAMESPACE --api-key $AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY --api-secret $AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET ai-audit claudecode"
+          }
+        ]
+      }
+    ]
+  }
+}
