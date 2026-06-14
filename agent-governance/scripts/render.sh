@@ -38,11 +38,20 @@ DEFAULT_API_URL="https://api.endorlabs.com"
 die() { echo "render.sh: error: $*" >&2; exit 1; }
 command -v jq >/dev/null || die "jq is required (install it, e.g. 'brew install jq')"
 
+# Quote a value for safe interpolation into a command string. Values (creds,
+# --env) may contain spaces, quotes, $, ;, globs — so never inline them raw.
+sq()  { printf '%s' "$1" | jq -Rrs '@sh'; }                    # POSIX single-quoted
+psq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; } # PowerShell single-quoted
+
 # Behavior env vars, newline-separated KEY=VALUE. Cache is on by default;
 # add_env replaces any existing entry for the same key (later flag wins).
 env_lines="ENDOR_AI_AUDIT_CACHE_ENABLED=true"
 add_env() {
+  case "$1" in *=*) ;; *) die "--env must be KEY=VALUE (got: $1)" ;; esac
   _key=${1%%=*}
+  case "$_key" in
+    ''|[0-9]*|*[!A-Za-z0-9_]*) die "--env key must match [A-Za-z_][A-Za-z0-9_]* (got: $_key)" ;;
+  esac
   env_lines=$(printf '%s\n' "$env_lines" | grep -v "^${_key}=" || true)
   env_lines="${env_lines}
 ${1}"
@@ -56,6 +65,10 @@ api_secret="${ENDOR_API_CREDENTIALS_SECRET:-}"
 namespace="${ENDOR_NAMESPACE:-}"
 
 while [ $# -gt 0 ]; do
+  case "$1" in  # flags that take a value must have one (avoids a raw set -u error)
+    --agent|--target-os|-o|--output|--env|--api-url|--api-key|--api-secret|--namespace)
+      [ $# -ge 2 ] || die "$1 requires a value" ;;
+  esac
   case "$1" in
     --agent)                agent="$2"; shift 2 ;;
     --target-os)            target_os="$2"; shift 2 ;;
@@ -110,8 +123,11 @@ prompt_if_tty namespace  "namespace"  plain
 # ps_env_sets: "$env:K = 'V'" lines for the PowerShell Cursor sessionStart.
 env_obj=$(printf '%s\n' "$env_lines" | jq -Rn \
   '[inputs | select(length > 0) | {key: .[:index("=")], value: .[index("=")+1:]}] | from_entries')
-env_prefix=$(printf '%s' "$env_obj" | jq -r 'to_entries | map(.key + "=" + .value + " ") | add // ""')
-ps_env_sets=$(printf '%s' "$env_obj" | jq -r 'to_entries | map("$env:" + .key + " = '\''" + .value + "'\''") | join("\n")')
+env_prefix=$(printf '%s' "$env_obj" | jq -r 'to_entries | map(.key + "=" + (.value|@sh) + " ") | add // ""')
+ps_env_sets=$(printf '%s\n' "$env_lines" | while IFS= read -r kv; do
+  [ -n "$kv" ] || continue
+  printf '$env:%s = %s\n' "${kv%%=*}" "$(psq "${kv#*=}")"
+done)
 
 # Fold the skip toggle into the bootstrap (read at the top of download_endorctl).
 if [ -n "$skip_update" ]; then
@@ -133,9 +149,9 @@ psenc() {
 # non-session hooks read AGENT_HOOK_ENDOR_* that endorctl sets at sessionStart).
 # endorctl's audit subcommand per agent (Claude Code is "claudecode", not "claude").
 case "$agent" in claude) subcmd="claudecode" ;; cursor) subcmd="cursor" ;; esac
-posix_audit='$HOME/.endorctl/endorctl --api $AGENT_HOOK_ENDOR_API --namespace $AGENT_HOOK_ENDOR_NAMESPACE --api-key $AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY --api-secret $AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET ai-audit '"$subcmd"
+posix_audit='"$HOME/.endorctl/endorctl" --api "$AGENT_HOOK_ENDOR_API" --namespace "$AGENT_HOOK_ENDOR_NAMESPACE" --api-key "$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY" --api-secret "$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET" ai-audit '"$subcmd"
 ps_bin='& "$env:USERPROFILE\.endorctl\endorctl.exe"'
-ps_audit="$ps_bin"' --api $env:AGENT_HOOK_ENDOR_API --namespace $env:AGENT_HOOK_ENDOR_NAMESPACE --api-key $env:AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY --api-secret $env:AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET ai-audit '"$subcmd"
+ps_audit="$ps_bin"' --api "$env:AGENT_HOOK_ENDOR_API" --namespace "$env:AGENT_HOOK_ENDOR_NAMESPACE" --api-key "$env:AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY" --api-secret "$env:AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET" ai-audit '"$subcmd"'; exit $LASTEXITCODE'
 
 # --- compose per-hook command strings (session = bootstrap + audit) -----------
 case "$agent:$target_os" in
@@ -144,17 +160,22 @@ case "$agent:$target_os" in
     cmd_session=$(printf '%s\n%s' "$boot" "$posix_audit") ;;
   cursor:macos|cursor:linux)
     cmd_audit="$posix_audit"
-    # Capture stdin first (Cursor closes its pipe quickly), bootstrap, then audit
-    # with inline creds reading the captured stdin.
-    cmd_session=$(printf 'cat > /tmp/cursor-hook-stdin-$$\n%s\n%s$HOME/.endorctl/endorctl --api '\''%s'\'' --namespace '\''%s'\'' --api-key '\''%s'\'' --api-secret '\''%s'\'' ai-audit cursor < /tmp/cursor-hook-stdin-$$\nrm -f /tmp/cursor-hook-stdin-$$' \
-      "$boot" "$env_prefix" "$api_url" "$namespace" "$api_key" "$api_secret") ;;
+    # Capture stdin first (Cursor closes its pipe quickly) into a per-user file,
+    # clean up via trap, and let the audit be the last command so its exit code
+    # (e.g. a block) is the hook's. `umask 077` makes the file born 0600 (no
+    # readable window); `chmod 600` also covers a recycled-PID leftover. The name
+    # is predictable but lives in $HOME, which other users cannot write, so there's
+    # no cross-user symlink race. Only builtins precede `cat` — no subshell, which
+    # Cursor's stdin pipe does not tolerate, so $(mktemp) is intentionally avoided.
+    cmd_session=$(printf 'umask 077\nT="$HOME/.endorctl-cursor-stdin.$$"\ncat > "$T"\nchmod 600 "$T"\ntrap '\''rm -f "$T"'\'' EXIT\n%s\n%s"$HOME/.endorctl/endorctl" --api %s --namespace %s --api-key %s --api-secret %s ai-audit cursor < "$T"' \
+      "$boot" "$env_prefix" "$(sq "$api_url")" "$(sq "$namespace")" "$(sq "$api_key")" "$(sq "$api_secret")") ;;
   claude:windows)
     cmd_audit=$(psenc "$ps_audit")
     cmd_session=$(psenc "$(printf '%s\n%s' "$boot" "$ps_audit")") ;;
   cursor:windows)
     cmd_audit=$(psenc "$ps_audit")
-    cmd_session=$(psenc "$(printf '$in = [Console]::In.ReadToEnd()\n%s\n%s\n$in | %s --api '\''%s'\'' --namespace '\''%s'\'' --api-key '\''%s'\'' --api-secret '\''%s'\'' ai-audit cursor' \
-      "$boot" "$ps_env_sets" "$ps_bin" "$api_url" "$namespace" "$api_key" "$api_secret")") ;;
+    cmd_session=$(psenc "$(printf '$in = [Console]::In.ReadToEnd()\n%s\n%s\n$in | %s --api %s --namespace %s --api-key %s --api-secret %s ai-audit cursor; exit $LASTEXITCODE' \
+      "$boot" "$ps_env_sets" "$ps_bin" "$(psq "$api_url")" "$(psq "$namespace")" "$(psq "$api_key")" "$(psq "$api_secret")")") ;;
 esac
 
 # --- build (jq is pure structure; commands are injected) ----------------------

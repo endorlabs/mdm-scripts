@@ -41,13 +41,20 @@ This is the JumpCloud equivalent of a Jamf recurring policy / Kandji schedule.
    Bash/Shell. Body — export creds and run the runner from a cloned repo:
    ```sh
    #!/bin/sh
-   export ENDOR_API_CREDENTIALS_KEY="…" ENDOR_API_CREDENTIALS_SECRET="…" ENDOR_NAMESPACE="…"
-   REPO="${TMPDIR:-/tmp}/mdm-scripts"
-   [ -d "$REPO/.git" ] && git -C "$REPO" pull --ff-only \
-     || git clone --depth 1 https://github.com/endorlabs/mdm-scripts "$REPO"
-   sh "$REPO/agent-governance/scripts/runner.sh" --agent cursor    # or: --agent claude (Linux)
+   set -eu
+   export ENDOR_API_CREDENTIALS_KEY='…' ENDOR_API_CREDENTIALS_SECRET='…' ENDOR_NAMESPACE='…'
+   # This runs as root, so clone to a root-owned protected path — never /tmp, where
+   # a local user could pre-create the dir and get root to run their code.
+   case "$(uname -s)" in
+     Darwin) REPO="/Library/Application Support/EndorAIGovernance/repo" ;;
+     *)      REPO="/var/lib/endor-ai-governance/repo" ;;
+   esac
+   mkdir -p "$(dirname "$REPO")"
+   [ -d "$REPO/.git" ] || git clone --depth 1 https://github.com/endorlabs/mdm-scripts "$REPO"
+   exec sh "$REPO/agent-governance/scripts/runner.sh" --agent cursor    # or: --agent claude (Linux)
    ```
-   (Endpoint needs `git` + `jq`. Commands run as root, so the system paths are writable.)
+   **Single-quote** the hard-coded values so a `"`, `$`, or backtick can't break the
+   assignment (escape any literal single quote as `'\''`). Endpoint needs `git` + `jq`.
 2. Set the launch type to **Run as Repeating** (e.g. hourly) so credential/flag and
    repo changes flow automatically — the runner re-renders and swaps only on change.
 3. Scope to a Device Group.

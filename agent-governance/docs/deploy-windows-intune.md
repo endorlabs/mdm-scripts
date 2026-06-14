@@ -56,9 +56,14 @@ Use a **Platform script** (Devices → Scripts → Add → Windows 10 and later)
 above. A minimal platform-script body (with the generated JSON embedded or fetched):
 
 ```powershell
-$dest = "$env:ProgramData\Cursor\hooks.json"          # or the Claude path
+$dest = "$env:ProgramData\Cursor\hooks.json"   # or C:\Program Files\ClaudeCode\managed-settings.json
+# Paste the generated config between the single-quoted here-string markers. Single
+# quotes (@'  '@) keep it literal so PowerShell doesn't interpret $ / quotes in it.
+$json = @'
+<paste the contents of the generated cursor-hooks.json / managed-settings.json here>
+'@
 New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
-Set-Content -Path $dest -Value $json -Encoding UTF8    # $json = the generated config
+Set-Content -Path $dest -Value $json -Encoding UTF8
 ```
 
 Scope it to the target device/user groups.

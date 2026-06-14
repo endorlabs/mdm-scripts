@@ -21,7 +21,7 @@ The repo ships **both** delivery styles, and they coexist — a laptop can have 
 
 The table above is the macOS picture. **Windows** has no `.mobileconfig` — both agents read a plain JSON config that you pre-generate (`--target-os windows`) and push with **Intune**; see [docs/deploy-windows-intune.md](docs/deploy-windows-intune.md). On Windows the hook command is a self-contained `powershell -NoProfile -EncodedCommand …` (the encoded [`download_endorctl.ps1`](scripts/download_endorctl.ps1) + audit), so it runs regardless of how the agent launches hooks.
 
-**Linux** uses the same file-based delivery — Cursor at `/etc/cursor/hooks.json`, Claude at `/etc/claude-code/managed-settings.json` — via `runner.sh` or your config management. **JumpCloud** (any of the three OSes) is covered in [docs/deploy-jumpcloud.md](docs/deploy-jumpcloud.md). The full OS × MDM matrix is in [docs/support-matrix.md](docs/support-matrix.md).
+**Linux** uses the same file-based delivery — Cursor at `/etc/cursor/hooks.json`, Claude at `/etc/claude-code/managed-settings.json` — via `runner.sh` or your config management (Ansible/Chef/etc.). **JumpCloud** (any of the three OSes) is covered in [docs/deploy-jumpcloud.md](docs/deploy-jumpcloud.md). Not using MDM at all? See [manual & enterprise install](docs/deploy-manual-enterprise.md). The full OS × mechanism matrix is in [docs/support-matrix.md](docs/support-matrix.md).
 
 `endorctl` itself is not delivered per tool — the generated config's session hook installs and keeps it current via [`download_endorctl.sh`](scripts/download_endorctl.sh) (SHA-256 verified). **Codex is not supported yet** (see [Not yet supported](#not-yet-supported)).
 
@@ -31,7 +31,7 @@ Each script depends only on tools standard to its environment. The endpoint path
 
 | Script | Runs on | Requires |
 | --- | --- | --- |
-| [`download_endorctl.sh`](scripts/download_endorctl.sh) | developer laptop (inlined into the session hook) | POSIX `sh` + `curl` (plus `awk`/`sed`/`shasum`/`uname`/`mktemp`/`tr` — all standard on macOS & Linux) |
+| [`download_endorctl.sh`](scripts/download_endorctl.sh) | developer laptop (inlined into the session hook) | POSIX `sh` + `curl` (plus `awk`/`sed`/`uname`/`mktemp`/`tr` and `sha256sum` or `shasum` — all standard on macOS & Linux) |
 | [`download_endorctl.ps1`](scripts/download_endorctl.ps1) | Windows developer laptop (encoded into the session hook) | Windows PowerShell 5.1 (built in) |
 | [`scripts/render.sh`](scripts/render.sh) | admin machine (macOS/Linux, or Windows via Git Bash/WSL), or laptop via the runner | `jq`; for `--target-os windows` also `iconv` + `base64` |
 | [`scripts/render-plist.sh`](scripts/render-plist.sh) | admin machine (macOS) | `jq`, `plutil` (macOS) |
@@ -119,7 +119,7 @@ scripts/
 examples/                             checked-in samples (demo creds, placeholder UUIDs)
   claude/{settings.json, settings.windows.json, com.anthropic.claudecode.mobileconfig}
   cursor/{hooks.json, hooks.windows.json}
-docs/                                 deployment runbooks (Jamf/Kandji, the runner, Windows/Intune, JumpCloud) + support-matrix.md
+docs/                                 runbooks (manual/enterprise, Jamf/Kandji, the runner, Windows/Intune, JumpCloud) + support-matrix.md
 ```
 
 ### Examples
@@ -135,5 +135,9 @@ A checked-in sample per output shape lives under `examples/`, generated with dem
 | JSON (encoded PowerShell hook) | Cursor | `examples/cursor/hooks.windows.json` |
 
 `settings.json` is the same JSON Claude reads as the Linux `/etc/claude-code/managed-settings.json` and as the inner payload of the macOS `.mobileconfig` — so there's no separate Linux example, and JumpCloud reuses these same files. Only the **Windows** examples differ (the hook is the encoded `powershell` form). Monitor-only isn't a separate sample — it's any of these plus `--env ENDOR_AI_AUDIT_NO_BLOCKING=true`.
+
+After changing a script, regenerate the affected examples so they stay in sync (the commands are in this section).
+
+Credentials and `--env` values are quoted robustly — values containing spaces, single quotes, `$`, `;`, `*`, or `"` are escaped for the shell (POSIX, via `@sh`), PowerShell (single-quote doubling), and JSON (`jq`). `$VAR` references in the generated commands are quoted too, so values never word-split or glob at hook runtime.
 
 To add a new agent: add a `build_<agent>` jq builder and a `case` arm in `scripts/render.sh` (and a default `--dest` in `scripts/runner.sh` if it is script-delivered).

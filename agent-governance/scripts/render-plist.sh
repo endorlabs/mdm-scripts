@@ -32,6 +32,10 @@ identifier=""; profile_identifier=""; organization=""
 payload_type="com.anthropic.claudecode"; name="Endor AI Governance"
 profile_uuid=""; content_uuid=""; output="-"
 while [ $# -gt 0 ]; do
+  case "$1" in  # every flag here takes a value; require one (avoids a raw set -u error)
+    -h|--help) ;;
+    -*) [ $# -ge 2 ] || die "$1 requires a value" ;;
+  esac
   case "$1" in
     --identifier)         identifier="$2"; shift 2 ;;
     --profile-identifier) profile_identifier="$2"; shift 2 ;;

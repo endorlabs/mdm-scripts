@@ -11,8 +11,8 @@
 #
 # Credentials are read from the environment by render.sh (see its header):
 #   ENDOR_API_CREDENTIALS_KEY / ENDOR_API_CREDENTIALS_SECRET / ENDOR_NAMESPACE
-# Kandji exports script secrets as env vars, so it needs nothing more. Jamf
-# reserves $1-$3, so a Jamf wrapper exports them from $4-$6 first.
+# The MDM script exports them before invoking this runner — Jamf from its $4-$6
+# parameters, Kandji/JumpCloud hard-coded in the script (see docs/).
 #
 # Extra args pass straight through to render.sh, e.g. monitor-only:
 #   runner.sh --agent cursor --env ENDOR_AI_AUDIT_NO_BLOCKING=true
@@ -29,11 +29,14 @@ case "$os" in
   *)      REPO="/var/lib/endor-ai-governance/repo" ;;
 esac
 
-[ "${1:-}" = "--agent" ] || { echo "usage: runner.sh --agent <name> [--dest <path>] [render args...]" >&2; exit 2; }
+{ [ "${1:-}" = "--agent" ] && [ $# -ge 2 ]; } || { echo "usage: runner.sh --agent <name> [--dest <path>] [render args...]" >&2; exit 2; }
 agent="$2"; shift 2
 
 dest=""
-if [ "${1:-}" = "--dest" ]; then dest="$2"; shift 2; fi
+if [ "${1:-}" = "--dest" ]; then
+  [ $# -ge 2 ] || { echo "runner.sh: --dest requires a value" >&2; exit 2; }
+  dest="$2"; shift 2
+fi
 
 # Default install location per (agent, OS); override with --dest. Add new here.
 # (macOS Claude is normally profile-delivered — see docs/deploy-claude-profile.md —

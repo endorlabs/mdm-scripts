@@ -23,7 +23,8 @@ if [ -z "$skip" ]; then
     curl -fsSL --retry 5 --retry-connrefused --retry-all-errors -o "$TMP" "$URL" || { rm -f "$TMP"; exit 1; }
     [ ${#expected_sha} -eq 64 ] || { rm -f "$TMP"; exit 1; }
     case "$expected_sha" in *[!0-9a-f]*) rm -f "$TMP"; exit 1 ;; esac
-    [ "$(shasum -a 256 "$TMP" | awk '{print $1}')" = "$expected_sha" ] || { rm -f "$TMP"; exit 1; }
+    if command -v sha256sum >/dev/null 2>&1; then sum=$(sha256sum "$TMP" | awk '{print $1}'); else sum=$(shasum -a 256 "$TMP" | awk '{print $1}'); fi
+    [ "$sum" = "$expected_sha" ] || { rm -f "$TMP"; exit 1; }
     chmod +x "$TMP" || { rm -f "$TMP"; exit 1; }
     mv "$TMP" "$BIN"
   fi
