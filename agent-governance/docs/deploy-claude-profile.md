@@ -1,19 +1,12 @@
-# Deploy Claude Code via MDM Custom Profile
+# Deploy Claude Code via an MDM profile (macOS)
 
-Claude Code reads managed settings from a Configuration Profile payload of type
-`com.anthropic.claudecode`. This path is **tamper-resistant** — the profile is a
-managed setting enforced by the operating system — and nothing extra runs on the
-laptop. The tradeoff is that an update means regenerating the profile and
-re-uploading it (see [Updating](#updating)).
+This is the recommended path for Claude Code on macOS. Claude reads managed settings from a Configuration Profile payload of type `com.anthropic.claudecode`, so a profile is **tamper-resistant** — the OS enforces it, and nothing extra runs on the laptop. The one tradeoff: an update means regenerating the profile and re-uploading it.
+
+You'll generate a `.mobileconfig` on an admin Mac (you need `jq` and `plutil`), then upload it through Jamf or Kandji.
 
 ## 1. Generate the profile
 
-Run the generator with the customer's credentials. Use an **audit-only /
-least-privilege** API credential — the key and secret are embedded in the profile
-and delivered to every laptop.
-
-`render.sh` builds the settings JSON; `render-plist.sh` wraps it into the
-`.mobileconfig`. Pipe one into the other:
+`render.sh` builds the settings JSON and `render-plist.sh` wraps it into the `.mobileconfig` — pipe one into the other. Use an **audit-only / least-privilege** API credential, since the key and secret are embedded in the profile and delivered to every laptop.
 
 ```sh
 scripts/render.sh --agent claude \
@@ -25,72 +18,39 @@ scripts/render.sh --agent claude \
   -o com.anthropic.claudecode.mobileconfig
 ```
 
-- `render-plist.sh` is agent-agnostic; `--payload-type` defaults to Claude Code's
-  `com.anthropic.claudecode`, so it is omitted here.
-- `--identifier` is a unique reverse-DNS id in the customer's namespace; the inner
-  payload derives as `<identifier>.settings`.
-- `--organization` sets the profile's `PayloadOrganization`; `--name` sets the
-  MDM-visible display name.
+- `--identifier` is a unique reverse-DNS id in your namespace; the inner payload becomes `<identifier>.settings`.
+- `--organization` sets the profile's `PayloadOrganization`, and `--name` the MDM-visible display name.
 - UUIDs are generated fresh unless you pass `--profile-uuid` / `--content-uuid`.
-- Add `--env ENDOR_AI_AUDIT_NO_BLOCKING=true` to the `render.sh` step for an
-  initial monitor-only rollout.
-- Needs `plutil` (macOS) for the `render-plist.sh` step.
+- `--payload-type` defaults to `com.anthropic.claudecode`, so it's omitted here.
+- For an initial monitor-only rollout, add `--env ENDOR_AI_AUDIT_NO_BLOCKING=true` to the `render.sh` step.
 
-The result validates as a property list:
+Confirm it's a valid property list before uploading (there's a ready-made sample at `examples/claude/com.anthropic.claudecode.mobileconfig`):
 
 ```sh
 plutil -lint com.anthropic.claudecode.mobileconfig
 ```
 
-See `examples/claude/com.anthropic.claudecode.mobileconfig` for a sample.
-
 ## 2. Upload to the MDM
 
-### Jamf Pro
+**Jamf Pro** — Computers → Configuration Profiles → New; add an **Application & Custom Settings → Upload** payload with the `.mobileconfig`; set the **Scope**; Save. Jamf pushes it and the OS installs it as a managed setting. (If you embed it under a Jamf-owned outer profile, set `--profile-identifier` to that profile's id so the outer identity matches.)
 
-1. **Computers → Configuration Profiles → New.**
-2. Add an **Application & Custom Settings → Upload** payload and upload the
-   `.mobileconfig` (or use a Custom Profile upload).
-3. Set the **Scope** to the target computers.
-4. **Save.** Jamf pushes the profile; the OS installs it as a managed setting.
-
-> When embedding under a Jamf-owned outer profile, set
-> `--profile-identifier` to that profile's id so the outer identity matches Jamf's.
-
-### Kandji
-
-1. **Library → Add New → Custom Profile.**
-2. Upload the `.mobileconfig`.
-3. Assign it to the target **Blueprint**.
+**Kandji** — Library → Add New → Custom Profile; upload the `.mobileconfig`; assign it to the target Blueprint.
 
 ## 3. Verify
 
-After the profile lands, open Claude Code on a target machine and start a session.
-The `SessionStart` hook installs/updates `endorctl` and begins reporting to the
-configured Endor namespace. Confirm activity in the Endor audit log.
+Open Claude Code on a target machine and start a session. The `SessionStart` hook installs/updates `endorctl` and begins reporting to your Endor namespace — confirm the activity in the Endor audit log.
 
 ## Updating
 
-Profile-delivered config does not auto-update. To ship a change:
+Profile-delivered config doesn't auto-update. To ship a change, regenerate the `.mobileconfig` (step 1), re-upload it to the MDM with a **bumped profile version**, and the MDM re-pushes it. How fast it lands depends on the MDM's check-in behavior.
 
-1. Regenerate the `.mobileconfig` from the latest repo (step 1).
-2. Re-upload it to the MDM and **bump the profile version**.
-3. The MDM re-pushes it to the fleet.
+## Linux and Windows: the same settings, as a file
 
-How quickly the update lands depends on the MDM's push/check-in behavior.
-
-## Linux and Windows (file-based, no profile)
-
-`.mobileconfig` is macOS-only. On Linux and Windows, Claude Code reads the same
-managed-settings JSON (the `env` + `hooks` that `render.sh --agent claude`
-produces) as a **file** at a system path — so there's no `render-plist.sh` step:
+`.mobileconfig` is macOS-only. On Linux and Windows, Claude reads the *same* managed-settings JSON (the `env` + `hooks` that `render.sh --agent claude` produces) as a plain file at a system path — no `render-plist.sh` step, but still admin-enforced and highest-precedence.
 
 | OS | Path | Deliver with |
 | --- | --- | --- |
-| Linux | `/etc/claude-code/managed-settings.json` (+ `managed-settings.d/`) | `runner.sh --agent claude` (default dest), or config mgmt (Ansible/etc.), or a JumpCloud Command |
-| Windows | `C:\Program Files\ClaudeCode\managed-settings.json` | pre-generate `--target-os windows`, push via Intune — see [deploy-windows-intune.md](deploy-windows-intune.md) |
+| Linux | `/etc/claude-code/managed-settings.json` (+ `managed-settings.d/`) | [`runner.sh --agent claude`](deploy-cursor-runner.md), config management, or a [JumpCloud](deploy-jumpcloud.md) Command |
+| Windows | `C:\Program Files\ClaudeCode\managed-settings.json` | pre-generate `--target-os windows`, push via [Intune](deploy-windows-intune.md) |
 
-Both are admin-enforced (highest precedence; users can't override), same as the
-macOS profile. Generate the Linux file with `render.sh --agent claude` (POSIX
-hooks); generate the Windows file with `--target-os windows` (encoded PowerShell
-hooks). For JumpCloud specifically, see [deploy-jumpcloud.md](deploy-jumpcloud.md).
+Generate the Linux file with `render.sh --agent claude` (POSIX hooks) and the Windows file with `--target-os windows` (encoded PowerShell hooks).
