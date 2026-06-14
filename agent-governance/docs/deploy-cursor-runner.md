@@ -16,8 +16,10 @@ This page covers macOS (Jamf/Kandji); the same runner works on Linux (it picks t
 
 - **Endpoint needs:** `git` + `/bin/sh` + `jq`.
 - **Not tamper-resistant:** a script-delivered file is not OS-enforced, so a
-  developer could override it (e.g. via `~/.cursor/`). Use the profile path where
-  tamper-resistance matters.
+  developer could override it (e.g. via `~/.cursor/`). This repo has no
+  OS-enforced delivery for Cursor — only Claude does (its managed-settings
+  profile); tamper-resistance for Cursor would require a profile mechanism it
+  doesn't expose today.
 - **Credentials** reach `render.sh` via the environment; the MDM script below
   sets them (Jamf parameters, or hard-coded inline for Kandji — see its caveat).
   Never commit them to the repo. Use an **audit-only / least-privilege** credential.

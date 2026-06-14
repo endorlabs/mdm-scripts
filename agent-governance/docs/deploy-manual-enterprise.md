@@ -11,12 +11,12 @@ Generate the config for the developer's OS first:
 
 ```sh
 # macOS / Linux (POSIX hooks)
-render.sh --agent cursor --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o hooks.json
-render.sh --agent claude --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o settings.json
+scripts/render.sh --agent cursor --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o hooks.json
+scripts/render.sh --agent claude --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o settings.json
 
 # Windows (encoded PowerShell hooks)
-render.sh --agent cursor --target-os windows … -o hooks.json
-render.sh --agent claude --target-os windows … -o settings.json
+scripts/render.sh --agent cursor --target-os windows … -o hooks.json
+scripts/render.sh --agent claude --target-os windows … -o settings.json
 ```
 
 ## Manual — drop the file locally

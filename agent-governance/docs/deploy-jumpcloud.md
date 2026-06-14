@@ -68,7 +68,7 @@ Windows endpoints have no `git`/`jq`, so **pre-generate** the config on a macOS/
 (or WSL/Git Bash) admin box and have the Command write it:
 
 ```sh
-render.sh --agent cursor --target-os windows --api-key … --api-secret … --namespace … -o cursor-hooks.json
+scripts/render.sh --agent cursor --target-os windows --api-key … --api-secret … --namespace … -o cursor-hooks.json
 ```
 
 Then a JumpCloud **Windows Command** (PowerShell, runs as SYSTEM) that writes it to the
