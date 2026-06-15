@@ -45,7 +45,7 @@ while [ $# -gt 0 ]; do
     --profile-uuid)       profile_uuid="$2"; shift 2 ;;
     --content-uuid)       content_uuid="$2"; shift 2 ;;
     -o|--output)          output="$2"; shift 2 ;;
-    -h|--help)            sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help)            sed -n '2,24p' "$0"; exit 0 ;;
     *)                    die "unknown argument: $1" ;;
   esac
 done

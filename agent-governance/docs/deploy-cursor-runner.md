@@ -19,6 +19,7 @@ A few things to know going in:
   ```
 - **For a monitor-only rollout**, append `--env ENDOR_AI_AUDIT_NO_BLOCKING=true` — extra args pass straight through to `render.sh`.
 - **The runner is generic** — `--agent <name>` for another script-delivered agent, `--dest <path>` to override where the file lands.
+- **Pin a version.** The scripts below set `REF`, fetch that ref, and pass it to the runner — so each device runs a known, reviewed revision of this repo rather than whatever is at the branch tip (root is executing this code, so that matters). They default to `main` (tracks latest); set `REF` to a reviewed tag or commit (e.g. `v1.0.0`) to pin, and bump it deliberately to roll out a change.
 
 Both MDMs upload a **single** script, and it can't assume `runner.sh` is already on the machine — so the script is self-contained: it clones this repo once, then execs the runner from the clone (which pulls the latest on every run).
 
@@ -31,10 +32,13 @@ Jamf reserves positional parameters `$1`–`$3` (mount point, computer, user), s
    #!/bin/sh
    set -eu
    export ENDOR_API_CREDENTIALS_KEY="$4" ENDOR_API_CREDENTIALS_SECRET="$5" ENDOR_NAMESPACE="$6"
+   REF="main"   # pin to a reviewed tag or commit in production (e.g. v1.0.0)
    REPO="/Library/Application Support/EndorAIGovernance/repo"
    mkdir -p "$(dirname "$REPO")"
-   [ -d "$REPO/.git" ] || git clone --depth 1 https://github.com/endorlabs/mdm-scripts "$REPO"
-   exec sh "$REPO/agent-governance/scripts/runner.sh" --agent cursor
+   [ -d "$REPO/.git" ] || { git init -q "$REPO"; git -C "$REPO" remote add origin https://github.com/endorlabs/mdm-scripts; }
+   git -C "$REPO" fetch --depth 1 origin "$REF"
+   git -C "$REPO" -c advice.detachedHead=false checkout -f FETCH_HEAD
+   exec sh "$REPO/agent-governance/scripts/runner.sh" --agent cursor --ref "$REF"
    ```
    Label *Parameter 4 = API key*, *5 = API secret*, *6 = namespace*.
 2. **Computers → Policies → New** — add the **Scripts** payload, select the script, and fill in the credential parameters.
@@ -50,10 +54,13 @@ Kandji Custom Scripts run as **root** and can run on a schedule, but Kandji has 
    #!/bin/sh
    set -eu
    export ENDOR_API_CREDENTIALS_KEY='…' ENDOR_API_CREDENTIALS_SECRET='…' ENDOR_NAMESPACE='…'
+   REF="main"   # pin to a reviewed tag or commit in production (e.g. v1.0.0)
    REPO="/Library/Application Support/EndorAIGovernance/repo"
    mkdir -p "$(dirname "$REPO")"
-   [ -d "$REPO/.git" ] || git clone --depth 1 https://github.com/endorlabs/mdm-scripts "$REPO"
-   exec sh "$REPO/agent-governance/scripts/runner.sh" --agent cursor
+   [ -d "$REPO/.git" ] || { git init -q "$REPO"; git -C "$REPO" remote add origin https://github.com/endorlabs/mdm-scripts; }
+   git -C "$REPO" fetch --depth 1 origin "$REF"
+   git -C "$REPO" -c advice.detachedHead=false checkout -f FETCH_HEAD
+   exec sh "$REPO/agent-governance/scripts/runner.sh" --agent cursor --ref "$REF"
    ```
    **Single-quote** the values (as shown) so a `"`, `$`, or backtick can't break the assignment; if a value contains a single quote, write it as `'\''`.
 2. Set **Execution Frequency** to *Run every 15 min* or *Run daily*.

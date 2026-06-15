@@ -29,6 +29,7 @@ This is JumpCloud's equivalent of a Jamf recurring policy or a Kandji schedule.
    #!/bin/sh
    set -eu
    export ENDOR_API_CREDENTIALS_KEY='…' ENDOR_API_CREDENTIALS_SECRET='…' ENDOR_NAMESPACE='…'
+   REF="main"   # pin to a reviewed tag or commit in production (e.g. v1.0.0)
    # Runs as root, so clone to a root-owned protected path — never /tmp, where a
    # local user could pre-create the dir and trick root into running their code.
    case "$(uname -s)" in
@@ -36,10 +37,12 @@ This is JumpCloud's equivalent of a Jamf recurring policy or a Kandji schedule.
      *)      REPO="/var/lib/endor-ai-governance/repo" ;;
    esac
    mkdir -p "$(dirname "$REPO")"
-   [ -d "$REPO/.git" ] || git clone --depth 1 https://github.com/endorlabs/mdm-scripts "$REPO"
-   exec sh "$REPO/agent-governance/scripts/runner.sh" --agent cursor    # or: --agent claude (Linux)
+   [ -d "$REPO/.git" ] || { git init -q "$REPO"; git -C "$REPO" remote add origin https://github.com/endorlabs/mdm-scripts; }
+   git -C "$REPO" fetch --depth 1 origin "$REF"
+   git -C "$REPO" -c advice.detachedHead=false checkout -f FETCH_HEAD
+   exec sh "$REPO/agent-governance/scripts/runner.sh" --agent cursor --ref "$REF"    # or: --agent claude (Linux)
    ```
-   **Single-quote** the values so a `"`, `$`, or backtick can't break the assignment (escape any literal single quote as `'\''`). The endpoint needs `git` + `jq`.
+   **Single-quote** the values so a `"`, `$`, or backtick can't break the assignment (escape any literal single quote as `'\''`). Set `REF` to a reviewed tag or commit to pin the revision (it defaults to `main`). The endpoint needs `git` + `jq`.
 2. Set the launch type to **Run as Repeating** (e.g. hourly) so repo and credential/flag changes flow automatically — the runner re-renders and swaps only on change.
 3. Scope it to a Device Group.
 

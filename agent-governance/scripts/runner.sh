@@ -1,13 +1,17 @@
 #!/bin/sh
 # runner.sh — MDM-run script that keeps an agent's hook config current.
 #
-# IT sets this up once in the MDM (see docs/). On every check-in it pulls this
-# public repo, re-renders the agent's config from the latest source + the current
-# credentials/flags, and atomically swaps it in only when the result actually
-# changes. Endpoint needs: git + /bin/sh + jq (render.sh uses jq).
+# IT sets this up once in the MDM (see docs/). On every check-in it fetches this
+# public repo (a pinned --ref, or the default-branch tip if unpinned), re-renders
+# the agent's config from that source + the current credentials/flags, and swaps
+# it in atomically only when the result changes. Endpoint needs: git + /bin/sh + jq.
 #
 # Usage:
-#   runner.sh --agent <name> [--dest <path>] [extra render.sh args...]
+#   runner.sh --agent <name> [--ref <tag|commit>] [--dest <path>] [extra render.sh args...]
+#
+# --ref pins the repo to a reviewed tag, branch, or commit, so each device runs a
+# known revision instead of whatever is at the branch tip. Omit it to track the
+# default branch.
 #
 # Credentials are read from the environment by render.sh (see its header):
 #   ENDOR_API_CREDENTIALS_KEY / ENDOR_API_CREDENTIALS_SECRET / ENDOR_NAMESPACE
@@ -29,14 +33,17 @@ case "$os" in
   *)      REPO="/var/lib/endor-ai-governance/repo" ;;
 esac
 
-{ [ "${1:-}" = "--agent" ] && [ $# -ge 2 ]; } || { echo "usage: runner.sh --agent <name> [--dest <path>] [render args...]" >&2; exit 2; }
+{ [ "${1:-}" = "--agent" ] && [ $# -ge 2 ]; } || { echo "usage: runner.sh --agent <name> [--ref <tag|commit>] [--dest <path>] [render args...]" >&2; exit 2; }
 agent="$2"; shift 2
 
-dest=""
-if [ "${1:-}" = "--dest" ]; then
-  [ $# -ge 2 ] || { echo "runner.sh: --dest requires a value" >&2; exit 2; }
-  dest="$2"; shift 2
-fi
+dest=""; ref=""
+while :; do
+  case "${1:-}" in
+    --ref)  [ $# -ge 2 ] || { echo "runner.sh: --ref requires a value" >&2; exit 2; }; ref="$2"; shift 2 ;;
+    --dest) [ $# -ge 2 ] || { echo "runner.sh: --dest requires a value" >&2; exit 2; }; dest="$2"; shift 2 ;;
+    *) break ;;
+  esac
+done
 
 # Default install location per (agent, OS); override with --dest. Add new here.
 # (macOS Claude is normally profile-delivered — see docs/deploy-claude-profile.md —
@@ -53,12 +60,14 @@ fi
 # Clean machines may not have these directories yet.
 mkdir -p "$(dirname "$REPO")" "$(dirname "$dest")"
 
-# 1. Get or update the public source.
-if [ -d "$REPO/.git" ]; then
-  git -C "$REPO" pull --ff-only
-else
-  git clone --depth 1 "$REPO_URL" "$REPO"
+# 1. Fetch the source at the pinned ref (or the default-branch tip if unpinned)
+#    and check it out, so the device runs exactly that reviewed revision.
+if [ ! -d "$REPO/.git" ]; then
+  git init -q "$REPO"
+  git -C "$REPO" remote add origin "$REPO_URL"
 fi
+git -C "$REPO" fetch --depth 1 origin "${ref:-HEAD}"
+git -C "$REPO" -c advice.detachedHead=false checkout -f FETCH_HEAD
 
 # 2. Render the config (the session hook also installs/updates endorctl) and swap
 #    it in atomically only if it actually changed. Comparing the rendered output

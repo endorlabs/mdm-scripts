@@ -79,7 +79,7 @@ while [ $# -gt 0 ]; do
     --api-key)              api_key="$2"; shift 2 ;;
     --api-secret)           api_secret="$2"; shift 2 ;;
     --namespace)            namespace="$2"; shift 2 ;;
-    -h|--help)              sed -n '2,33p' "$0"; exit 0 ;;
+    -h|--help)              sed -n '2,32p' "$0"; exit 0 ;;
     *)                      die "unknown argument: $1" ;;
   esac
 done

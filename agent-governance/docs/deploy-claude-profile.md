@@ -1,6 +1,6 @@
 # Deploy Claude Code via an MDM profile (macOS)
 
-This is the recommended path for Claude Code on macOS. Claude reads managed settings from a Configuration Profile payload of type `com.anthropic.claudecode`, so a profile is **tamper-resistant** — the OS enforces it, and nothing extra runs on the laptop. The one tradeoff: an update means regenerating the profile and re-uploading it.
+On macOS, Claude Code reads managed settings from a Configuration Profile payload of type `com.anthropic.claudecode`, so a profile is **tamper-resistant** — the OS enforces it, and nothing extra runs on the laptop. The one tradeoff: an update means regenerating the profile and re-uploading it.
 
 You'll generate a `.mobileconfig` on an admin Mac (you need `jq` and `plutil`), then upload it through Jamf or Kandji.
 
