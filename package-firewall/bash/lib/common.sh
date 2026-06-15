@@ -18,6 +18,12 @@
 ENDOR_BLOCK_START="# ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ====="
 ENDOR_BLOCK_END="# ===== END ENDOR PACKAGE FIREWALL ====="
 
+# XML sentinel markers — used for settings.xml (Maven), which cannot use '#' comments.
+# These MUST match the BEGIN/END lines in shared/blocks/mavensettings.txt exactly,
+# or re-runs and removal cannot find the managed block.
+ENDOR_XML_BLOCK_START="<!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->"
+ENDOR_XML_BLOCK_END="<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->"
+
 # detect_console_user
 # MDM tools (Kandji, Jamf) run scripts as root. $HOME resolves to /var/root, which
 # is not where developer config files live. Returns the name of the actual logged-in
@@ -114,6 +120,81 @@ upsert_block() {
   chmod 600 "$file"
 }
 
+# upsert_xml_block <file> <fragment> <owner> <group>
+#
+# Idempotent writer for an XML settings file (Maven ~/.m2/settings.xml).
+# Inserts an XML-comment-delimited <fragment> immediately BEFORE the closing
+# </settings> tag, so it always lands inside the <settings> root element.
+#   - File absent             → create a minimal settings.xml wrapping the fragment
+#   - File present, has block  → replace only the delimited fragment
+#   - File present, no block   → insert fragment just before </settings>
+#   - DRY_RUN=1               → print intent, write nothing
+upsert_xml_block() {
+  local file="$1" fragment="$2" owner="$3" group="$4" tmp
+
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    if [[ -f "$file" ]] && grep -qF "$ENDOR_XML_BLOCK_START" "$file" 2>/dev/null; then
+      echo "[dry-run]   action : REPLACE Endor block in settings.xml"
+    elif [[ -f "$file" ]]; then
+      echo "[dry-run]   action : INSERT Endor block before </settings>"
+    else
+      echo "[dry-run]   action : CREATE settings.xml with Endor block"
+    fi
+    echo "[dry-run]   file    : $file"
+    echo "$fragment" | sed 's/^/[dry-run]     /'
+    echo ""
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$file")"
+
+  # Case 1: file does not exist -> write a complete minimal settings.xml
+  if [[ ! -f "$file" ]]; then
+    {
+      echo '<?xml version="1.0" encoding="UTF-8"?>'
+      echo '<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"'
+      echo '          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
+      echo '          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 http://maven.apache.org/xsd/settings-1.2.0.xsd">'
+      echo "$fragment"
+      echo '</settings>'
+    } > "$file"
+    chown "$owner:$group" "$file"; chmod 600 "$file"
+    return 0
+  fi
+
+  # Case 2: existing Endor block -> strip it first (preserve the rest)
+  if grep -qF "$ENDOR_XML_BLOCK_START" "$file" 2>/dev/null; then
+    tmp=$(mktemp)
+    awk -v s="$ENDOR_XML_BLOCK_START" -v e="$ENDOR_XML_BLOCK_END" '
+      index($0, s) { skip=1; next }
+      index($0, e) { skip=0; next }
+      !skip        { print }
+    ' "$file" > "$tmp"
+    mv "$tmp" "$file"
+  fi
+
+  # Case 3: insert the fresh fragment immediately before the first </settings>.
+  # The fragment is passed via a temp file and read with getline rather than
+  # `awk -v frag=...`, because BSD/macOS awk rejects a multi-line value in -v
+  # ("newline in string"). getline-from-file is portable across BSD and GNU awk.
+  local fragfile; fragfile=$(mktemp)
+  printf '%s\n' "$fragment" > "$fragfile"
+  tmp=$(mktemp)
+  awk -v fragfile="$fragfile" '
+    /<\/settings>/ && !done {
+      while ((getline line < fragfile) > 0) print line
+      close(fragfile)
+      done=1
+    }
+    { print }
+  ' "$file" > "$tmp"
+  mv "$tmp" "$file"
+  rm -f "$fragfile"
+
+  chown "$owner:$group" "$file"; chmod 600 "$file"
+}
+
+
 # remove_block <file> <owner> <group>
 #
 # Strips the Endor sentinel block from a config file.
@@ -172,6 +253,40 @@ remove_block() {
     mv "$tmp" "$file"
     chown "$owner:$group" "$file"
     chmod 600 "$file"
+    echo "[endor-remove] block removed       : $file"
+  fi
+}
+
+# remove_xml_block <file> <owner> <group>
+# Strips the Endor XML fragment from settings.xml. If the file is left with an
+# empty <settings> element (i.e. it was Endor-only), the whole file is deleted.
+remove_xml_block() {
+  local file="$1" owner="$2" group="$3" tmp
+
+  [[ -f "$file" ]] || { echo "[endor-remove] skip (not found)    : $file"; return 0; }
+  if ! grep -qF "$ENDOR_XML_BLOCK_START" "$file" 2>/dev/null; then
+    echo "[endor-remove] skip (no Endor block): $file"; return 0
+  fi
+
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "[dry-run]   action : REMOVE Endor block from settings.xml"
+    echo "[dry-run]   file   : $file"
+    return 0
+  fi
+
+  tmp=$(mktemp)
+  awk -v s="$ENDOR_XML_BLOCK_START" -v e="$ENDOR_XML_BLOCK_END" '
+    index($0, s) { skip=1; next }
+    index($0, e) { skip=0; next }
+    !skip        { print }
+  ' "$file" > "$tmp"
+
+  # If only the empty XML scaffold remains, the file was Endor-only -> delete it
+  if ! grep -qE '<(server|mirror|profile|proxy|pluginGroup|repository)' "$tmp"; then
+    rm -f "$file" "$tmp"
+    echo "[endor-remove] deleted (was empty) : $file"
+  else
+    mv "$tmp" "$file"; chown "$owner:$group" "$file"; chmod 600 "$file"
     echo "[endor-remove] block removed       : $file"
   fi
 }

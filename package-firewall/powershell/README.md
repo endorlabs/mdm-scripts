@@ -17,12 +17,14 @@ powershell/
 │   ├── js.ps1               ← orchestration: npm / yarn config file writes
 │   ├── python.ps1           ← orchestration: pip / uv config file writes
 │   ├── go.ps1               ← orchestration: go env file write
+│   ├── maven.ps1            ← orchestration: .m2\settings.xml write (XML-aware)
 │   └── remove.ps1           ← orchestration: sentinel block + registry env var removal
 └── out/                     ← generated scripts (gitignore this)
     └── <namespace>/
         ├── endor-js.ps1
         ├── endor-python.ps1
         ├── endor-go.ps1
+        ├── endor-maven.ps1
         ├── endor-all.ps1
         └── endor-remove.ps1
 
@@ -32,7 +34,8 @@ powershell/
 ├── yarnrc.txt               ← %USERPROFILE%\.yarnrc.yml (yarn 2+) content
 ├── pipconf.txt              ← %APPDATA%\pip\pip.ini content
 ├── uvtoml.txt               ← %APPDATA%\uv\uv.toml content
-└── goenv.txt                ← go env file content  (path resolved via `go env GOENV`)
+├── goenv.txt                ← go env file content  (path resolved via `go env GOENV`)
+└── mavensettings.txt        ← %USERPROFILE%\.m2\settings.xml fragment  (Maven mirror + server)
 ```
 
 ---
@@ -92,6 +95,7 @@ Each script in `out/<namespace>/` is **fully self-contained** — no external fi
 | `endor-js.ps1` | Team uses JavaScript (npm, pnpm, yarn, bun) only |
 | `endor-python.ps1` | Team uses Python (pip, uv, poetry) only |
 | `endor-go.ps1` | Team uses Go only |
+| `endor-maven.ps1` | Team uses Java / Maven only |
 | `endor-all.ps1` | Team uses multiple ecosystems — single-script deploy |
 
 
@@ -174,6 +178,24 @@ Poetry credentials (`POETRY_HTTP_BASIC_ENDOR_FIREWALL_*`) are written to the reg
 
 ---
 
+### `endor-maven.ps1`
+
+Writes an Endor-managed block to:
+
+| File | Covers | Credentials |
+|---|---|---|
+| `%USERPROFILE%\.m2\settings.xml` | Maven (all versions); Gradle when it reads `~/.m2` | `${env.ENDOR_API_KEY_ID}` / `${env.ENDOR_API_SECRET}` env var refs |
+
+Key behaviour:
+- **XML-aware writer**: `settings.xml` is XML, so the generic sentinel `Invoke-UpsertBlock` cannot be used (it would append after `</settings>` and corrupt the file). `endor-maven.ps1` uses `Invoke-UpsertXmlBlock`, which inserts an XML-comment-delimited fragment **immediately before** `</settings>`.
+- **Fresh machine**: if `settings.xml` does not exist, a complete minimal schema-referenced file is created wrapping the Endor fragment.
+- **Existing file**: the fragment is spliced in before `</settings>`; other elements are preserved. Re-runs replace only the Endor fragment (idempotent).
+- **`<mirror>` with `<mirrorOf>*</mirrorOf>`** routes every repository request through the firewall.
+- **No baked credentials**: Maven expands `${env.*}` from the process environment. `ENDOR_API_KEY_ID` / `ENDOR_API_SECRET` are already in `HKCU:\Environment`, and a matching `<server id="endor-firewall">` attaches them to the mirror.
+- **Removal**: `endor-remove.ps1` strips only the Endor fragment; if the file is left with an empty `<settings>` scaffold, it is deleted.
+
+---
+
 ## Customising
 
 To change what gets written to a config file on target machines, edit the relevant file in `../shared/blocks/` directly:
@@ -186,6 +208,7 @@ To change what gets written to a config file on target machines, edit the releva
 | `../shared/blocks/pipconf.txt` | `%APPDATA%\pip\pip.ini` |
 | `../shared/blocks/uvtoml.txt` | `%APPDATA%\uv\uv.toml` |
 | `../shared/blocks/goenv.txt` | `%APPDATA%\go\env` |
+| `../shared/blocks/mavensettings.txt` | `%USERPROFILE%\.m2\settings.xml` |
 
 To change orchestration logic (which files get written, in what order), edit the relevant `templates/*.ps1` file directly.
 
@@ -196,7 +219,7 @@ Both support the same placeholder syntax as the macOS version:
 | `{{PLACEHOLDER}}` | Generation time by `generate.ps1` | Values baked into the config file (e.g. registry host) |
 | `${ENDOR_VAR}` | Runtime by the tool reading the config file | Credential values — resolved from registry env vars |
 
-Available placeholders: `{{API_KEY_ID}}`, `{{API_SECRET}}`, `{{NPM_REGISTRY_URL}}`, `{{NPM_REGISTRY_HOST}}`, `{{NPM_AUTH_B64}}`, `{{PYPI_URL}}`, `{{PIP_INDEX_URL}}`, `{{TRUSTED_HOST}}`, `{{NAMESPACE}}`, `{{FQDN}}`
+Available placeholders: `{{API_KEY_ID}}`, `{{API_SECRET}}`, `{{NPM_REGISTRY_URL}}`, `{{NPM_REGISTRY_HOST}}`, `{{NPM_AUTH_B64}}`, `{{PYPI_URL}}`, `{{PIP_INDEX_URL}}`, `{{TRUSTED_HOST}}`, `{{GO_PROXY_URL}}`, `{{MAVEN_REGISTRY_URL}}`, `{{NAMESPACE}}`, `{{FQDN}}`
 
 ---
 
@@ -242,7 +265,7 @@ Useful for validating what the script will do before deploying to devices.
 
 Deploy `endor-remove.ps1` to strip all Endor configuration from a machine. It:
 
-- Removes the sentinel block from `.npmrc`, `.yarnrc.yml`, `pip.ini`, and `uv.toml`
+- Removes the sentinel block from `.npmrc`, `.yarnrc.yml`, `pip.ini`, `uv.toml`, the go env file, and `.m2\settings.xml`
 - Deletes all `ENDOR_*` and `POETRY_HTTP_BASIC_ENDOR_FIREWALL_*` keys from `HKCU:\Environment`
 - Deletes config files that are empty after block removal
 
@@ -260,5 +283,6 @@ Deploy `endor-remove.ps1` to strip all Endor configuration from a machine. It:
 | `HKCU:\Environment` | Contains credentials as plain REG_SZ strings. Access is restricted to the owning user by default Windows ACLs. |
 | `pip.ini` | Contains credentials in the `index-url`. File is ACL-restricted to owner. Credentials may appear in pip debug logs (`pip install -v`). pip cannot use env var references. |
 | `.npmrc`, `.yarnrc.yml`, `uv.toml` | Contain `${VAR}` references only — no credentials baked in. |
+| `.m2\settings.xml` | Contains `${env.*}` references only — no credentials baked in. ACL-restricted to owner. |
 | API secret in MDM | Generated scripts contain the API key and secret in plaintext (used to write registry env vars). Restrict access to the Intune policy and the generated `out/` directory. |
 | `out/` directory | Add to `.gitignore`. Do not commit generated scripts to source control. |

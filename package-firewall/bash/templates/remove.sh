@@ -109,6 +109,12 @@ unset _go_bin
 remove_block "$_GO_ENV_FILE" "$CONSOLE_USER" "$USER_GROUP"
 unset _GO_ENV_FILE
 
+# ── Maven config file ────────────────────────────────────────────────────────────
+echo ""
+echo "[endor-remove] ── Maven ────────────────────────────────────────────────────────────"
+
+remove_xml_block "$USER_HOME/.m2/settings.xml" "$CONSOLE_USER" "$USER_GROUP"
+
 echo ""
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
   echo "[endor-remove] ✓ Dry run complete — no files modified."

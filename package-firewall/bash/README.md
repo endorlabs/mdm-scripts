@@ -16,12 +16,14 @@ bash/
 │   ├── js.sh                ← orchestration: npm / yarn config file writes
 │   ├── python.sh            ← orchestration: pip / uv config file writes
 │   ├── go.sh                ← orchestration: go env file write
+│   ├── maven.sh             ← orchestration: ~/.m2/settings.xml write (XML-aware)
 │   └── remove.sh            ← orchestration: sentinel block removal
 └── out/                     ← generated scripts (gitignore this)
     └── <namespace>/
         ├── endor-js.sh
         ├── endor-python.sh
         ├── endor-go.sh
+        ├── endor-maven.sh
         ├── endor-all.sh
         └── endor-remove.sh
 
@@ -32,7 +34,8 @@ bash/
 ├── yarnrc.txt               ← ~/.yarnrc.yml (yarn 2+) content
 ├── pipconf.txt              ← pip.conf content
 ├── uvtoml.txt               ← ~/.config/uv/uv.toml content
-└── goenv.txt                ← go env file content  (path resolved via `go env GOENV`)
+├── goenv.txt                ← go env file content  (path resolved via `go env GOENV`)
+└── mavensettings.txt        ← ~/.m2/settings.xml fragment  (Maven mirror + server)
 ```
 
 ---
@@ -87,6 +90,7 @@ Each script in `out/<env>-<namespace>/` is **fully self-contained** — no exter
 | `endor-js.sh` | Team uses JavaScript (npm, pnpm, yarn, bun) only |
 | `endor-python.sh` | Team uses Python (pip, uv, poetry) only |
 | `endor-go.sh` | Team uses Go only |
+| `endor-maven.sh` | Team uses Java / Maven only |
 | `endor-all.sh` | Team uses multiple ecosystems — single-script deploy |
 
 
@@ -175,6 +179,24 @@ Key behaviour:
 
 ---
 
+### `endor-maven.sh`
+
+Writes an Endor-managed block to:
+
+| File | Covers | Credentials |
+|---|---|---|
+| `~/.m2/settings.xml` | Maven (all versions); Gradle when it reads `~/.m2` | `${env.ENDOR_API_KEY_ID}` / `${env.ENDOR_API_SECRET}` env var refs |
+
+Key behaviour:
+- **XML-aware writer**: `settings.xml` is XML, so the generic `#`-sentinel `upsert_block` cannot be used (it would append after `</settings>` and corrupt the file). `endor-maven.sh` uses `upsert_xml_block`, which inserts an XML-comment-delimited fragment **immediately before** `</settings>` so it always lands inside the `<settings>` root.
+- **Fresh machine**: if `~/.m2/settings.xml` does not exist, a complete minimal schema-referenced `settings.xml` is created wrapping the Endor fragment.
+- **Existing file**: the fragment is spliced in before `</settings>`; all other elements (e.g. an admin `<profile>`) are preserved. Re-runs replace only the Endor fragment (idempotent).
+- **`<mirror>` with `<mirrorOf>*</mirrorOf>`** routes every repository request through the firewall — the Maven equivalent of npm's `registry=`.
+- **No baked credentials**: Maven natively expands `${env.*}` from process environment variables. The required `ENDOR_API_KEY_ID` / `ENDOR_API_SECRET` are already exported by `env.sh`, and a matching `<server id="endor-firewall">` attaches them to the mirror — so no new credential plumbing is added.
+- **Removal**: `endor-remove.sh` strips only the Endor fragment; if the file is left with an empty `<settings>` scaffold (was Endor-only), it is deleted.
+
+---
+
 ## Customising
 
 To change what gets written to a config file on target machines, edit the relevant file in `../shared/blocks/` directly:
@@ -188,6 +210,7 @@ To change what gets written to a config file on target machines, edit the releva
 | `../shared/blocks/pipconf.txt` | `~/.pip/pip.conf`, `~/.config/pip/pip.conf`, `~/Library/Application Support/pip/pip.conf` |
 | `../shared/blocks/uvtoml.txt` | `~/.config/uv/uv.toml` |
 | `../shared/blocks/goenv.txt` | `~/.config/go/env` |
+| `../shared/blocks/mavensettings.txt` | `~/.m2/settings.xml` |
 
 To change orchestration logic (which files get written, in what order, with what warnings), edit the relevant `templates/*.sh` file directly.
 
@@ -198,7 +221,7 @@ Both support `{{PLACEHOLDER}}` substitution at generation time and `${ENDOR_VAR}
 | `{{PLACEHOLDER}}` | Generation time by `generate.sh` | Values baked into the config file (e.g. registry host in a key position) |
 | `${ENDOR_VAR}` | Runtime by the tool reading the config file | Credential values — kept out of config files, resolved from `env.sh` |
 
-Available placeholders: `{{API_KEY_ID}}`, `{{API_SECRET}}`, `{{NPM_REGISTRY_URL}}`, `{{NPM_REGISTRY_HOST}}`, `{{NPM_AUTH_B64}}`, `{{PYPI_URL}}`, `{{PIP_INDEX_URL}}`, `{{TRUSTED_HOST}}`, `{{NAMESPACE}}`, `{{FQDN}}`
+Available placeholders: `{{API_KEY_ID}}`, `{{API_SECRET}}`, `{{NPM_REGISTRY_URL}}`, `{{NPM_REGISTRY_HOST}}`, `{{NPM_AUTH_B64}}`, `{{PYPI_URL}}`, `{{PIP_INDEX_URL}}`, `{{TRUSTED_HOST}}`, `{{GO_PROXY_URL}}`, `{{MAVEN_REGISTRY_URL}}`, `{{NAMESPACE}}`, `{{FQDN}}`
 
 ---
 
@@ -263,6 +286,7 @@ remove_block() {
 | `~/.config/endor/env.sh` | Contains all credentials in plaintext. File is `chmod 600`. This is the only credential file for npm/uv/yarn/poetry. |
 | `pip.conf` | Contains credentials in the index-url. File is `chmod 600`. Credentials may appear in pip debug logs (`pip install -v`). pip cannot use env var references. |
 | `.npmrc`, `.yarnrc.yml`, `uv.toml` | Contain `${VAR}` references only — no credentials baked in. |
+| `~/.m2/settings.xml` | Contains `${env.*}` references only — no credentials baked in. File is `chmod 600`. |
 | Shell profiles | Contain a single `source ~/.config/endor/env.sh` line. No credentials. |
 | API secret in MDM | The generated scripts contain the API key and secret in plaintext (used to write `env.sh`). Restrict access to the MDM policy and the generated `out/` directory. |
 | `out/` directory | Add to `.gitignore`. Do not commit generated scripts to source control. |

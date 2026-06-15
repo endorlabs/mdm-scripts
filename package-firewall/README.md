@@ -24,6 +24,7 @@ See each directory's README for generation and deployment instructions.
 | JavaScript | npm, pnpm, yarn classic (1.x), yarn 2+ / berry, bun |
 | Python | pip, uv, poetry |
 | Go | go modules (via GOPROXY) |
+| Java | Maven (via `~/.m2/settings.xml` mirror); Gradle when it reads `~/.m2` |
 
 ---
 
@@ -39,7 +40,8 @@ shared/blocks/
 ├── yarnrc.txt         ← .yarnrc.yml content  (yarn 2+)
 ├── pipconf.txt        ← pip.conf / pip.ini content
 ├── uvtoml.txt         ← uv.toml content
-└── goenv.txt          ← go env file content  (GOPROXY)
+├── goenv.txt          ← go env file content  (GOPROXY)
+└── mavensettings.txt  ← ~/.m2/settings.xml fragment  (Maven mirror + server)
 ```
 
 Edit these files to customise what gets written to developer machines. The orchestration scripts (`templates/*.sh` / `templates/*.ps1`) control which files get written and in what order.
@@ -48,13 +50,14 @@ Edit these files to customise what gets written to developer machines. The orche
 
 ## Generated output
 
-Running either generator produces four scripts in `out/<namespace>/`:
+Running either generator produces these scripts in `out/<namespace>/`:
 
 | Script | Purpose |
 |---|---|
 | `endor-js.*` | Configure JavaScript package managers only |
 | `endor-python.*` | Configure Python package managers only |
 | `endor-go.*` | Configure Go modules only |
+| `endor-maven.*` | Configure Maven only |
 | `endor-all.*` | Configure all package managers (single-script deploy) |
 | `endor-remove.*` | Strip all Endor configuration from a machine |
 
