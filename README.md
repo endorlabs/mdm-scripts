@@ -12,4 +12,4 @@ Generates self-contained MDM scripts that configure developer machines to route 
 
 ### [`agent-governance/`](agent-governance/README.md)
 
-Generates MDM-deployable hook configurations for AI coding agents (Claude Code, Cursor) that wire every session/tool/file action to `endorctl ai-audit` for governance — across macOS, Linux, and Windows.
+Generates MDM-deployable Endor Labs audit hooks for every AI coding agent on your fleet.

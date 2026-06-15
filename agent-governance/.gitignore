@@ -1,5 +1,0 @@
-# Accidental local generations (default output names when run without -o).
-*.tmp
-/claude-settings.json
-/cursor-hooks.json
-/com.anthropic.claudecode.mobileconfig
