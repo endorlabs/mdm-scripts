@@ -1,8 +1,8 @@
 #!/bin/sh
-# render-plist.sh — wrap a managed-settings JSON into an MDM Configuration
+# render-plist.sh - wrap a managed-settings JSON into an MDM Configuration
 # Profile (.mobileconfig). It reads the settings object on stdin and embeds it
 # under a payload of the given type, so the agent-specific config is produced by
-# render.sh and reused verbatim — this script only adds the profile envelope and
+# render.sh and reused verbatim - this script only adds the profile envelope and
 # converts to a plist. The envelope is agent-agnostic; --payload-type selects the
 # app (default: Claude Code).
 #

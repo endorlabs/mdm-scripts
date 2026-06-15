@@ -57,7 +57,7 @@ scripts/render.sh --agent claude \
   --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o - \
 | scripts/render-plist.sh \
   --identifier com.acme.ai-governance.claudecode --organization "Acme Corp" \
-  --name "Claude Code — Endor AI Governance" \
+  --name "Claude Code - Endor AI Governance" \
   -o com.anthropic.claudecode.mobileconfig
 
 # Windows config (push via Intune)
@@ -100,14 +100,14 @@ A good rollout starts in monitor-only, watches the Endor audit log over a repres
 | `endorctl` binary | Self-updates on session start (SHA-256 verified); `--skip-endorctl-update` pins it | None |
 | Governance rules | Server-side at Endor, fetched at run time | None |
 | Claude profile config (macOS) | Regenerate the `.mobileconfig`, re-upload to the MDM | Re-upload |
-| Cursor runner config (macOS/Linux) | Repo is re-pulled and re-rendered on each check-in | None after setup |
+| Cursor runner config (macOS/Linux) | Runner re-fetches `REF` and re-renders on each scheduled run | None after setup |
 | Windows config | Regenerate (`--target-os windows`), re-push via Intune | Re-push |
 
 **Security properties:**
 
 - **Tamper-resistance.** A profile-delivered config (Claude on macOS) is an OS-enforced managed setting — hard for a developer to override. A script-delivered file (Cursor, and the file-based Linux/Windows paths) is not OS-enforced; a determined developer could override it. Cursor has no profile mechanism today, so the profile path is Claude-only.
 - **Least-privilege credentials.** A generated profile carries the API key and secret to every laptop — scope it to an **audit-only** credential.
-- **Pin the revision.** The runner executes this repo's code as root (via the MDM), so it can fetch a specific `--ref` (tag, branch, or commit) instead of the branch tip — each device then runs only a reviewed revision. The runbook wrappers set a `REF` you bump deliberately to roll out a change; without one, it tracks the default branch.
+- **Pin the revision.** The runner executes this repo's code as root, so it fetches a specific revision: set `REF` (at the top of `runner.sh`) to a reviewed tag, branch, or commit and each device runs only that, not the moving branch tip. Bump `REF` to roll out a change; the default (`main`) tracks the latest.
 - **Credential isolation (Claude).** The `env` block exports into every subprocess Claude spawns, including any `endorctl` the agent itself runs. To keep audit credentials out of the agent's process tree, hook-scoped variables use an `AGENT_HOOK_ENDOR_*` prefix that `endorctl` doesn't read natively, and the hook passes them through as `--api-key …` flags.
 - **Robust quoting.** Credentials and `--env` values are escaped for their target — the shell (POSIX, via `@sh`), PowerShell (single-quote doubling), and JSON (`jq`) — and `$VAR` references in the generated commands are quoted, so a value containing a space, quote, `$`, `;`, `*`, or `` ` `` never word-splits or breaks the hook.
 
@@ -152,4 +152,4 @@ There's no separate Linux example: `settings.json` is exactly what Claude reads 
 
 ## Extending
 
-To add another agent: add a `build_<agent>` jq builder and a `case` arm in [`scripts/render.sh`](scripts/render.sh), plus a default `--dest` in [`scripts/runner.sh`](scripts/runner.sh) if it's script-delivered.
+To add another agent: add a `build_<agent>` jq builder and a `case` arm in [`scripts/render.sh`](scripts/render.sh), plus a default-`DEST` `case` arm in [`scripts/runner.sh`](scripts/runner.sh) if it's script-delivered.

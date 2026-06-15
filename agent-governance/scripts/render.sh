@@ -1,5 +1,5 @@
 #!/bin/sh
-# render.sh — generate Endor AI-governance hook config (JSON) for an AI coding agent.
+# render.sh - generate Endor AI-governance hook config (JSON) for an AI coding agent.
 #
 # Builds the config with jq, which escapes JSON correctly by construction. The
 # Claude MDM profile (.mobileconfig) is produced by piping this script's Claude
@@ -39,7 +39,7 @@ die() { echo "render.sh: error: $*" >&2; exit 1; }
 command -v jq >/dev/null || die "jq is required (install it, e.g. 'brew install jq')"
 
 # Quote a value for safe interpolation into a command string. Values (creds,
-# --env) may contain spaces, quotes, $, ;, globs — so never inline them raw.
+# --env) may contain spaces, quotes, $, ;, globs - so never inline them raw.
 sq()  { printf '%s' "$1" | jq -Rrs '@sh'; }                    # POSIX single-quoted
 psq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; } # PowerShell single-quoted
 
@@ -165,7 +165,7 @@ case "$agent:$target_os" in
     # (e.g. a block) is the hook's. `umask 077` makes the file born 0600 (no
     # readable window); `chmod 600` also covers a recycled-PID leftover. The name
     # is predictable but lives in $HOME, which other users cannot write, so there's
-    # no cross-user symlink race. Only builtins precede `cat` — no subshell, which
+    # no cross-user symlink race. Only builtins precede `cat` - no subshell, which
     # Cursor's stdin pipe does not tolerate, so $(mktemp) is intentionally avoided.
     cmd_session=$(printf 'umask 077\nT="$HOME/.endorctl-cursor-stdin.$$"\ncat > "$T"\nchmod 600 "$T"\ntrap '\''rm -f "$T"'\'' EXIT\n%s\n%s"$HOME/.endorctl/endorctl" --api %s --namespace %s --api-key %s --api-secret %s ai-audit cursor < "$T"' \
       "$boot" "$env_prefix" "$(sq "$api_url")" "$(sq "$namespace")" "$(sq "$api_key")" "$(sq "$api_secret")") ;;

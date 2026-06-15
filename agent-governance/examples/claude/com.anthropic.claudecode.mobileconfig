@@ -8,7 +8,7 @@
 			<key>PayloadDescription</key>
 			<string>Managed settings (env + hooks) for Endor Labs AI governance auditing.</string>
 			<key>PayloadDisplayName</key>
-			<string>Claude Code — Endor AI Governance</string>
+			<string>Claude Code - Endor AI Governance</string>
 			<key>PayloadEnabled</key>
 			<true/>
 			<key>PayloadIdentifier</key>
@@ -161,7 +161,7 @@ fi
 	<key>PayloadDescription</key>
 	<string>Deploys managed AI-tool settings for Endor Labs AI auditing.</string>
 	<key>PayloadDisplayName</key>
-	<string>Claude Code — Endor AI Governance</string>
+	<string>Claude Code - Endor AI Governance</string>
 	<key>PayloadIdentifier</key>
 	<string>com.endorlabs.ai-governance.claudecode</string>
 	<key>PayloadOrganization</key>

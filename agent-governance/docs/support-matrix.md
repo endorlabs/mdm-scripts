@@ -5,12 +5,12 @@ Every combination of agent × installation mechanism × OS this repo covers, and
 | # | Agent | Mechanism | OS | Provider(s) | How it's delivered | Runbook |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | Cursor | Manual / Enterprise | — | Cursor Team hooks | `render.sh --agent cursor` → drop the file, or paste into the Team-hooks dashboard | [manual / enterprise](deploy-manual-enterprise.md) |
-| 2 | Cursor | MDM | macOS | Kandji, Jamf, JumpCloud | `runner.sh --agent cursor` → `/Library/Application Support/Cursor/hooks.json` | [runner](deploy-cursor-runner.md), [jumpcloud](deploy-jumpcloud.md) |
-| 3 | Cursor | MDM | Linux | JumpCloud · config mgmt | `runner.sh --agent cursor` → `/etc/cursor/hooks.json` | [runner](deploy-cursor-runner.md), [jumpcloud](deploy-jumpcloud.md) |
+| 2 | Cursor | MDM | macOS | Kandji, Jamf, JumpCloud | `runner.sh (AGENT=cursor)` → `/Library/Application Support/Cursor/hooks.json` | [runner](deploy-cursor-runner.md), [jumpcloud](deploy-jumpcloud.md) |
+| 3 | Cursor | MDM | Linux | JumpCloud · config mgmt | `runner.sh (AGENT=cursor)` → `/etc/cursor/hooks.json` | [runner](deploy-cursor-runner.md), [jumpcloud](deploy-jumpcloud.md) |
 | 4 | Cursor | MDM | Windows | Intune, JumpCloud | `--target-os windows` → push to `C:\ProgramData\Cursor\hooks.json` (system-wide) or `%USERPROFILE%\.cursor\hooks.json` (per-user) | [intune](deploy-windows-intune.md), [jumpcloud](deploy-jumpcloud.md) |
 | 5 | Claude Code | Manual / Enterprise | — | Claude admin console | `render.sh --agent claude` → drop the file, or set as server-managed settings | [manual / enterprise](deploy-manual-enterprise.md) |
 | 6 | Claude Code | MDM | macOS | Kandji, Jamf, JumpCloud | `render-plist.sh` → `.mobileconfig` profile (tamper-resistant) | [profile](deploy-claude-profile.md), [jumpcloud](deploy-jumpcloud.md) |
-| 7 | Claude Code | MDM | Linux | JumpCloud · config mgmt | `runner.sh --agent claude` → `/etc/claude-code/managed-settings.json` | [profile](deploy-claude-profile.md#linux-and-windows-the-same-settings-as-a-file), [jumpcloud](deploy-jumpcloud.md) |
+| 7 | Claude Code | MDM | Linux | JumpCloud · config mgmt | `runner.sh (AGENT=claude)` → `/etc/claude-code/managed-settings.json` | [profile](deploy-claude-profile.md#linux-and-windows-the-same-settings-as-a-file), [jumpcloud](deploy-jumpcloud.md) |
 | 8 | Claude Code | MDM | Windows | Intune, JumpCloud | `--target-os windows` → push to `C:\Program Files\ClaudeCode\managed-settings.json` | [intune](deploy-windows-intune.md), [jumpcloud](deploy-jumpcloud.md) |
 
 ## How delivery differs by OS

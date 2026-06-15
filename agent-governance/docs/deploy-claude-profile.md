@@ -14,7 +14,7 @@ scripts/render.sh --agent claude \
 | scripts/render-plist.sh \
   --identifier com.<customer>.ai-governance.claudecode \
   --organization "<Customer>" \
-  --name "Claude Code — Endor AI Governance" \
+  --name "Claude Code - Endor AI Governance" \
   -o com.anthropic.claudecode.mobileconfig
 ```
 
@@ -50,7 +50,7 @@ Profile-delivered config doesn't auto-update. To ship a change, regenerate the `
 
 | OS | Path | Deliver with |
 | --- | --- | --- |
-| Linux | `/etc/claude-code/managed-settings.json` (+ `managed-settings.d/`) | [`runner.sh --agent claude`](deploy-cursor-runner.md), config management, or a [JumpCloud](deploy-jumpcloud.md) Command |
+| Linux | `/etc/claude-code/managed-settings.json` (+ `managed-settings.d/`) | [`runner.sh (AGENT=claude)`](deploy-cursor-runner.md), config management, or a [JumpCloud](deploy-jumpcloud.md) Command |
 | Windows | `C:\Program Files\ClaudeCode\managed-settings.json` | pre-generate `--target-os windows`, push via [Intune](deploy-windows-intune.md) |
 
 Generate the Linux file with `render.sh --agent claude` (POSIX hooks) and the Windows file with `--target-os windows` (encoded PowerShell hooks).
