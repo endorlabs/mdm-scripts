@@ -152,6 +152,11 @@ case "$agent" in claude) subcmd="claudecode" ;; cursor) subcmd="cursor" ;; esac
 posix_audit='"$HOME/.endorctl/endorctl" --api "$AGENT_HOOK_ENDOR_API" --namespace "$AGENT_HOOK_ENDOR_NAMESPACE" --api-key "$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY" --api-secret "$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET" ai-audit '"$subcmd"
 ps_bin='& "$env:USERPROFILE\.endorctl\endorctl.exe"'
 ps_audit="$ps_bin"' --api "$env:AGENT_HOOK_ENDOR_API" --namespace "$env:AGENT_HOOK_ENDOR_NAMESPACE" --api-key "$env:AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY" --api-secret "$env:AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET" ai-audit '"$subcmd"'; exit $LASTEXITCODE'
+# A native command under `powershell -EncodedCommand` does not inherit the agent's
+# event pipe (POSIX does), so per-event Windows hooks read stdin and pipe it in - else
+# endorctl gets an empty event and silently enforces nothing. IsInputRedirected guards
+# against a blocking read if a hook is invoked without a pipe.
+ps_audit_event=$(printf '$ProgressPreference = "SilentlyContinue"\n$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = if ([Console]::IsInputRedirected) { [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd() } else { "" }\n$in | %s' "$ps_audit")
 
 # --- compose per-hook command strings (session = bootstrap + audit) -----------
 case "$agent:$target_os" in
@@ -170,11 +175,14 @@ case "$agent:$target_os" in
     cmd_session=$(printf 'umask 077\nT="$HOME/.endorctl-cursor-stdin.$$"\ncat > "$T"\nchmod 600 "$T"\ntrap '\''rm -f "$T"'\'' EXIT\n%s\n%s"$HOME/.endorctl/endorctl" --api %s --namespace %s --api-key %s --api-secret %s ai-audit cursor < "$T"' \
       "$boot" "$env_prefix" "$(sq "$api_url")" "$(sq "$namespace")" "$(sq "$api_key")" "$(sq "$api_secret")") ;;
   claude:windows)
-    cmd_audit=$(psenc "$ps_audit")
+    cmd_audit=$(psenc "$ps_audit_event")
     cmd_session=$(psenc "$(printf '%s\n%s' "$boot" "$ps_audit")") ;;
   cursor:windows)
-    cmd_audit=$(psenc "$ps_audit")
-    cmd_session=$(psenc "$(printf '$in = [Console]::In.ReadToEnd()\n%s\n%s\n$in | %s --api %s --namespace %s --api-key %s --api-secret %s ai-audit cursor; exit $LASTEXITCODE' \
+    cmd_audit=$(psenc "$ps_audit_event")
+    # Windows PowerShell 5.1 is not UTF-8 by default; force it and read stdin as raw
+    # bytes so endorctl's JSON payload isn't mangled (avoid [Console]::InputEncoding,
+    # whose setter throws on a piped handle).
+    cmd_session=$(psenc "$(printf '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd()\n%s\n%s\n$in | %s --api %s --namespace %s --api-key %s --api-secret %s ai-audit cursor; exit $LASTEXITCODE' \
       "$boot" "$ps_env_sets" "$ps_bin" "$(psq "$api_url")" "$(psq "$namespace")" "$(psq "$api_key")" "$(psq "$api_secret")")") ;;
 esac
 
