@@ -20,7 +20,7 @@ if (-not $skip) {
   try {
     $meta = Invoke-RestMethod -Uri 'https://api.endorlabs.com/meta/version' -TimeoutSec 30
     $latest = [string]$meta.ClientVersion
-    $expectedSha = [string]$meta.$archKey
+    $expectedSha = [string]$meta.ClientChecksums.$archKey
   } catch {}
   $uptodate = ($current -and ((-not $latest) -or ($current -eq $latest)))
   if (-not $uptodate) {
