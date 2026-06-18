@@ -16,6 +16,9 @@
 #   Go:
 #     %APPDATA%\go\env
 #
+#   Java / Maven:
+#     %USERPROFILE%\.m2\settings.xml
+#
 # Registry env vars removed:
 #   ENDOR_API_KEY_ID, ENDOR_API_SECRET, ENDOR_AUTH_B64
 #   ENDOR_NPM_REGISTRY_URL, ENDOR_PYPI_URL, ENDOR_GO_PROXY_URL
@@ -93,6 +96,12 @@ $_goEnvFile = $_goEnvFile.Trim()
 
 Invoke-RemoveBlock -FilePath $_goEnvFile -DryRun:$DryRun
 Remove-Variable _goEnvFile, _goExe
+Write-Host ''
+
+# -- Maven config file --
+Write-Host '[endor-remove] -- Maven --------------------------------------------------'
+
+Remove-XmlBlock -FilePath (Join-Path $UserHome '.m2\settings.xml') -DryRun:$DryRun
 Write-Host ''
 
 if ($DryRun) {

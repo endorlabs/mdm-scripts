@@ -30,6 +30,7 @@
 #   endor-js.ps1       — JavaScript: npm . pnpm . yarn classic · yarn 2+ . bun
 #   endor-python.ps1   — Python:     pip . uv . poetry
 #   endor-go.ps1       — Go:         go modules (GOPROXY -> %APPDATA%\go\env)
+#   endor-maven.ps1    — Maven:      Maven (settings.xml -> %USERPROFILE%\.m2\settings.xml)
 #   endor-all.ps1      — All of the above (single-script MDM deploy)
 #   endor-remove.ps1   — Offboarding: strips Endor config + registry env vars
 #
@@ -77,6 +78,10 @@ $PIP_INDEX_URL = "https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v
 
 $GO_PROXY_URL  = "https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/$ENDOR_NAMESPACE/firewall/go/,direct"
 
+# Maven keeps credentials in a <server> block via ${env.*}, so — unlike Go — no
+# credentials are baked into this URL.
+$MAVEN_REGISTRY_URL = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/maven/"
+
 # -- Output directory ----------------------------------------------------------
 $OutDir = Join-Path $ScriptDir "out\$ENDOR_NAMESPACE"
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
@@ -98,6 +103,7 @@ function Invoke-Substitute {
     $r = $r.Replace('{{PIP_INDEX_URL}}',     $PIP_INDEX_URL)
     $r = $r.Replace('{{TRUSTED_HOST}}',      $TRUSTED_HOST)
     $r = $r.Replace('{{GO_PROXY_URL}}',      $GO_PROXY_URL)
+    $r = $r.Replace('{{MAVEN_REGISTRY_URL}}', $MAVEN_REGISTRY_URL)
     $r
 }
 
@@ -122,6 +128,7 @@ function Get-AllBlocks {
         (Get-BlockAssignment 'PIP_BLOCK'            (Join-Path $SharedBlocksDir 'pipconf.txt')),
         (Get-BlockAssignment 'UV_BLOCK'             (Join-Path $SharedBlocksDir 'uvtoml.txt')),
         (Get-BlockAssignment 'GO_BLOCK'             (Join-Path $SharedBlocksDir 'goenv.txt')),
+        (Get-BlockAssignment 'MAVEN_BLOCK'          (Join-Path $SharedBlocksDir 'mavensettings.txt')),
         '# --',
         ''
     ) -join "`n"
@@ -184,13 +191,18 @@ Build-Script `
     (Join-Path $OutDir  'endor-go.ps1') `
     'Configures Go modules (GOPROXY) for Endor Package Firewall.'
 
+Build-Script `
+    (Join-Path $TmplDir 'maven.ps1') `
+    (Join-Path $OutDir  'endor-maven.ps1') `
+    'Configures Maven (~\.m2\settings.xml) for Endor Package Firewall.'
+
 # -- Generate remove script ----------------------------------------------------
 Build-RemoveScript (Join-Path $OutDir 'endor-remove.ps1')
 
 # -- Generate combined all.ps1 -------------------------------------------------
 $_allName  = 'endor-all.ps1'
 $_allParts = @(
-    (Get-ScriptHeader -ScriptName $_allName -Description 'Configures all package managers for Endor Package Firewall. Covers: npm . pnpm . yarn classic . yarn 2+ . bun . pip . uv . poetry . go'),
+    (Get-ScriptHeader -ScriptName $_allName -Description 'Configures all package managers for Endor Package Firewall. Covers: npm . pnpm . yarn classic . yarn 2+ . bun . pip . uv . poetry . go . maven'),
     (Get-AllBlocks),
     '# == Env vars setup =====================================================',
     (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'envvars.ps1') -Raw -Encoding UTF8)),
@@ -204,8 +216,11 @@ $_allParts = @(
     '# == Go =================================================================',
     (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'go.ps1') -Raw -Encoding UTF8)),
     '',
+    '# == Maven ==============================================================',
+    (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'maven.ps1') -Raw -Encoding UTF8)),
+    '',
     "Write-Host ''",
-    "Write-Host '[endor] [done] All package managers configured for $ENDOR_NAMESPACE (js + python + go).'"
+    "Write-Host '[endor] [done] All package managers configured for $ENDOR_NAMESPACE (js + python + go + maven).'"
 )
 Set-Content -Path (Join-Path $OutDir $_allName) -Value ($_allParts -join "`n") -Encoding UTF8
 Remove-Variable -Name _allName, _allParts
@@ -217,6 +232,7 @@ Write-Host ''
 Write-Host ('   {0,-24}  {1}' -f 'endor-js.ps1',     'npm . pnpm . yarn classic . yarn 2+ . bun')
 Write-Host ('   {0,-24}  {1}' -f 'endor-python.ps1', 'pip . uv . poetry')
 Write-Host ('   {0,-24}  {1}' -f 'endor-go.ps1',     'go modules (GOPROXY)')
+Write-Host ('   {0,-24}  {1}' -f 'endor-maven.ps1',  'maven (~\.m2\settings.xml)')
 Write-Host ('   {0,-24}  {1}' -f 'endor-all.ps1',    'all of the above (single-script deploy)')
 Write-Host ('   {0,-24}  {1}' -f 'endor-remove.ps1', 'offboarding -- strips all Endor config + registry env vars')
 Write-Host ''

@@ -1,0 +1,17 @@
+<!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->
+  <servers>
+    <server>
+      <id>endor-firewall</id>
+      <username>${env.ENDOR_API_KEY_ID}</username>
+      <password>${env.ENDOR_API_SECRET}</password>
+    </server>
+  </servers>
+  <mirrors>
+    <mirror>
+      <id>endor-firewall</id>
+      <name>Endor Package Firewall</name>
+      <url>{{MAVEN_REGISTRY_URL}}</url>
+      <mirrorOf>*</mirrorOf>
+    </mirror>
+  </mirrors>
+<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->

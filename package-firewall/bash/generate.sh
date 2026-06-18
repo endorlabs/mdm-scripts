@@ -26,6 +26,7 @@
 #   endor-js.sh       — JavaScript: npm · pnpm · yarn classic · yarn 2+ · bun
 #   endor-python.sh   — Python:     pip · uv · poetry
 #   endor-go.sh       — Go:         go modules (GOPROXY → ~/.config/go/env)
+#   endor-maven.sh    — Maven:      Maven (settings.xml → ~/.m2/settings.xml)
 #   endor-all.sh      — All of the above (single-script MDM deploy)
 #   endor-remove.sh   — Offboarding: strips Endor config from all files
 #
@@ -61,6 +62,7 @@ PYPI_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/pypi/simple/"
 PIP_INDEX_URL="https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/pypi/simple/"
 
 GO_PROXY_URL="https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/go/,direct"
+MAVEN_REGISTRY_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/maven/"
 
 # ─── Output directory ─────────────────────────────────────────────────────────
 OUT_DIR="${SCRIPT_DIR}/out/${ENDOR_NAMESPACE}"
@@ -81,7 +83,8 @@ substitute() {
     -e "s|{{PIP_INDEX_URL}}|${PIP_INDEX_URL}|g" \
     -e "s|{{ENDOR_PYPI_URL}}|${PIP_INDEX_URL}|g" \
     -e "s|{{TRUSTED_HOST}}|${TRUSTED_HOST}|g" \
-    -e "s|{{GO_PROXY_URL}}|${GO_PROXY_URL}|g"
+    -e "s|{{GO_PROXY_URL}}|${GO_PROXY_URL}|g" \
+    -e "s|{{MAVEN_REGISTRY_URL}}|${MAVEN_REGISTRY_URL}|g"
 }
 
 # inline_common
@@ -118,6 +121,7 @@ emit_all_blocks() {
   emit_block_assignment "PIP_BLOCK"           "$SHARED_BLOCKS_DIR/pipconf.txt"
   emit_block_assignment "UV_BLOCK"            "$SHARED_BLOCKS_DIR/uvtoml.txt"
   emit_block_assignment "GO_BLOCK"            "$SHARED_BLOCKS_DIR/goenv.txt"
+  emit_block_assignment "MAVEN_BLOCK"         "$SHARED_BLOCKS_DIR/mavensettings.txt"
   echo "# ─────────────────────────────────────────────────────────────────────────────"
   echo ""
 }
@@ -231,13 +235,18 @@ build_script \
   "$OUT_DIR/endor-go.sh" \
   "Configures Go modules (GOPROXY) for Endor Package Firewall."
 
+build_script \
+  "$TMPL_DIR/maven.sh" \
+  "$OUT_DIR/endor-maven.sh" \
+  "Configures Maven (~/.m2/settings.xml) for Endor Package Firewall."
+
 # ─── Generate remove script ───────────────────────────────────────────────────
 build_remove_script "$OUT_DIR/endor-remove.sh"
 
 # ─── Generate combined all.sh ─────────────────────────────────────────────────
 {
   script_header "$OUT_DIR/endor-all.sh" \
-    "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry · go"
+    "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry · go · maven"
   emit_all_blocks
   echo "# ════════════════════════════════════════════════════════════════════════════"
   echo "# Env setup"
@@ -259,6 +268,11 @@ build_remove_script "$OUT_DIR/endor-remove.sh"
   echo "# ════════════════════════════════════════════════════════════════════════════"
   substitute < "$TMPL_DIR/go.sh"
   echo ""
+  echo "# ════════════════════════════════════════════════════════════════════════════"
+  echo "# Maven"
+  echo "# ════════════════════════════════════════════════════════════════════════════"
+  substitute < "$TMPL_DIR/maven.sh"
+  echo ""
   echo "echo \"\""
   echo "echo \"[endor] ✓ All package managers configured for ${ENDOR_NAMESPACE}.\""
   echo ""
@@ -273,6 +287,7 @@ echo ""
 printf "   %-24s  %s\n" "endor-js.sh"     "npm · pnpm · yarn classic · yarn 2+ · bun"
 printf "   %-24s  %s\n" "endor-python.sh" "pip · uv · poetry"
 printf "   %-24s  %s\n" "endor-go.sh"     "go modules (GOPROXY)"
+printf "   %-24s  %s\n" "endor-maven.sh"  "maven (~/.m2/settings.xml)"
 printf "   %-24s  %s\n" "endor-all.sh"    "all of the above (single-script deploy)"
 printf "   %-24s  %s\n" "endor-remove.sh" "offboarding — strips all Endor config"
 echo ""

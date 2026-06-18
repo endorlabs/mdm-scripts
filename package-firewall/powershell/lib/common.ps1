@@ -11,6 +11,8 @@
 #   Set-FileRestrictedAcl <path> <username>      — restricts file to owner only
 #   Invoke-UpsertBlock    <path> <content> ...   — idempotent sentinel-block writer
 #   Invoke-RemoveBlock    <path> ...             — strips Endor sentinel block from a file
+#   Invoke-UpsertXmlBlock <path> <content> ...   — XML-aware writer for Maven settings.xml
+#   Remove-XmlBlock       <path> ...             — strips Endor XML block from settings.xml
 #   Test-KeyConflict      <path> <pattern> <label> — warns when a key exists outside an Endor block
 
 # ╔══════════════════════════════════════════════════════════════════════╗
@@ -22,6 +24,12 @@
 # ╚══════════════════════════════════════════════════════════════════════╝
 $ENDOR_BLOCK_START = '# ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ====='
 $ENDOR_BLOCK_END   = '# ===== END ENDOR PACKAGE FIREWALL ====='
+
+# XML sentinel markers — used for settings.xml (Maven), which cannot use '#' comments.
+# These MUST match the BEGIN/END lines in shared/blocks/mavensettings.txt exactly,
+# and the bash ENDOR_XML_BLOCK_* markers, or re-runs and removal cannot find the block.
+$ENDOR_XML_BLOCK_START = '<!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->'
+$ENDOR_XML_BLOCK_END   = '<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->'
 
 # Get-ConsoleUser
 # Intune scripts run as SYSTEM by default. Detects the logged-in interactive user
@@ -311,6 +319,136 @@ function Invoke-RemoveBlock {
         Write-Host "[endor-remove] deleted (was empty) : $FilePath"
     } else {
         Set-Content -Path $FilePath -Value $newLines -Encoding UTF8
+        Write-Host "[endor-remove] block removed       : $FilePath"
+    }
+}
+
+# Invoke-UpsertXmlBlock <filepath> <content> <username> [-DryRun]
+#
+# Idempotent writer for an XML settings file (Maven %USERPROFILE%\.m2\settings.xml).
+# The generic Invoke-UpsertBlock appends to EOF, which for XML would land after
+# </settings> and produce invalid XML — so Maven needs this XML-aware variant.
+#   - File absent             -> create a minimal settings.xml wrapping the fragment
+#   - File present, has block  -> replace only the delimited fragment
+#   - File present, no block   -> insert fragment just before </settings>
+#   - -DryRun                 -> prints what would happen, writes nothing
+# The fragment carries its own XML-comment sentinels (from mavensettings.txt), so
+# this helper detects/strips by the marker strings rather than adding them itself.
+function Invoke-UpsertXmlBlock {
+    param(
+        [string]$FilePath,
+        [string]$Content,
+        [string]$Username,
+        [switch]$DryRun
+    )
+
+    $dir        = Split-Path $FilePath -Parent
+    $fileExists = Test-Path $FilePath
+    $raw        = if ($fileExists) { Get-Content $FilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue } else { '' }
+    $hasBlock   = $raw -match [regex]::Escape($ENDOR_XML_BLOCK_START)
+
+    if ($DryRun) {
+        if ($hasBlock) {
+            Write-Host '[dry-run]   action : REPLACE Endor block in settings.xml'
+        } elseif ($fileExists) {
+            Write-Host '[dry-run]   action : INSERT Endor block before </settings>'
+        } else {
+            Write-Host '[dry-run]   action : CREATE settings.xml with Endor block'
+        }
+        Write-Host "[dry-run]   file   : $FilePath"
+        $Content -split "`n" | ForEach-Object { Write-Host "[dry-run]     $_" }
+        Write-Host ''
+        return
+    }
+
+    if ($dir -and -not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+
+    # Case 1: file absent -> write a complete minimal settings.xml
+    if (-not $fileExists) {
+        $scaffold = @(
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"'
+            '          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
+            '          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 http://maven.apache.org/xsd/settings-1.2.0.xsd">'
+            $Content
+            '</settings>'
+        ) -join "`n"
+        Set-Content -Path $FilePath -Value $scaffold -Encoding UTF8
+        Set-FileRestrictedAcl -FilePath $FilePath -Username $Username
+        return
+    }
+
+    # Case 2: existing Endor block -> strip it (between and including the markers)
+    $lines = @(Get-Content $FilePath -Encoding UTF8)
+    if ($hasBlock) {
+        $inBlock = $false
+        $kept    = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in $lines) {
+            if ($line -match [regex]::Escape($ENDOR_XML_BLOCK_START)) { $inBlock = $true;  continue }
+            if ($line -match [regex]::Escape($ENDOR_XML_BLOCK_END))   { $inBlock = $false; continue }
+            if (-not $inBlock) { $kept.Add($line) }
+        }
+        $lines = $kept.ToArray()
+    }
+
+    # Case 3: insert the fresh fragment immediately before the first </settings>
+    $out      = [System.Collections.Generic.List[string]]::new()
+    $inserted = $false
+    foreach ($line in $lines) {
+        if (-not $inserted -and $line -match '</settings>') {
+            $out.Add($Content)
+            $inserted = $true
+        }
+        $out.Add($line)
+    }
+    if (-not $inserted) { $out.Add($Content) }  # no closing tag found — append so it isn't lost
+
+    Set-Content -Path $FilePath -Value $out -Encoding UTF8
+    Set-FileRestrictedAcl -FilePath $FilePath -Username $Username
+}
+
+# Remove-XmlBlock <filepath> [-DryRun]
+#
+# Strips the Endor XML fragment from settings.xml. If the file is left with only
+# the empty <settings> scaffold (i.e. it was Endor-only), the whole file is deleted.
+function Remove-XmlBlock {
+    param([string]$FilePath, [switch]$DryRun)
+
+    if (-not (Test-Path $FilePath)) {
+        Write-Host "[endor-remove] skip (not found)    : $FilePath"
+        return
+    }
+    $raw = Get-Content $FilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    if (-not ($raw -match [regex]::Escape($ENDOR_XML_BLOCK_START))) {
+        Write-Host "[endor-remove] skip (no Endor block): $FilePath"
+        return
+    }
+
+    if ($DryRun) {
+        Write-Host '[dry-run]   action : REMOVE Endor block from settings.xml'
+        Write-Host "[dry-run]   file   : $FilePath"
+        Write-Host ''
+        return
+    }
+
+    $lines   = @(Get-Content $FilePath -Encoding UTF8)
+    $inBlock = $false
+    $kept    = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in $lines) {
+        if ($line -match [regex]::Escape($ENDOR_XML_BLOCK_START)) { $inBlock = $true;  continue }
+        if ($line -match [regex]::Escape($ENDOR_XML_BLOCK_END))   { $inBlock = $false; continue }
+        if (-not $inBlock) { $kept.Add($line) }
+    }
+
+    # If only the empty XML scaffold remains (no real Maven elements), delete the file
+    $hasContent = ($kept -join "`n") -match '<(server|mirror|profile|proxy|pluginGroup|repository)'
+    if (-not $hasContent) {
+        Remove-Item $FilePath -Force
+        Write-Host "[endor-remove] deleted (was empty) : $FilePath"
+    } else {
+        Set-Content -Path $FilePath -Value $kept -Encoding UTF8
         Write-Host "[endor-remove] block removed       : $FilePath"
     }
 }
