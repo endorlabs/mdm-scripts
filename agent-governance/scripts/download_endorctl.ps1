@@ -1,3 +1,6 @@
+# Silence the progress stream; else PowerShell serializes it to stderr as "#< CLIXML"
+# noise the MDM hook misreads as errors (2>$null / -ErrorAction don't cover it).
+$ProgressPreference = 'SilentlyContinue'
 $Bin = Join-Path $env:USERPROFILE '.endorctl\endorctl.exe'
 $skip = $false
 if ($env:ENDORCTL_SKIP_UPDATE -and (Test-Path $Bin)) { $skip = $true }
@@ -20,7 +23,7 @@ if (-not $skip) {
   try {
     $meta = Invoke-RestMethod -Uri 'https://api.endorlabs.com/meta/version' -TimeoutSec 30
     $latest = [string]$meta.ClientVersion
-    $expectedSha = [string]$meta.$archKey
+    $expectedSha = [string]$meta.ClientChecksums.$archKey
   } catch {}
   $uptodate = ($current -and ((-not $latest) -or ($current -eq $latest)))
   if (-not $uptodate) {
