@@ -2,3 +2,10 @@ package-firewall/out/
 .env
 **/out/
 .DS_Store
+
+# agent-governance: stray local generations from render.sh run without -o
+# (may carry real credentials — never commit them)
+*.tmp
+agent-governance/claude-settings.json
+agent-governance/cursor-hooks.json
+agent-governance/com.anthropic.claudecode.mobileconfig
