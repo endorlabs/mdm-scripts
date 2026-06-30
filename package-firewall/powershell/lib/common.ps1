@@ -31,6 +31,33 @@ $ENDOR_BLOCK_END   = '# ===== END ENDOR PACKAGE FIREWALL ====='
 $ENDOR_XML_BLOCK_START = '<!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->'
 $ENDOR_XML_BLOCK_END   = '<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->'
 
+# ── User attribution helpers ──────────────────────────────────────────────────
+# Stamp <console-user>@<machine> onto each package-firewall request WITHOUT issuing
+# per-user API keys. The label is encoded into the Basic-auth username; the firewall
+# decodes it, authenticates with the real shared API key, and records the label on
+# the log (shown as "User"). UNVERIFIED telemetry only — never an authz signal.
+
+# Get-EndorAttrUsername <label> <apiKeyId>
+# Builds the attributed Basic-auth username: base64(base64("userattr:"+label)+":"+keyId).
+# The double base64 lets the label contain any characters safely. Mirrors
+# decodeAttributedUsername() in endorfactory's auth layer.
+function Get-EndorAttrUsername {
+    param([string]$Label, [string]$ApiKeyId)
+    $inner = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("userattr:$Label"))
+    [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("${inner}:${ApiKeyId}"))
+}
+
+# Get-EndorUrlEncB64 <b64> — percent-encode a base64 string for URL userinfo.
+function Get-EndorUrlEncB64 {
+    param([string]$B64)
+    $B64.Replace('+', '%2B').Replace('/', '%2F').Replace('=', '%3D')
+}
+
+# Get-EndorHostLabel — a stable, human-readable machine name for attribution.
+function Get-EndorHostLabel {
+    if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { [System.Net.Dns]::GetHostName() }
+}
+
 # Get-ConsoleUser
 # Intune scripts run as SYSTEM by default. Detects the logged-in interactive user
 # via explorer.exe and resolves their profile path + SID for registry writes.

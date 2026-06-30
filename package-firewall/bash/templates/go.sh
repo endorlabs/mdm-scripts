@@ -7,8 +7,9 @@
 #   Linux  → ~/.config/go/env  (or $XDG_CONFIG_HOME/go/env)
 #
 # Block content is defined in shared/blocks/goenv.txt.
-# {{GO_PROXY_URL}} is substituted at generation time — Go env files do not support
-# env var expansion, so credentials are baked into the GOPROXY value.
+# Go env files do not support env var expansion, so the GOPROXY credential — which
+# carries the per-machine attributed username — is baked in as a literal here, by
+# resolving the ${ENDOR_GO_PROXY_URL} placeholder computed in testing.sh.
 #
 # The go env file takes lower precedence than the GOPROXY process env var, so
 # project-level overrides (go env -w GOPROXY=... in a workspace) remain possible.
@@ -16,6 +17,9 @@
 
 echo ""
 echo "[endor-go] ── Go package manager ───────────────────────────────────────────"
+
+# Resolve the attributed GOPROXY into the block content (go env can't expand ${VAR}).
+GO_BLOCK=${GO_BLOCK//'${ENDOR_GO_PROXY_URL}'/$ENDOR_GO_PROXY_URL}
 
 # ── Resolve go env file path ──────────────────────────────────────────────────
 # Run `go env GOENV` with the user's HOME so Go's os.UserConfigDir() returns

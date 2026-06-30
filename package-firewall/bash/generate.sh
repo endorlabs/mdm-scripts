@@ -49,20 +49,25 @@ SHARED_BLOCKS_DIR="$SCRIPT_DIR/../shared/blocks"
 FQDN="${ENDOR_FQDN:-https://factory.endorlabs.com}"
 
 # ─── Compute derived values ────────────────────────────────────────────────────
+# Credentials are NOT precomputed here. The per-machine attributed username
+# (<console-user>@<machine>) only exists on the developer's machine, so all auth
+# values are computed at install time by templates/testing.sh. Only credential-free
+# values (hosts, registry URLs) are derived here.
 FQDN_HOST="${FQDN#https://}"
 FQDN_HOST="${FQDN_HOST#http://}"
 TRUSTED_HOST="${FQDN_HOST%%:*}"
 
 NPM_REGISTRY_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/npm/"
 NPM_REGISTRY_HOST="${FQDN_HOST}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/npm/"
-NPM_AUTH_B64=$(printf '%s' "${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}" | base64 | tr -d '\n')
-API_SECRET_B64=$(printf '%s' "${ENDOR_API_SECRET}" | base64 | tr -d '\n')
-
 PYPI_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/pypi/simple/"
-PIP_INDEX_URL="https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/pypi/simple/"
-
-GO_PROXY_URL="https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/go/,direct"
 MAVEN_REGISTRY_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/maven/"
+
+# npm rejects self-signed TLS by default; relax it only for a localhost firewall
+# (local testing). Empty for any real (staging/prod) host.
+case "$TRUSTED_HOST" in
+  localhost|127.0.0.1|::1) NPM_STRICT_SSL="strict-ssl=false" ;;
+  *)                       NPM_STRICT_SSL="" ;;
+esac
 
 # ─── Output directory ─────────────────────────────────────────────────────────
 OUT_DIR="${SCRIPT_DIR}/out/${ENDOR_NAMESPACE}"
@@ -75,15 +80,12 @@ substitute() {
     -e "s|{{API_KEY_ID}}|${ENDOR_API_KEY_ID}|g" \
     -e "s|{{API_SECRET}}|${ENDOR_API_SECRET}|g" \
     -e "s|{{FQDN}}|${FQDN}|g" \
+    -e "s|{{FQDN_HOST}}|${FQDN_HOST}|g" \
     -e "s|{{NPM_REGISTRY_URL}}|${NPM_REGISTRY_URL}|g" \
     -e "s|{{NPM_REGISTRY_HOST}}|${NPM_REGISTRY_HOST}|g" \
-    -e "s|{{NPM_AUTH_B64}}|${NPM_AUTH_B64}|g" \
-    -e "s|{{API_SECRET_B64}}|${API_SECRET_B64}|g" \
+    -e "s|{{NPM_STRICT_SSL}}|${NPM_STRICT_SSL}|g" \
     -e "s|{{PYPI_URL}}|${PYPI_URL}|g" \
-    -e "s|{{PIP_INDEX_URL}}|${PIP_INDEX_URL}|g" \
-    -e "s|{{ENDOR_PYPI_URL}}|${PIP_INDEX_URL}|g" \
     -e "s|{{TRUSTED_HOST}}|${TRUSTED_HOST}|g" \
-    -e "s|{{GO_PROXY_URL}}|${GO_PROXY_URL}|g" \
     -e "s|{{MAVEN_REGISTRY_URL}}|${MAVEN_REGISTRY_URL}|g"
 }
 
@@ -111,10 +113,10 @@ emit_block_assignment() {
 # emit_all_blocks
 # Emits all block variable assignments into the generated script.
 # Edit shared/blocks/*.txt to change shared config content.
-# Edit templates/envsh.txt to change the bash-only env var block.
+# The env.sh block is built at runtime by templates/envsh.sh, from the
+# attribution credentials computed in templates/testing.sh.
 emit_all_blocks() {
   echo "# ── Block content (from shared/blocks/) ─────────────────────────────────────"
-  emit_block_assignment "ENVSH_BLOCK"         "$SHARED_BLOCKS_DIR/envsh.txt"
   emit_block_assignment "NPMRC_BLOCK"         "$SHARED_BLOCKS_DIR/npmrc.txt"
   emit_block_assignment "YARNRC_CLASSIC_BLOCK" "$SHARED_BLOCKS_DIR/yarnrc_classic.txt"
   emit_block_assignment "YARNRC_BLOCK"        "$SHARED_BLOCKS_DIR/yarnrc.txt"
@@ -192,6 +194,9 @@ build_script() {
 
   {
     script_header "$output" "$description"
+    echo "# ── User attribution (credentials computed at install time) ──────────────────"
+    substitute < "$TMPL_DIR/testing.sh"
+    echo ""
     emit_all_blocks
     echo "# ════════════════════════════════════════════════════════════════════════════"
     echo "# Env setup"
@@ -247,6 +252,9 @@ build_remove_script "$OUT_DIR/endor-remove.sh"
 {
   script_header "$OUT_DIR/endor-all.sh" \
     "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry · go · maven"
+  echo "# ── User attribution (credentials computed at install time) ──────────────────"
+  substitute < "$TMPL_DIR/testing.sh"
+  echo ""
   emit_all_blocks
   echo "# ════════════════════════════════════════════════════════════════════════════"
   echo "# Env setup"
@@ -295,7 +303,7 @@ echo "   All scripts accept --dry-run to preview changes without writing anythin
 echo "   Upload to your MDM tool. Each script is self-contained and idempotent."
 echo ""
 echo "   To customise: edit shared/blocks/*.txt (shared config content)"
-echo "                 or templates/envsh.txt (bash env var block)"
+echo "                 or templates/testing.sh (user-attribution credential block)"
 echo "                 or templates/*.sh (orchestration logic)"
 echo ""
 echo "   Re-running overwrites the same output directory."

@@ -61,26 +61,21 @@ $ENDOR_API_SECRET = $env:ENDOR_API_SECRET
 $FQDN = if ($env:ENDOR_FQDN) { $env:ENDOR_FQDN.TrimEnd('/') } else { 'https://factory.endorlabs.com' }
 
 # -- Compute derived values ----------------------------------------------------
+# Credentials are NOT precomputed here. The per-machine attributed username
+# (<console-user>@<machine>) only exists on the developer's machine, so all auth
+# values are computed at install time by templates/envvars.ps1. Only credential-free
+# values (hosts, registry URLs) are derived here.
 $FQDN_HOST        = $FQDN -replace '^https?://', ''
 $TRUSTED_HOST     = $FQDN_HOST -replace ':.*', ''
 
 $NPM_REGISTRY_URL  = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/npm/"
 $NPM_REGISTRY_HOST = "$FQDN_HOST/v1/namespaces/$ENDOR_NAMESPACE/firewall/npm/"
-
-$_bytes          = [System.Text.Encoding]::UTF8.GetBytes("${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}")
-$NPM_AUTH_B64    = [System.Convert]::ToBase64String($_bytes)
-$_secretBytes    = [System.Text.Encoding]::UTF8.GetBytes($ENDOR_API_SECRET)
-$API_SECRET_B64  = [System.Convert]::ToBase64String($_secretBytes)
-Remove-Variable _bytes, _secretBytes
-
-$PYPI_URL      = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/pypi/simple/"
-$PIP_INDEX_URL = "https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/$ENDOR_NAMESPACE/firewall/pypi/simple/"
-
-$GO_PROXY_URL  = "https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/$ENDOR_NAMESPACE/firewall/go/,direct"
-
-# Maven keeps credentials in a <server> block via ${env.*}, so — unlike Go — no
-# credentials are baked into this URL.
+$PYPI_URL          = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/pypi/simple/"
 $MAVEN_REGISTRY_URL = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/maven/"
+
+# npm rejects self-signed TLS by default; relax it only for a localhost firewall
+# (local testing). Empty for any real (staging/prod) host.
+$NPM_STRICT_SSL = if ($TRUSTED_HOST -in @('localhost', '127.0.0.1', '::1')) { 'strict-ssl=false' } else { '' }
 
 # -- Output directory ----------------------------------------------------------
 $OutDir = Join-Path $ScriptDir "out\$ENDOR_NAMESPACE"
@@ -91,18 +86,16 @@ New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 function Invoke-Substitute {
     param([string]$Content)
     $r = $Content
-    $r = $r.Replace('{{NAMESPACE}}',         $ENDOR_NAMESPACE)
-    $r = $r.Replace('{{API_KEY_ID}}',        $ENDOR_API_KEY_ID)
-    $r = $r.Replace('{{API_SECRET}}',        $ENDOR_API_SECRET)
-    $r = $r.Replace('{{FQDN}}',              $FQDN)
-    $r = $r.Replace('{{NPM_REGISTRY_URL}}',  $NPM_REGISTRY_URL)
-    $r = $r.Replace('{{NPM_REGISTRY_HOST}}', $NPM_REGISTRY_HOST)
-    $r = $r.Replace('{{NPM_AUTH_B64}}',      $NPM_AUTH_B64)
-    $r = $r.Replace('{{API_SECRET_B64}}',   $API_SECRET_B64)
-    $r = $r.Replace('{{PYPI_URL}}',          $PYPI_URL)
-    $r = $r.Replace('{{PIP_INDEX_URL}}',     $PIP_INDEX_URL)
-    $r = $r.Replace('{{TRUSTED_HOST}}',      $TRUSTED_HOST)
-    $r = $r.Replace('{{GO_PROXY_URL}}',      $GO_PROXY_URL)
+    $r = $r.Replace('{{NAMESPACE}}',          $ENDOR_NAMESPACE)
+    $r = $r.Replace('{{API_KEY_ID}}',         $ENDOR_API_KEY_ID)
+    $r = $r.Replace('{{API_SECRET}}',         $ENDOR_API_SECRET)
+    $r = $r.Replace('{{FQDN}}',               $FQDN)
+    $r = $r.Replace('{{FQDN_HOST}}',          $FQDN_HOST)
+    $r = $r.Replace('{{NPM_REGISTRY_URL}}',   $NPM_REGISTRY_URL)
+    $r = $r.Replace('{{NPM_REGISTRY_HOST}}',  $NPM_REGISTRY_HOST)
+    $r = $r.Replace('{{NPM_STRICT_SSL}}',     $NPM_STRICT_SSL)
+    $r = $r.Replace('{{PYPI_URL}}',           $PYPI_URL)
+    $r = $r.Replace('{{TRUSTED_HOST}}',       $TRUSTED_HOST)
     $r = $r.Replace('{{MAVEN_REGISTRY_URL}}', $MAVEN_REGISTRY_URL)
     $r
 }

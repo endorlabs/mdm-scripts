@@ -1,6 +1,11 @@
 # templates/envvars.ps1
-# Writes persistent user-level environment variables to HKCU:\Environment.
-# Values are baked in at generation time by generate.ps1.
+# Computes the attributed Basic-auth username at install time, then writes the
+# resulting credentials as persistent user-level environment variables to
+# HKCU:\Environment.
+#
+# The attributed username (<console-user>@<machine>) only exists on the developer's
+# machine, so — unlike a plain build-time bake — it is derived here, at runtime,
+# from $ConsoleUser (detected in the script header) and the machine name.
 #
 # On Windows, HKCU:\Environment is automatically inherited by every new process
 # the user starts — including non-interactive contexts such as Makefiles, git
@@ -8,20 +13,35 @@
 # shell gap that exists on macOS (where env vars require sourcing ~/.zshrc).
 #
 # {{PLACEHOLDER}} values are substituted at generation time.
-# The written registry entries are plain REG_SZ strings.
+# The $ENDOR_PYPI_URL / $ENDOR_GO_PROXY_URL variables set here are also reused by
+# python.ps1 / go.ps1 to bake literal index-url / GOPROXY values (pip, uv and go
+# cannot expand ${VAR}).
 
 Write-Host '[endor] -- environment variables ----------------------------------------'
 
+# -- User attribution: compute the attributed username + derived credentials --
+$_secret             = '{{API_SECRET}}'
+$ENDOR_ATTR_LABEL    = "$ConsoleUser@$(Get-EndorHostLabel)"
+$ENDOR_ATTR_USER     = Get-EndorAttrUsername -Label $ENDOR_ATTR_LABEL -ApiKeyId '{{API_KEY_ID}}'
+$ENDOR_AUTH_B64      = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("${ENDOR_ATTR_USER}:${_secret}"))
+$ENDOR_API_SECRET_B64 = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($_secret))
+$_attrUserEnc        = Get-EndorUrlEncB64 $ENDOR_ATTR_USER
+$ENDOR_PYPI_URL      = "https://${_attrUserEnc}:${_secret}@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/pypi/simple/"
+$ENDOR_GO_PROXY_URL  = "https://${_attrUserEnc}:${_secret}@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/go/,direct"
+
+Write-Host "[endor] user attribution: $ENDOR_ATTR_LABEL"
+
 $_envVars = [ordered]@{
     'ENDOR_API_KEY_ID'                          = '{{API_KEY_ID}}'
-    'ENDOR_API_SECRET'                          = '{{API_SECRET}}'
-    'ENDOR_AUTH_B64'                            = '{{NPM_AUTH_B64}}'
-    'ENDOR_API_SECRET_B64'                      = '{{API_SECRET_B64}}'
+    'ENDOR_API_SECRET'                          = $_secret
+    'ENDOR_ATTR_USER'                           = $ENDOR_ATTR_USER
+    'ENDOR_AUTH_B64'                            = $ENDOR_AUTH_B64
+    'ENDOR_API_SECRET_B64'                      = $ENDOR_API_SECRET_B64
     'ENDOR_NPM_REGISTRY_URL'                    = '{{NPM_REGISTRY_URL}}'
-    'ENDOR_PYPI_URL'                            = '{{PIP_INDEX_URL}}'
-    'ENDOR_GO_PROXY_URL'                        = '{{GO_PROXY_URL}}'
-    'POETRY_HTTP_BASIC_ENDOR_FIREWALL_USERNAME' = '{{API_KEY_ID}}'
-    'POETRY_HTTP_BASIC_ENDOR_FIREWALL_PASSWORD' = '{{API_SECRET}}'
+    'ENDOR_PYPI_URL'                            = $ENDOR_PYPI_URL
+    'ENDOR_GO_PROXY_URL'                        = $ENDOR_GO_PROXY_URL
+    'POETRY_HTTP_BASIC_ENDOR_FIREWALL_USERNAME' = $ENDOR_ATTR_USER
+    'POETRY_HTTP_BASIC_ENDOR_FIREWALL_PASSWORD' = $_secret
 }
 
 foreach ($_name in $_envVars.Keys) {
@@ -32,6 +52,6 @@ foreach ($_name in $_envVars.Keys) {
         Write-Host "[endor]   set : $_name"
     }
 }
-Remove-Variable _envVars
+Remove-Variable _envVars, _secret, _attrUserEnc
 Write-Host '[endor] [done] env vars -- take effect in new terminal sessions'
 Write-Host ''

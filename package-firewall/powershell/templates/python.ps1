@@ -6,9 +6,12 @@
 #   %APPDATA%\uv\uv.toml       uv  (does NOT read pip.ini)
 #
 # Credential approach per tool:
-#   pip    -- literal credentials in pip.ini (pip cannot expand env vars)
-#   uv     -- ${ENDOR_PYPI_URL} env var ref; resolved from HKCU:\Environment at runtime
+#   pip    -- literal index-url in pip.ini (pip cannot expand env vars)
+#   uv     -- literal index-url in uv.toml (baked at install time, like pip)
 #   poetry -- POETRY_HTTP_BASIC_ENDOR_FIREWALL_* set in HKCU:\Environment above
+#
+# pip/uv credentials carry the per-machine attributed username, so they must be the
+# literal value computed in envvars.ps1 -- resolve the ${ENDOR_PYPI_URL} placeholder now.
 #
 # pip uses [endor-firewall] named section -- avoids clobbering admin's [global].
 #
@@ -16,6 +19,10 @@
 # Windows uses a single %APPDATA%\pip\pip.ini (no multi-path search needed).
 
 Write-Host '[endor-python] -- Python package managers --------------------------------'
+
+# Resolve the attributed index-url into the block content (pip/uv can't expand ${VAR}).
+$PIP_BLOCK = $PIP_BLOCK.Replace('${ENDOR_PYPI_URL}', $ENDOR_PYPI_URL)
+$UV_BLOCK  = $UV_BLOCK.Replace('${ENDOR_PYPI_URL}', $ENDOR_PYPI_URL)
 
 # -- pip.ini --
 # Windows: %APPDATA%\pip\pip.ini (equivalent of ~/.config/pip/pip.conf on macOS/Linux)

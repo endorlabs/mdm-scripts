@@ -34,7 +34,6 @@ Both the bash and PowerShell generators read block content from `shared/blocks/`
 
 ```
 shared/blocks/
-├── envsh.txt          ← ~/.config/endor/env.sh content  (bash only)
 ├── npmrc.txt          ← .npmrc content
 ├── yarnrc_classic.txt ← .yarnrc content  (yarn 1.x)
 ├── yarnrc.txt         ← .yarnrc.yml content  (yarn 2+)
@@ -45,6 +44,8 @@ shared/blocks/
 ```
 
 Edit these files to customise what gets written to developer machines. The orchestration scripts (`templates/*.sh` / `templates/*.ps1`) control which files get written and in what order.
+
+> **User attribution:** the `${ENDOR_*}` credential values referenced by these blocks (e.g. `${ENDOR_ATTR_USER}`, `${ENDOR_AUTH_B64}`) are computed **at install time** on each developer's machine — see `bash/templates/testing.sh` and `powershell/templates/envvars.ps1`. This stamps `<console-user>@<machine>` onto each firewall request (shown as **User** in the log) without per-user API keys. `~/.config/endor/env.sh` is generated from those values by `bash/templates/envsh.sh`.
 
 ---
 
