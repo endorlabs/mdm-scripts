@@ -3,7 +3,7 @@
 # env-var-based tools (npm, yarn 2+, maven, poetry).
 # Then adds a one-line source directive to existing shell profiles.
 #
-# The values come from templates/testing.sh, which computes the attributed
+# The values come from templates/attribution.sh, which computes the attributed
 # Basic-auth username (<console-user>@<machine>) at install time. They are written
 # here as resolved literals so the file is a plain set of exports — no per-shell
 # computation on every startup.

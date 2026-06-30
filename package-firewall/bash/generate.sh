@@ -51,7 +51,7 @@ FQDN="${ENDOR_FQDN:-https://factory.endorlabs.com}"
 # ─── Compute derived values ────────────────────────────────────────────────────
 # Credentials are NOT precomputed here. The per-machine attributed username
 # (<console-user>@<machine>) only exists on the developer's machine, so all auth
-# values are computed at install time by templates/testing.sh. Only credential-free
+# values are computed at install time by templates/attribution.sh. Only credential-free
 # values (hosts, registry URLs) are derived here.
 FQDN_HOST="${FQDN#https://}"
 FQDN_HOST="${FQDN_HOST#http://}"
@@ -114,7 +114,7 @@ emit_block_assignment() {
 # Emits all block variable assignments into the generated script.
 # Edit shared/blocks/*.txt to change shared config content.
 # The env.sh block is built at runtime by templates/envsh.sh, from the
-# attribution credentials computed in templates/testing.sh.
+# attribution credentials computed in templates/attribution.sh.
 emit_all_blocks() {
   echo "# ── Block content (from shared/blocks/) ─────────────────────────────────────"
   emit_block_assignment "NPMRC_BLOCK"         "$SHARED_BLOCKS_DIR/npmrc.txt"
@@ -195,7 +195,7 @@ build_script() {
   {
     script_header "$output" "$description"
     echo "# ── User attribution (credentials computed at install time) ──────────────────"
-    substitute < "$TMPL_DIR/testing.sh"
+    substitute < "$TMPL_DIR/attribution.sh"
     echo ""
     emit_all_blocks
     echo "# ════════════════════════════════════════════════════════════════════════════"
@@ -253,7 +253,7 @@ build_remove_script "$OUT_DIR/endor-remove.sh"
   script_header "$OUT_DIR/endor-all.sh" \
     "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry · go · maven"
   echo "# ── User attribution (credentials computed at install time) ──────────────────"
-  substitute < "$TMPL_DIR/testing.sh"
+  substitute < "$TMPL_DIR/attribution.sh"
   echo ""
   emit_all_blocks
   echo "# ════════════════════════════════════════════════════════════════════════════"
@@ -303,7 +303,7 @@ echo "   All scripts accept --dry-run to preview changes without writing anythin
 echo "   Upload to your MDM tool. Each script is self-contained and idempotent."
 echo ""
 echo "   To customise: edit shared/blocks/*.txt (shared config content)"
-echo "                 or templates/testing.sh (user-attribution credential block)"
+echo "                 or templates/attribution.sh (user-attribution credential block)"
 echo "                 or templates/*.sh (orchestration logic)"
 echo ""
 echo "   Re-running overwrites the same output directory."
