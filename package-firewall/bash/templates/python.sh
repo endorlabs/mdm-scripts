@@ -15,7 +15,7 @@
 #   poetry  → POETRY_HTTP_BASIC_ENDOR_FIREWALL_* env vars via env.sh (written by env.sh step)
 #
 # pip/uv credentials carry the per-machine attributed username, so they must be the
-# literal value computed in attribution.sh — resolve the ${ENDOR_PYPI_URL} placeholder now.
+# literal value computed in credentials.sh — resolve the ${ENDOR_PYPI_URL} placeholder now.
 #
 # pip section uses [endor-firewall] named section — avoids clobbering admin's [global].
 

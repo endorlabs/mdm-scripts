@@ -9,7 +9,7 @@
 # Block content is defined in shared/blocks/goenv.txt.
 # Go env files do not support env var expansion, so the GOPROXY credential — which
 # carries the per-machine attributed username — is baked in as a literal here, by
-# resolving the ${ENDOR_GO_PROXY_URL} placeholder computed in attribution.sh.
+# resolving the ${ENDOR_GO_PROXY_URL} placeholder computed in credentials.sh.
 #
 # The go env file takes lower precedence than the GOPROXY process env var, so
 # project-level overrides (go env -w GOPROXY=... in a workspace) remain possible.

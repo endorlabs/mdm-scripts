@@ -1,4 +1,4 @@
-# templates/attribution.sh
+# templates/credentials.sh
 # User attribution — runs on the developer's machine (where MDM executes this
 # script), AFTER the console user has been detected. Computes the attributed
 # Basic-auth username so the Package Firewall log can attribute installs to

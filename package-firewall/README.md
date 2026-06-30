@@ -45,7 +45,7 @@ shared/blocks/
 
 Edit these files to customise what gets written to developer machines. The orchestration scripts (`templates/*.sh` / `templates/*.ps1`) control which files get written and in what order.
 
-> **User attribution:** the `${ENDOR_*}` credential values referenced by these blocks (e.g. `${ENDOR_ATTR_USER}`, `${ENDOR_AUTH_B64}`) are computed **at install time** on each developer's machine — see `bash/templates/attribution.sh` and `powershell/templates/envvars.ps1`. This stamps `<console-user>@<machine>` onto each firewall request (shown as **User** in the log) without per-user API keys. `~/.config/endor/env.sh` is generated from those values by `bash/templates/envsh.sh`.
+> **User attribution:** the `${ENDOR_*}` credential values referenced by these blocks (e.g. `${ENDOR_ATTR_USER}`, `${ENDOR_AUTH_B64}`) are computed **at install time** on each developer's machine — see `bash/templates/credentials.sh` and `powershell/templates/envvars.ps1`. This stamps `<console-user>@<machine>` onto each firewall request (shown as **User** in the log) without per-user API keys. `~/.config/endor/env.sh` is generated from those values by `bash/templates/envsh.sh`.
 
 ---
 
