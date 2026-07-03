@@ -3,18 +3,13 @@
 # env-var-based tools (npm, yarn 2+, maven, poetry).
 # Then adds a one-line source directive to existing shell profiles.
 #
-# Block content is defined in shared/blocks/envsh.txt, with the same {{...}}
-# token names as always. Most are baked at generation time like every other
-# block; the four attribution-dependent ones ({{ATTR_USER}}, {{NPM_AUTH_B64}},
-# {{PIP_INDEX_URL}}, {{GO_PROXY_URL}}) derive from <console-user>@<machine>, so
-# generate.sh leaves them untouched and they are filled HERE, at install time,
-# from the values templates/credentials.sh computed — the written file is a
-# plain set of literal exports, no per-shell computation on every startup.
-# A token added to envsh.txt must be substituted by generate.sh or filled below,
-# or the script exits non-zero with a warning.
+# Block content comes from shared/blocks/envsh.txt. The attribution tokens
+# ({{ATTR_USER}}, {{NPM_AUTH_B64}}, {{PIP_INDEX_URL}}, {{GO_PROXY_URL}}) are
+# filled here at install time from credentials.sh; a token filled by neither
+# generate.sh nor this step triggers a warning and a non-zero exit.
 #
-# pip / uv / go are intentionally NOT sourced from here — those tools cannot expand
-# ${VAR}, so their config files get the literal value written by python.sh / go.sh.
+# pip / uv / go don't read env.sh — they can't expand ${VAR}; python.sh/go.sh
+# bake literal values instead.
 
 echo ""
 echo "[endor] ── env.sh setup ─────────────────────────────────────────────────────"
@@ -28,9 +23,8 @@ ENVSH_BLOCK=${ENVSH_BLOCK//'{{PIP_INDEX_URL}}'/$ENDOR_PYPI_URL}
 ENVSH_BLOCK=${ENVSH_BLOCK//'{{GO_PROXY_URL}}'/$ENDOR_GO_PROXY_URL}
 
 if [[ "$ENVSH_BLOCK" == *'{{'* ]]; then
-  echo "[endor] WARNING: unresolved {{...}} token in the env.sh block — a token in" >&2
-  echo "[endor]          shared/blocks/envsh.txt is neither substituted by generate.sh" >&2
-  echo "[endor]          nor filled in templates/envsh.sh. Tools would read a broken value." >&2
+  echo "[endor] WARNING: unresolved {{...}} token in env.sh block — a token in" >&2
+  echo "[endor]          shared/blocks/envsh.txt has no fill in templates/envsh.sh." >&2
   _ENDOR_WARNED=1
 fi
 

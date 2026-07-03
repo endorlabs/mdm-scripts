@@ -14,9 +14,8 @@
 #   uv      → literal index-url in uv.toml  (baked at install time, like pip)
 #   poetry  → POETRY_HTTP_BASIC_ENDOR_FIREWALL_* env vars via env.sh (written by env.sh step)
 #
-# pip/uv credentials carry the per-machine attributed username, which only exists
-# at install time — so generate.sh leaves their {{...}} tokens untouched and they
-# are filled here, from the value computed in credentials.sh.
+# pip/uv index-urls carry the attributed username, so their {{...}} tokens are
+# filled here at install time (see credentials.sh).
 #
 # pip section uses [endor-firewall] named section — avoids clobbering admin's [global].
 

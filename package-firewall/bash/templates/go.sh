@@ -7,10 +7,8 @@
 #   Linux  → ~/.config/go/env  (or $XDG_CONFIG_HOME/go/env)
 #
 # Block content is defined in shared/blocks/goenv.txt.
-# Go env files do not support env var expansion, so the GOPROXY credential — which
-# carries the per-machine attributed username and so only exists at install time —
-# is baked in as a literal here: generate.sh leaves the {{GO_PROXY_URL}} token
-# untouched and it is filled below, from the value computed in credentials.sh.
+# Go env files can't expand env vars, so the {{GO_PROXY_URL}} token is filled
+# here at install time with the attributed literal (see credentials.sh).
 #
 # The go env file takes lower precedence than the GOPROXY process env var, so
 # project-level overrides (go env -w GOPROXY=... in a workspace) remain possible.

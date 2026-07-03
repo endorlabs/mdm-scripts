@@ -49,11 +49,8 @@ SHARED_BLOCKS_DIR="$SCRIPT_DIR/../shared/blocks"
 FQDN="${ENDOR_FQDN:-https://factory.endorlabs.com}"
 
 # ─── Compute derived values ────────────────────────────────────────────────────
-# Attribution-dependent values are NOT precomputed here. The per-machine attributed
-# username (<console-user>@<machine>) only exists on the developer's machine, so
-# those (ENDOR_ATTR_USER, ENDOR_AUTH_B64, ENDOR_PYPI_URL, ENDOR_GO_PROXY_URL) are
-# computed at install time by templates/credentials.sh. Only machine-independent
-# values are derived here.
+# Only machine-independent values are derived here. Attribution values
+# (<console-user>@<machine>) are computed at install time by templates/credentials.sh.
 FQDN_HOST="${FQDN#https://}"
 FQDN_HOST="${FQDN_HOST#http://}"
 TRUSTED_HOST="${FQDN_HOST%%:*}"
@@ -108,9 +105,8 @@ emit_block_assignment() {
 # emit_all_blocks
 # Emits all block variable assignments into the generated script.
 # Edit shared/blocks/*.txt to change shared config content.
-# envsh.txt (bash-only) holds runtime placeholders — its ${ENDOR_*} values are
-# resolved at install time by templates/envsh.sh, from the attribution
-# credentials computed in templates/credentials.sh.
+# Attribution {{...}} tokens are not substituted here — the generated scripts
+# fill them at install time (see templates/credentials.sh).
 emit_all_blocks() {
   echo "# ── Block content (from shared/blocks/) ─────────────────────────────────────"
   emit_block_assignment "ENVSH_BLOCK"         "$SHARED_BLOCKS_DIR/envsh.txt"
