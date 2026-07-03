@@ -53,8 +53,16 @@ echo "[endor-js]   covers: yarn classic (1.x)"
 # ── .yarnrc.yml ───────────────────────────────────────────────────────────────
 # Covers: yarn 2+ / berry only
 # yarn 2+ reads .yarnrc.yml for registry and auth — it does NOT read .npmrc.
-# Uses npmAuthIdent (plain "key:secret") — confirmed working with Endor firewall.
+# Uses npmAuthIdent (plain "user:secret") — confirmed working with Endor firewall.
 # Yarn berry supports ${VAR} expansion in .yarnrc.yml values (yarn 3+).
+
+# User attribution: the shared block references ${ENDOR_API_KEY_ID} so the
+# Windows generator (which has no ENDOR_ATTR_USER env var yet) keeps working
+# unchanged. On bash we swap the reference to the attributed username so yarn 2+
+# installs carry <console-user>@<machine> to the firewall log. The Windows
+# attribution follow-up flips the block itself and removes this swap.
+YARNRC_BLOCK=${YARNRC_BLOCK//'${ENDOR_API_KEY_ID}'/'${ENDOR_ATTR_USER}'}
+
 warn_if_key_conflict \
   "$USER_HOME/.yarnrc.yml" \
   "^npmRegistryServer:" \

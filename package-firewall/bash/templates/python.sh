@@ -10,14 +10,22 @@
 # Block content is defined in templates/blocks/pipconf.txt and uvtoml.txt.
 #
 # Credential approach per tool:
-#   pip     → literal credentials in pip.conf (pip cannot expand env vars — see pipconf.txt)
-#   uv      → ${ENDOR_PYPI_URL} env var reference in uv.toml (uv expands ${VAR})
+#   pip     → literal index-url in pip.conf (pip cannot expand env vars)
+#   uv      → literal index-url in uv.toml  (baked at install time, like pip)
 #   poetry  → POETRY_HTTP_BASIC_ENDOR_FIREWALL_* env vars via env.sh (written by env.sh step)
+#
+# pip/uv credentials carry the per-machine attributed username, which only exists
+# at install time — so generate.sh leaves their {{...}} tokens untouched and they
+# are filled here, from the value computed in credentials.sh.
 #
 # pip section uses [endor-firewall] named section — avoids clobbering admin's [global].
 
 echo ""
 echo "[endor-python] ── Python package managers ──────────────────────────────────"
+
+# Fill the attributed index-url into the block content (pip/uv can't expand env vars).
+PIP_BLOCK=${PIP_BLOCK//'{{PIP_INDEX_URL}}'/$ENDOR_PYPI_URL}
+UV_BLOCK=${UV_BLOCK//'{{ENDOR_PYPI_URL}}'/$ENDOR_PYPI_URL}
 
 # ── pip ───────────────────────────────────────────────────────────────────────
 # pip reads pip.conf automatically from all three locations below.

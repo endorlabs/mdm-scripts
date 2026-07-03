@@ -24,6 +24,45 @@ ENDOR_BLOCK_END="# ===== END ENDOR PACKAGE FIREWALL ====="
 ENDOR_XML_BLOCK_START="<!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->"
 ENDOR_XML_BLOCK_END="<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->"
 
+# ── User attribution helpers ──────────────────────────────────────────────────
+# These let the generated scripts stamp <console-user>@<machine> onto each
+# package-firewall request WITHOUT issuing per-user API keys. The label is encoded
+# into the Basic-auth username; the firewall decodes it, authenticates with the
+# real shared API key, and records the label on the firewall log (shown as "User").
+# The label is client-supplied and UNVERIFIED — telemetry only, never an authz signal.
+
+# endor_b64 — portable base64 with no line wrapping (reads stdin).
+# GNU coreutils wraps at 76 cols unless -w0; BSD/macOS prints one line.
+endor_b64() {
+  if base64 --help 2>&1 | grep -q -- '-w'; then
+    base64 -w0
+  else
+    base64 | tr -d '\n'
+  fi
+}
+
+# endor_urlenc_b64 <b64> — percent-encode a base64 string for use in URL userinfo.
+# '+', '/' and '=' would otherwise break URL parsing; the tool decodes userinfo
+# before building the Basic header, so the firewall still receives the raw base64.
+endor_urlenc_b64() {
+  printf '%s' "$1" | sed -e 's/+/%2B/g' -e 's#/#%2F#g' -e 's/=/%3D/g'
+}
+
+# endor_host_label — a stable, human-readable machine name for attribution.
+endor_host_label() {
+  scutil --get ComputerName 2>/dev/null || hostname 2>/dev/null || echo unknown
+}
+
+# endor_attr_username <label> <api_key_id>
+# Builds the attributed Basic-auth username: base64(base64("userattr:"+label)+":"+keyId).
+# The double base64 lets the label contain any characters (':', spaces, '@') safely.
+# Mirrors decodeAttributedUsername() in endorfactory's auth layer.
+endor_attr_username() {
+  local label="$1" key_id="$2" inner
+  inner=$(printf '%s' "userattr:${label}" | endor_b64)
+  printf '%s:%s' "$inner" "$key_id" | endor_b64
+}
+
 # detect_console_user
 # MDM tools (Kandji, Jamf) run scripts as root. $HOME resolves to /var/root, which
 # is not where developer config files live. Returns the name of the actual logged-in
