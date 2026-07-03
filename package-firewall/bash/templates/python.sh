@@ -15,7 +15,7 @@
 #   poetry  → POETRY_HTTP_BASIC_ENDOR_FIREWALL_* env vars via env.sh (written by env.sh step)
 #
 # pip/uv index-urls carry the attributed username, so their {{...}} tokens are
-# filled here at install time (see credentials.sh).
+# filled here at install time (from the credentials block).
 #
 # pip section uses [endor-firewall] named section — avoids clobbering admin's [global].
 

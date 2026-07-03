@@ -50,7 +50,7 @@ FQDN="${ENDOR_FQDN:-https://factory.endorlabs.com}"
 
 # ─── Compute derived values ────────────────────────────────────────────────────
 # Only machine-independent values are derived here. Attribution values
-# (<console-user>@<machine>) are computed at install time by templates/credentials.sh.
+# (<console-user>@<machine>) are computed at install time — see credentials_block.
 FQDN_HOST="${FQDN#https://}"
 FQDN_HOST="${FQDN_HOST#http://}"
 TRUSTED_HOST="${FQDN_HOST%%:*}"
@@ -106,7 +106,7 @@ emit_block_assignment() {
 # Emits all block variable assignments into the generated script.
 # Edit shared/blocks/*.txt to change shared config content.
 # Attribution {{...}} tokens are not substituted here — the generated scripts
-# fill them at install time (see templates/credentials.sh).
+# fill them at install time (see credentials_block).
 emit_all_blocks() {
   echo "# ── Block content (from shared/blocks/) ─────────────────────────────────────"
   emit_block_assignment "ENVSH_BLOCK"         "$SHARED_BLOCKS_DIR/envsh.txt"
@@ -157,6 +157,31 @@ USER_GROUP=$(id -gn "$CONSOLE_USER" 2>/dev/null || echo "staff")
 USERBLOCK
 }
 
+# credentials_block — user-attribution values, computed on the developer's
+# machine at install time (the label <console-user>@<machine> doesn't exist at
+# generation time). {{...}} tokens are substituted at generation time.
+credentials_block() {
+  substitute << 'CREDBLOCK'
+# ── User attribution (computed at install time) ───────────────────────────────
+ENDOR_API_KEY_ID='{{API_KEY_ID}}'
+ENDOR_API_SECRET='{{API_SECRET}}'
+
+ENDOR_ATTR_LABEL="${CONSOLE_USER}@$(endor_host_label)"
+ENDOR_ATTR_USER="$(endor_attr_username "$ENDOR_ATTR_LABEL" "$ENDOR_API_KEY_ID")"
+
+# npm _auth = base64(username:password)
+ENDOR_AUTH_B64="$(printf '%s:%s' "$ENDOR_ATTR_USER" "$ENDOR_API_SECRET" | endor_b64)"
+
+# pip / uv / go embed the username in URL userinfo — percent-encode it.
+ENDOR_PYPI_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):${ENDOR_API_SECRET}@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/pypi/simple/"
+ENDOR_GO_PROXY_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):${ENDOR_API_SECRET}@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/go/,direct"
+
+export ENDOR_ATTR_LABEL ENDOR_ATTR_USER ENDOR_AUTH_B64 ENDOR_PYPI_URL ENDOR_GO_PROXY_URL
+
+echo "[endor] user attribution → ${ENDOR_ATTR_LABEL}"
+CREDBLOCK
+}
+
 # script_header <output> <description>
 script_header() {
   local output="$1"
@@ -187,8 +212,7 @@ build_script() {
 
   {
     script_header "$output" "$description"
-    echo "# ── User attribution (credentials computed at install time) ──────────────────"
-    substitute < "$TMPL_DIR/credentials.sh"
+    credentials_block
     echo ""
     emit_all_blocks
     echo "# ════════════════════════════════════════════════════════════════════════════"
@@ -245,8 +269,7 @@ build_remove_script "$OUT_DIR/endor-remove.sh"
 {
   script_header "$OUT_DIR/endor-all.sh" \
     "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry · go · maven"
-  echo "# ── User attribution (credentials computed at install time) ──────────────────"
-  substitute < "$TMPL_DIR/credentials.sh"
+  credentials_block
   echo ""
   emit_all_blocks
   echo "# ════════════════════════════════════════════════════════════════════════════"
@@ -296,7 +319,7 @@ echo "   All scripts accept --dry-run to preview changes without writing anythin
 echo "   Upload to your MDM tool. Each script is self-contained and idempotent."
 echo ""
 echo "   To customise: edit shared/blocks/*.txt (shared config content)"
-echo "                 or templates/credentials.sh (user-attribution credential block)"
+echo "                 or credentials_block in generate.sh (user-attribution values)"
 echo "                 or templates/*.sh (orchestration logic)"
 echo ""
 echo "   Re-running overwrites the same output directory."

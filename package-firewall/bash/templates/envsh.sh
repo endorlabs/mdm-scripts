@@ -5,7 +5,7 @@
 #
 # Block content comes from shared/blocks/envsh.txt. The attribution tokens
 # ({{ATTR_USER}}, {{NPM_AUTH_B64}}, {{PIP_INDEX_URL}}, {{GO_PROXY_URL}}) are
-# filled here at install time from credentials.sh; a token filled by neither
+# filled here at install time from the credentials block; a token filled by neither
 # generate.sh nor this step triggers a warning and a non-zero exit.
 #
 # pip / uv / go don't read env.sh — they can't expand ${VAR}; python.sh/go.sh
@@ -16,7 +16,7 @@ echo "[endor] ── env.sh setup ───────────────�
 
 ENDOR_ENV_SH="$USER_HOME/.config/endor/env.sh"
 
-# Fill the attribution-dependent tokens (values computed in credentials.sh).
+# Fill the attribution-dependent tokens (values from the credentials block).
 ENVSH_BLOCK=${ENVSH_BLOCK//'{{ATTR_USER}}'/$ENDOR_ATTR_USER}
 ENVSH_BLOCK=${ENVSH_BLOCK//'{{NPM_AUTH_B64}}'/$ENDOR_AUTH_B64}
 ENVSH_BLOCK=${ENVSH_BLOCK//'{{PIP_INDEX_URL}}'/$ENDOR_PYPI_URL}
