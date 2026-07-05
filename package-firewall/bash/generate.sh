@@ -105,8 +105,9 @@ emit_block_assignment() {
 # emit_all_blocks
 # Emits all block variable assignments into the generated script.
 # Edit shared/blocks/*.txt to change shared config content.
-# Attribution {{...}} tokens are not substituted here — the generated scripts
-# fill them at install time (see credentials_block).
+# Attribution {{...}} tokens are not substituted here — envsh.sh / python.sh /
+# go.sh fill them at install time with the credentials_block values, and
+# js.sh / maven.sh swap credential env-var references the same way.
 emit_all_blocks() {
   echo "# ── Block content (from shared/blocks/) ─────────────────────────────────────"
   emit_block_assignment "ENVSH_BLOCK"         "$SHARED_BLOCKS_DIR/envsh.txt"
@@ -319,7 +320,7 @@ echo "   All scripts accept --dry-run to preview changes without writing anythin
 echo "   Upload to your MDM tool. Each script is self-contained and idempotent."
 echo ""
 echo "   To customise: edit shared/blocks/*.txt (shared config content)"
-echo "                 or credentials_block in generate.sh (user-attribution values)"
+echo "                 or shared/blocks/envsh.txt (bash env var block)"
 echo "                 or templates/*.sh (orchestration logic)"
 echo ""
 echo "   Re-running overwrites the same output directory."
