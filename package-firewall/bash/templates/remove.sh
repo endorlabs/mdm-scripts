@@ -66,10 +66,39 @@ remove_block "$USER_HOME/.npmrc"      "$CONSOLE_USER" "$USER_GROUP"
 remove_block "$USER_HOME/.yarnrc"     "$CONSOLE_USER" "$USER_GROUP"
 remove_block "$USER_HOME/.yarnrc.yml" "$CONSOLE_USER" "$USER_GROUP"
 
+# yarn 1.x rewrites ~/.yarnrc on its own and can copy the Endor registry
+# outside the managed block. Delete only lines that exactly match our URL —
+# they can't be anyone else's config.
+_YARNRC="$USER_HOME/.yarnrc"
+_ENDOR_YARN_LINE='registry "{{NPM_REGISTRY_URL}}"'
+if [[ -f "$_YARNRC" ]] && awk -v s="$ENDOR_BLOCK_START" -v e="$ENDOR_BLOCK_END" '
+      index($0, s) { skip=1; next }
+      index($0, e) { skip=0; next }
+      !skip        { print }
+    ' "$_YARNRC" | grep -qxF "$_ENDOR_YARN_LINE"; then
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "[dry-run]   action : DELETE yarn-copied Endor registry line from $_YARNRC"
+  else
+    _tmp=$(mktemp)
+    grep -vxF "$_ENDOR_YARN_LINE" "$_YARNRC" | grep -vx 'always-auth true' > "$_tmp" || true
+    if [[ -z "$(tr -d '[:space:]' < "$_tmp")" ]]; then
+      rm -f "$_YARNRC" "$_tmp"
+      echo "[endor-remove] deleted (was empty) : $_YARNRC"
+    else
+      mv "$_tmp" "$_YARNRC"
+      chown "$CONSOLE_USER:$USER_GROUP" "$_YARNRC"
+      chmod 600 "$_YARNRC"
+      echo "[endor-remove] yarn-copied line removed: $_YARNRC"
+    fi
+  fi
+fi
+unset _YARNRC _ENDOR_YARN_LINE _tmp
+
 # ── Python config files ───────────────────────────────────────────────────────
 echo ""
 echo "[endor-remove] ── Python ────────────────────────────────────────────────────"
 
+# remove_block also restores pip keys disabled with '#endor-bak#' at install time
 for pip_conf in \
   "$USER_HOME/.pip/pip.conf" \
   "$USER_HOME/.config/pip/pip.conf" \

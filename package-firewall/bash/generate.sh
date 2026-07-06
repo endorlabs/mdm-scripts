@@ -45,24 +45,28 @@ SHARED_BLOCKS_DIR="$SCRIPT_DIR/../shared/blocks"
 : "${ENDOR_API_KEY_ID:?ENDOR_API_KEY_ID is required}"
 : "${ENDOR_API_SECRET:?ENDOR_API_SECRET is required}"
 
+# Reject credential characters that would corrupt generated scripts/URLs.
+case "${ENDOR_API_KEY_ID}${ENDOR_API_SECRET}" in
+  *[!A-Za-z0-9+/=_.-]*)
+    echo "ERROR: ENDOR_API_KEY_ID / ENDOR_API_SECRET contain unsupported characters" >&2
+    exit 1 ;;
+esac
+
 # ─── Resolve FQDN ─────────────────────────────────────────────────────────────
 FQDN="${ENDOR_FQDN:-https://factory.endorlabs.com}"
 
 # ─── Compute derived values ────────────────────────────────────────────────────
+# Only machine-independent values are derived here. Attribution values
+# (<console-user>@<machine>) are computed at install time — see credentials_block.
 FQDN_HOST="${FQDN#https://}"
 FQDN_HOST="${FQDN_HOST#http://}"
 TRUSTED_HOST="${FQDN_HOST%%:*}"
 
 NPM_REGISTRY_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/npm/"
 NPM_REGISTRY_HOST="${FQDN_HOST}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/npm/"
-NPM_AUTH_B64=$(printf '%s' "${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}" | base64 | tr -d '\n')
-API_SECRET_B64=$(printf '%s' "${ENDOR_API_SECRET}" | base64 | tr -d '\n')
-
 PYPI_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/pypi/simple/"
-PIP_INDEX_URL="https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/pypi/simple/"
-
-GO_PROXY_URL="https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/go/,direct"
 MAVEN_REGISTRY_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/maven/"
+API_SECRET_B64=$(printf '%s' "${ENDOR_API_SECRET}" | base64 | tr -d '\n')
 
 # ─── Output directory ─────────────────────────────────────────────────────────
 OUT_DIR="${SCRIPT_DIR}/out/${ENDOR_NAMESPACE}"
@@ -74,16 +78,13 @@ substitute() {
     -e "s|{{NAMESPACE}}|${ENDOR_NAMESPACE}|g" \
     -e "s|{{API_KEY_ID}}|${ENDOR_API_KEY_ID}|g" \
     -e "s|{{API_SECRET}}|${ENDOR_API_SECRET}|g" \
+    -e "s|{{API_SECRET_B64}}|${API_SECRET_B64}|g" \
     -e "s|{{FQDN}}|${FQDN}|g" \
+    -e "s|{{FQDN_HOST}}|${FQDN_HOST}|g" \
     -e "s|{{NPM_REGISTRY_URL}}|${NPM_REGISTRY_URL}|g" \
     -e "s|{{NPM_REGISTRY_HOST}}|${NPM_REGISTRY_HOST}|g" \
-    -e "s|{{NPM_AUTH_B64}}|${NPM_AUTH_B64}|g" \
-    -e "s|{{API_SECRET_B64}}|${API_SECRET_B64}|g" \
     -e "s|{{PYPI_URL}}|${PYPI_URL}|g" \
-    -e "s|{{PIP_INDEX_URL}}|${PIP_INDEX_URL}|g" \
-    -e "s|{{ENDOR_PYPI_URL}}|${PIP_INDEX_URL}|g" \
     -e "s|{{TRUSTED_HOST}}|${TRUSTED_HOST}|g" \
-    -e "s|{{GO_PROXY_URL}}|${GO_PROXY_URL}|g" \
     -e "s|{{MAVEN_REGISTRY_URL}}|${MAVEN_REGISTRY_URL}|g"
 }
 
@@ -108,10 +109,8 @@ emit_block_assignment() {
   echo ")"
 }
 
-# emit_all_blocks
-# Emits all block variable assignments into the generated script.
-# Edit shared/blocks/*.txt to change shared config content.
-# Edit templates/envsh.txt to change the bash-only env var block.
+# emit_all_blocks — emits all block variable assignments into the generated
+# script. Attribution {{...}} tokens are filled at install time by the templates.
 emit_all_blocks() {
   echo "# ── Block content (from shared/blocks/) ─────────────────────────────────────"
   emit_block_assignment "ENVSH_BLOCK"         "$SHARED_BLOCKS_DIR/envsh.txt"
@@ -162,6 +161,30 @@ USER_GROUP=$(id -gn "$CONSOLE_USER" 2>/dev/null || echo "staff")
 USERBLOCK
 }
 
+# credentials_block — attribution values computed on the dev machine at install
+# time (the <console-user>@<machine> label doesn't exist at generation time).
+credentials_block() {
+  substitute << 'CREDBLOCK'
+# ── User attribution (computed at install time) ───────────────────────────────
+ENDOR_API_KEY_ID='{{API_KEY_ID}}'
+ENDOR_API_SECRET='{{API_SECRET}}'
+
+ENDOR_ATTR_LABEL="${CONSOLE_USER}@$(endor_host_label)"
+ENDOR_ATTR_USER="$(endor_attr_username "$ENDOR_ATTR_LABEL" "$ENDOR_API_KEY_ID")"
+
+# npm _auth = base64(username:password)
+ENDOR_AUTH_B64="$(printf '%s:%s' "$ENDOR_ATTR_USER" "$ENDOR_API_SECRET" | endor_b64)"
+
+# pip / uv / go URLs: percent-encode both userinfo halves ('/' would break the URL).
+ENDOR_PYPI_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):$(endor_urlenc_b64 "$ENDOR_API_SECRET")@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/pypi/simple/"
+ENDOR_GO_PROXY_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):$(endor_urlenc_b64 "$ENDOR_API_SECRET")@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/go/,direct"
+
+# No exports — every consumer is same-process template code inlined below.
+
+echo "[endor] user attribution → ${ENDOR_ATTR_LABEL}"
+CREDBLOCK
+}
+
 # script_header <output> <description>
 script_header() {
   local output="$1"
@@ -192,6 +215,8 @@ build_script() {
 
   {
     script_header "$output" "$description"
+    credentials_block
+    echo ""
     emit_all_blocks
     echo "# ════════════════════════════════════════════════════════════════════════════"
     echo "# Env setup"
@@ -247,6 +272,8 @@ build_remove_script "$OUT_DIR/endor-remove.sh"
 {
   script_header "$OUT_DIR/endor-all.sh" \
     "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry · go · maven"
+  credentials_block
+  echo ""
   emit_all_blocks
   echo "# ════════════════════════════════════════════════════════════════════════════"
   echo "# Env setup"
@@ -295,7 +322,7 @@ echo "   All scripts accept --dry-run to preview changes without writing anythin
 echo "   Upload to your MDM tool. Each script is self-contained and idempotent."
 echo ""
 echo "   To customise: edit shared/blocks/*.txt (shared config content)"
-echo "                 or templates/envsh.txt (bash env var block)"
+echo "                 or shared/blocks/envsh.txt (bash env var block)"
 echo "                 or templates/*.sh (orchestration logic)"
 echo ""
 echo "   Re-running overwrites the same output directory."

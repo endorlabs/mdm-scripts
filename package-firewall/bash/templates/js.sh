@@ -20,6 +20,15 @@ echo "[endor-js] ── JavaScript package managers ─────────�
 
 # ── .npmrc ────────────────────────────────────────────────────────────────────
 # Covers: npm (all versions), pnpm (8.x–11.x), yarn classic (1.x), bun (all versions)
+
+# Swap to the attributed user (shared block stays Windows-safe). Needed for
+# bun: its last-write-wins .npmrc parsing would otherwise drop attribution.
+NPMRC_BLOCK=${NPMRC_BLOCK//'${ENDOR_API_KEY_ID}'/'${ENDOR_ATTR_USER}'}
+if [[ "$NPMRC_BLOCK" != *'${ENDOR_ATTR_USER}'* ]]; then
+  echo "[endor-js] WARNING: attribution swap did not match — shared/blocks/npmrc.txt changed?" >&2
+  _ENDOR_WARNED=1
+fi
+
 warn_if_key_conflict \
   "$USER_HOME/.npmrc" \
   "^registry=" \
@@ -53,8 +62,16 @@ echo "[endor-js]   covers: yarn classic (1.x)"
 # ── .yarnrc.yml ───────────────────────────────────────────────────────────────
 # Covers: yarn 2+ / berry only
 # yarn 2+ reads .yarnrc.yml for registry and auth — it does NOT read .npmrc.
-# Uses npmAuthIdent (plain "key:secret") — confirmed working with Endor firewall.
+# Uses npmAuthIdent (plain "user:secret") — confirmed working with Endor firewall.
 # Yarn berry supports ${VAR} expansion in .yarnrc.yml values (yarn 3+).
+
+# Swap to the attributed user (shared block stays Windows-safe).
+YARNRC_BLOCK=${YARNRC_BLOCK//'${ENDOR_API_KEY_ID}'/'${ENDOR_ATTR_USER}'}
+if [[ "$YARNRC_BLOCK" != *'${ENDOR_ATTR_USER}'* ]]; then
+  echo "[endor-js] WARNING: attribution swap did not match — shared/blocks/yarnrc.txt changed?" >&2
+  _ENDOR_WARNED=1
+fi
+
 warn_if_key_conflict \
   "$USER_HOME/.yarnrc.yml" \
   "^npmRegistryServer:" \

@@ -1,16 +1,26 @@
 # templates/envsh.sh
 # Writes ~/.config/endor/env.sh — the single credential source for all
-# env-var-based tools (npm, uv, yarn 2+, poetry; Go in future).
+# env-var-based tools (npm, yarn 2+, maven, poetry).
 # Then adds a one-line source directive to existing shell profiles.
 #
-# Block content is defined in templates/blocks/envsh.txt.
-# pip is intentionally excluded — pip.conf does not support env var expansion,
-# so pip credentials are written as literal values in python.sh instead.
+# Block content comes from shared/blocks/envsh.txt; attribution tokens are
+# filled at install time. Leftover {{...}} tokens warn and exit non-zero.
+# pip / uv / go don't read env.sh — their configs get baked literals instead.
 
 echo ""
 echo "[endor] ── env.sh setup ─────────────────────────────────────────────────────"
 
 ENDOR_ENV_SH="$USER_HOME/.config/endor/env.sh"
+
+# Fill the attribution-dependent tokens (values from the credentials block).
+ENVSH_BLOCK=${ENVSH_BLOCK//'{{ATTR_USER}}'/"$ENDOR_ATTR_USER"}
+ENVSH_BLOCK=${ENVSH_BLOCK//'{{NPM_AUTH_B64}}'/"$ENDOR_AUTH_B64"}
+
+if [[ "$ENVSH_BLOCK" == *'{{'* ]]; then
+  echo "[endor] WARNING: unresolved {{...}} token in env.sh block — a token in" >&2
+  echo "[endor]          shared/blocks/envsh.txt has no fill in templates/envsh.sh." >&2
+  _ENDOR_WARNED=1
+fi
 
 upsert_block \
   "$ENDOR_ENV_SH" \

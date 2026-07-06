@@ -7,9 +7,11 @@
 #   resolve_user_home       <user>             — resolves home via dscl / getent / POSIX
 #   upsert_block            <file> <content> <owner> <group>
 #                                              — non-destructive, idempotent sentinel-block writer
+#                                                merges into an existing [global] for pip.conf
 #                                                honours DRY_RUN=1 (prints intent, no writes)
 #   remove_block            <file> <owner> <group>
-#                                              — strips Endor sentinel block from a file
+#                                              — strips Endor sentinel block from a file,
+#                                                restores keys disabled with '#endor-bak#'
 #                                                honours DRY_RUN=1 (prints intent, no writes)
 #   warn_if_key_conflict    <file> <pattern> <label>
 #                                              — warns when a key exists outside an Endor block
@@ -23,6 +25,38 @@ ENDOR_BLOCK_END="# ===== END ENDOR PACKAGE FIREWALL ====="
 # or re-runs and removal cannot find the managed block.
 ENDOR_XML_BLOCK_START="<!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->"
 ENDOR_XML_BLOCK_END="<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->"
+
+# ── User attribution helpers ──────────────────────────────────────────────────
+# Encode <console-user>@<machine> into the Basic-auth username. The firewall
+# decodes the label, auths with the real API key, and logs it as "User".
+
+# endor_b64 — portable base64, no line wrapping (GNU wraps at 76 cols; BSD doesn't).
+endor_b64() {
+  if base64 --help 2>&1 | grep -q -- '-w'; then
+    base64 -w0
+  else
+    base64 | tr -d '\n'
+  fi
+}
+
+# endor_urlenc_b64 <b64> — percent-encode base64 chars (+ / =) for URL userinfo.
+endor_urlenc_b64() {
+  printf '%s' "$1" | sed -e 's/+/%2B/g' -e 's#/#%2F#g' -e 's/=/%3D/g'
+}
+
+# endor_host_label — a stable, human-readable machine name for attribution.
+endor_host_label() {
+  scutil --get ComputerName 2>/dev/null || hostname 2>/dev/null || echo unknown
+}
+
+# endor_attr_username <label> <api_key_id>
+# Returns base64(base64("userattr:"+label)+":"+keyId) — the format
+# decodeAttributedUsername() expects in endorfactory's auth layer.
+endor_attr_username() {
+  local label="$1" key_id="$2" inner
+  inner=$(printf '%s' "userattr:${label}" | endor_b64)
+  printf '%s:%s' "$inner" "$key_id" | endor_b64
+}
 
 # detect_console_user
 # MDM tools (Kandji, Jamf) run scripts as root. $HOME resolves to /var/root, which
@@ -76,19 +110,45 @@ resolve_user_home() {
 #   - File present, no block → appends the block; existing content untouched
 #   - File present, block found → replaces only the block; rest untouched
 #   - DRY_RUN=1            → prints what would happen, writes nothing
+#
+# pip.conf special case: pip rejects duplicate [global] sections, so when both
+# <content> and the file declare [global], the keys are merged into the existing
+# section and conflicting keys are disabled reversibly with '#endor-bak#'.
 upsert_block() {
   local file="$1"
   local content="$2"
   local owner="$3"
   local group="$4"
+  local tmp merge=0
+
+  # Strip CRLF (block files are shared with the Windows generator).
+  content=${content//$'\r'/}
+
+  # Merge only when both the content and the pre-existing file declare [global]
+  if printf '%s\n' "$content" | grep -q '^\[global\]$' \
+     && [[ -f "$file" ]] \
+     && awk -v start="$ENDOR_BLOCK_START" -v end="$ENDOR_BLOCK_END" '
+          index($0, start) { skip=1; next }
+          index($0, end)   { skip=0; next }
+          !skip && /^\[global\]/ { found=1 }
+          END { exit !found }
+        ' "$file" 2>/dev/null; then
+    merge=1
+  fi
 
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     if [[ -f "$file" ]] && grep -qF "$ENDOR_BLOCK_START" "$file" 2>/dev/null; then
       echo "[dry-run]   action : REPLACE existing Endor block"
+    elif [[ "$merge" -eq 1 ]]; then
+      echo "[dry-run]   action : MERGE into existing [global] (conflicting keys disabled via #endor-bak#)"
     elif [[ -f "$file" ]]; then
       echo "[dry-run]   action : APPEND Endor block to existing file"
     else
       echo "[dry-run]   action : CREATE file with Endor block"
+    fi
+    if [[ "$merge" -eq 1 ]]; then
+      echo "[dry-run]   note   : pre-existing index keys will be disabled via '#endor-bak#'"
+      echo "[dry-run]            and the Endor keys merged into the existing [global]"
     fi
     echo "[dry-run]   file   : $file"
     echo "[dry-run]   content:"
@@ -101,7 +161,6 @@ upsert_block() {
 
   # Strip any existing Endor block, preserving everything else
   if [[ -f "$file" ]] && grep -qF "$ENDOR_BLOCK_START" "$file" 2>/dev/null; then
-    local tmp
     tmp=$(mktemp)
     awk -v start="$ENDOR_BLOCK_START" -v end="$ENDOR_BLOCK_END" '
       index($0, start) { skip=1; next }
@@ -111,10 +170,51 @@ upsert_block() {
     mv "$tmp" "$file"
   fi
 
-  printf '\n%s\n%s\n%s\n' \
-    "$ENDOR_BLOCK_START" \
-    "$content" \
-    "$ENDOR_BLOCK_END" >> "$file"
+  if [[ "$merge" -eq 1 ]]; then
+    # Disable-keys derived from the content; pip treats '-'/'_' and '='/':' alike.
+    local keys_re
+    keys_re=$(printf '%s\n' "$content" | sed -nE 's/^([A-Za-z0-9_-]+)[[:space:]]*[=:].*/\1/p' \
+              | sed 's/[-_]/[-_]/g' | paste -sd'|' -)
+
+    # 1. Reversibly disable pre-existing copies of those keys and their
+    #    indented continuation lines.
+    if [[ -n "$keys_re" ]] && grep -qE "^[[:space:]]*(${keys_re})[[:space:]]*[=:]" "$file"; then
+      tmp=$(mktemp)
+      awk -v re="^[[:space:]]*(${keys_re})[[:space:]]*[=:]" '
+        $0 ~ re                             { print "#endor-bak#" $0; cont=1; next }
+        cont && /^[[:space:]]+[^[:space:]]/ { print "#endor-bak#" $0; next }
+                                            { cont=0; print }
+      ' "$file" > "$tmp"
+      mv "$tmp" "$file"
+      echo "[endor] NOTE: existing pip index keys in ${file} disabled with '#endor-bak#' (restored on removal)"
+    fi
+
+    # 2. Insert the sentinel-wrapped keys after the first [global]
+    #    (temp file + getline: BSD awk rejects multi-line -v).
+    local keyfile
+    keyfile=$(mktemp)
+    {
+      echo "$ENDOR_BLOCK_START"
+      printf '%s\n' "$content" | grep -v '^\[global\]'
+      echo "$ENDOR_BLOCK_END"
+    } > "$keyfile"
+    tmp=$(mktemp)
+    awk -v keyfile="$keyfile" '
+      { print }
+      /^\[global\]/ && !done {
+        while ((getline line < keyfile) > 0) print line
+        close(keyfile)
+        done=1
+      }
+    ' "$file" > "$tmp"
+    mv "$tmp" "$file"
+    rm -f "$keyfile"
+  else
+    printf '\n%s\n%s\n%s\n' \
+      "$ENDOR_BLOCK_START" \
+      "$content" \
+      "$ENDOR_BLOCK_END" >> "$file"
+  fi
 
   chown "$owner:$group" "$file"
   chmod 600 "$file"
@@ -197,11 +297,11 @@ upsert_xml_block() {
 
 # remove_block <file> <owner> <group>
 #
-# Strips the Endor sentinel block from a config file.
+# Strips the Endor sentinel block and restores '#endor-bak#'-disabled keys.
 #   - File absent           → skips silently
 #   - No Endor block found  → skips with a notice
 #   - Block found           → removes block; preserves everything else
-#   - File empty after removal → deletes the file entirely
+#   - File empty after removal → deletes it (a bare [global] counts as empty)
 #   - DRY_RUN=1             → prints what would happen, writes nothing
 remove_block() {
   local file="$1"
@@ -227,10 +327,13 @@ remove_block() {
       !skip             { print }
     ' "$file" | tr -d '[:space:]')
 
-    if [[ -z "$remaining" ]]; then
+    if [[ -z "$remaining" || "$remaining" == "[global]" ]]; then
       echo "[dry-run]   action : REMOVE block → file would be empty → DELETE file"
     else
       echo "[dry-run]   action : REMOVE block, preserve remaining content"
+    fi
+    if grep -qF '#endor-bak#' "$file" 2>/dev/null; then
+      echo "[dry-run]   restore: keys disabled with '#endor-bak#'"
     fi
     echo "[dry-run]   file   : $file"
     echo ""
@@ -243,10 +346,12 @@ remove_block() {
     index($0, start) { skip=1; next }
     index($0, end)   { skip=0; next }
     !skip             { print }
-  ' "$file" > "$tmp"
+  ' "$file" | sed -E 's/^([[:space:]]*)#endor-bak#/\1/' > "$tmp"
 
-  # Delete the file if it's effectively empty after block removal
-  if [[ -z "$(tr -d '[:space:]' < "$tmp")" ]]; then
+  # Delete if effectively empty (whitespace only, or a bare [global])
+  local remaining
+  remaining=$(tr -d '[:space:]' < "$tmp")
+  if [[ -z "$remaining" || "$remaining" == "[global]" ]]; then
     rm -f "$file" "$tmp"
     echo "[endor-remove] deleted (was empty) : $file"
   else
