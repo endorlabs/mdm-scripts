@@ -3,13 +3,9 @@
 # env-var-based tools (npm, yarn 2+, maven, poetry).
 # Then adds a one-line source directive to existing shell profiles.
 #
-# Block content comes from shared/blocks/envsh.txt. The attribution tokens
-# ({{ATTR_USER}}, {{NPM_AUTH_B64}}) are filled here at install time from the
-# credentials block; a token filled by neither generate.sh nor this step
-# triggers a warning and a non-zero exit.
-#
-# pip / uv / go don't read env.sh — they can't expand ${VAR}; python.sh/go.sh
-# bake literal values instead.
+# Block content comes from shared/blocks/envsh.txt; attribution tokens are
+# filled at install time. Leftover {{...}} tokens warn and exit non-zero.
+# pip / uv / go don't read env.sh — their configs get baked literals instead.
 
 echo ""
 echo "[endor] ── env.sh setup ─────────────────────────────────────────────────────"

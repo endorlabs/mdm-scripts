@@ -21,10 +21,8 @@ echo "[endor-js] ── JavaScript package managers ─────────�
 # ── .npmrc ────────────────────────────────────────────────────────────────────
 # Covers: npm (all versions), pnpm (8.x–11.x), yarn classic (1.x), bun (all versions)
 
-# The shared block says ${ENDOR_API_KEY_ID} (Windows-safe); swap to the
-# attributed user on bash — bun parses .npmrc last-write-wins, so a raw-key
-# username line after _auth would drop bun's attribution. Remove once Windows
-# gets attribution.
+# Swap to the attributed user (shared block stays Windows-safe). Needed for
+# bun: its last-write-wins .npmrc parsing would otherwise drop attribution.
 NPMRC_BLOCK=${NPMRC_BLOCK//'${ENDOR_API_KEY_ID}'/'${ENDOR_ATTR_USER}'}
 if [[ "$NPMRC_BLOCK" != *'${ENDOR_ATTR_USER}'* ]]; then
   echo "[endor-js] WARNING: attribution swap did not match — shared/blocks/npmrc.txt changed?" >&2
@@ -67,8 +65,7 @@ echo "[endor-js]   covers: yarn classic (1.x)"
 # Uses npmAuthIdent (plain "user:secret") — confirmed working with Endor firewall.
 # Yarn berry supports ${VAR} expansion in .yarnrc.yml values (yarn 3+).
 
-# The shared block says ${ENDOR_API_KEY_ID} (Windows-safe); swap to the
-# attributed user on bash. Remove once Windows gets attribution.
+# Swap to the attributed user (shared block stays Windows-safe).
 YARNRC_BLOCK=${YARNRC_BLOCK//'${ENDOR_API_KEY_ID}'/'${ENDOR_ATTR_USER}'}
 if [[ "$YARNRC_BLOCK" != *'${ENDOR_ATTR_USER}'* ]]; then
   echo "[endor-js] WARNING: attribution swap did not match — shared/blocks/yarnrc.txt changed?" >&2

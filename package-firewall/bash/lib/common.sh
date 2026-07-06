@@ -111,13 +111,9 @@ resolve_user_home() {
 #   - File present, block found → replaces only the block; rest untouched
 #   - DRY_RUN=1            → prints what would happen, writes nothing
 #
-# Strict-INI merge (pip.conf): pip's configparser rejects a file with two
-# [global] sections (DuplicateSectionError) and honours only one index-url, so
-# a plain append breaks pip on any machine that already has a [global]. When
-# <content> starts with a [global] header the target file already declares,
-# the Endor keys are inserted INSIDE that section (wrapped in sentinel comment
-# lines) and pre-existing index-url / trusted-host keys are disabled reversibly
-# with a '#endor-bak#' prefix — remove_block restores them on offboarding.
+# pip.conf special case: pip rejects duplicate [global] sections, so when both
+# <content> and the file declare [global], the keys are merged into the existing
+# section and conflicting keys are disabled reversibly with '#endor-bak#'.
 upsert_block() {
   local file="$1"
   local content="$2"
@@ -125,8 +121,7 @@ upsert_block() {
   local group="$4"
   local tmp merge=0
 
-  # CRLF in block files (shared with the Windows generator) must not defeat
-  # the merge gate or leak \r into configs.
+  # Strip CRLF (block files are shared with the Windows generator).
   content=${content//$'\r'/}
 
   # Merge only when both the content and the pre-existing file declare [global]
@@ -176,16 +171,13 @@ upsert_block() {
   fi
 
   if [[ "$merge" -eq 1 ]]; then
-    # Keys the Endor block sets, derived from the content itself so the two
-    # can't drift; [-_] class keeps pip's dash/underscore key equivalence.
-    # pip's configparser accepts both '=' and ':' as delimiters.
+    # Disable-keys derived from the content; pip treats '-'/'_' and '='/':' alike.
     local keys_re
     keys_re=$(printf '%s\n' "$content" | sed -nE 's/^([A-Za-z0-9_-]+)[[:space:]]*[=:].*/\1/p' \
               | sed 's/[-_]/[-_]/g' | paste -sd'|' -)
 
-    # 1. Reversibly disable pre-existing copies of those keys — including their
-    #    indented INI continuation lines, which configparser would otherwise
-    #    re-attach to the preceding (Endor) key once the key line is a comment.
+    # 1. Reversibly disable pre-existing copies of those keys and their
+    #    indented continuation lines.
     if [[ -n "$keys_re" ]] && grep -qE "^[[:space:]]*(${keys_re})[[:space:]]*[=:]" "$file"; then
       tmp=$(mktemp)
       awk -v re="^[[:space:]]*(${keys_re})[[:space:]]*[=:]" '
@@ -197,9 +189,8 @@ upsert_block() {
       echo "[endor] NOTE: existing pip index keys in ${file} disabled with '#endor-bak#' (restored on removal)"
     fi
 
-    # 2. Insert the sentinel-wrapped keys (minus the [global] header) right
-    #    after the first [global]. Passed via temp file + getline — BSD awk
-    #    rejects multi-line values in -v.
+    # 2. Insert the sentinel-wrapped keys after the first [global]
+    #    (temp file + getline: BSD awk rejects multi-line -v).
     local keyfile
     keyfile=$(mktemp)
     {
@@ -306,14 +297,11 @@ upsert_xml_block() {
 
 # remove_block <file> <owner> <group>
 #
-# Strips the Endor sentinel block from a config file. Keys disabled at install
-# time with a '#endor-bak#' prefix (pip.conf merge — see upsert_block) are
-# restored; files that never had any are unaffected.
+# Strips the Endor sentinel block and restores '#endor-bak#'-disabled keys.
 #   - File absent           → skips silently
 #   - No Endor block found  → skips with a notice
 #   - Block found           → removes block; preserves everything else
-#   - File empty after removal → deletes the file entirely
-#     (a file left with only a bare [global] header counts as empty)
+#   - File empty after removal → deletes it (a bare [global] counts as empty)
 #   - DRY_RUN=1             → prints what would happen, writes nothing
 remove_block() {
   local file="$1"
@@ -360,8 +348,7 @@ remove_block() {
     !skip             { print }
   ' "$file" | sed -E 's/^([[:space:]]*)#endor-bak#/\1/' > "$tmp"
 
-  # Delete the file if it's effectively empty after block removal
-  # (whitespace only, or a bare [global] header left over from a pip merge)
+  # Delete if effectively empty (whitespace only, or a bare [global])
   local remaining
   remaining=$(tr -d '[:space:]' < "$tmp")
   if [[ -z "$remaining" || "$remaining" == "[global]" ]]; then

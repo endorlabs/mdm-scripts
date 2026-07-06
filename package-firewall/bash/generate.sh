@@ -45,8 +45,7 @@ SHARED_BLOCKS_DIR="$SCRIPT_DIR/../shared/blocks"
 : "${ENDOR_API_KEY_ID:?ENDOR_API_KEY_ID is required}"
 : "${ENDOR_API_SECRET:?ENDOR_API_SECRET is required}"
 
-# Credentials are embedded in generated scripts and URLs — reject characters
-# that would corrupt them (quotes, sed/shell metachars, spaces).
+# Reject credential characters that would corrupt generated scripts/URLs.
 case "${ENDOR_API_KEY_ID}${ENDOR_API_SECRET}" in
   *[!A-Za-z0-9+/=_.-]*)
     echo "ERROR: ENDOR_API_KEY_ID / ENDOR_API_SECRET contain unsupported characters" >&2
@@ -110,12 +109,8 @@ emit_block_assignment() {
   echo ")"
 }
 
-# emit_all_blocks
-# Emits all block variable assignments into the generated script.
-# Edit shared/blocks/*.txt to change shared config content.
-# Attribution {{...}} tokens are not substituted here — envsh.sh / python.sh /
-# go.sh fill them at install time with the credentials_block values, and
-# js.sh / maven.sh swap credential env-var references the same way.
+# emit_all_blocks — emits all block variable assignments into the generated
+# script. Attribution {{...}} tokens are filled at install time by the templates.
 emit_all_blocks() {
   echo "# ── Block content (from shared/blocks/) ─────────────────────────────────────"
   emit_block_assignment "ENVSH_BLOCK"         "$SHARED_BLOCKS_DIR/envsh.txt"
@@ -166,9 +161,8 @@ USER_GROUP=$(id -gn "$CONSOLE_USER" 2>/dev/null || echo "staff")
 USERBLOCK
 }
 
-# credentials_block — user-attribution values, computed on the developer's
-# machine at install time (the label <console-user>@<machine> doesn't exist at
-# generation time). {{...}} tokens are substituted at generation time.
+# credentials_block — attribution values computed on the dev machine at install
+# time (the <console-user>@<machine> label doesn't exist at generation time).
 credentials_block() {
   substitute << 'CREDBLOCK'
 # ── User attribution (computed at install time) ───────────────────────────────
@@ -181,8 +175,7 @@ ENDOR_ATTR_USER="$(endor_attr_username "$ENDOR_ATTR_LABEL" "$ENDOR_API_KEY_ID")"
 # npm _auth = base64(username:password)
 ENDOR_AUTH_B64="$(printf '%s:%s' "$ENDOR_ATTR_USER" "$ENDOR_API_SECRET" | endor_b64)"
 
-# pip / uv / go embed the credentials in URL userinfo — percent-encode both
-# halves ('/' in a secret would otherwise terminate the URL authority).
+# pip / uv / go URLs: percent-encode both userinfo halves ('/' would break the URL).
 ENDOR_PYPI_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):$(endor_urlenc_b64 "$ENDOR_API_SECRET")@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/pypi/simple/"
 ENDOR_GO_PROXY_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):$(endor_urlenc_b64 "$ENDOR_API_SECRET")@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/go/,direct"
 
