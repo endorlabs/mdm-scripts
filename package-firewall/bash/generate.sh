@@ -45,6 +45,14 @@ SHARED_BLOCKS_DIR="$SCRIPT_DIR/../shared/blocks"
 : "${ENDOR_API_KEY_ID:?ENDOR_API_KEY_ID is required}"
 : "${ENDOR_API_SECRET:?ENDOR_API_SECRET is required}"
 
+# Credentials are embedded in generated scripts and URLs — reject characters
+# that would corrupt them (quotes, sed/shell metachars, spaces).
+case "${ENDOR_API_KEY_ID}${ENDOR_API_SECRET}" in
+  *[!A-Za-z0-9+/=_.-]*)
+    echo "ERROR: ENDOR_API_KEY_ID / ENDOR_API_SECRET contain unsupported characters" >&2
+    exit 1 ;;
+esac
+
 # ─── Resolve FQDN ─────────────────────────────────────────────────────────────
 FQDN="${ENDOR_FQDN:-https://factory.endorlabs.com}"
 
@@ -173,11 +181,12 @@ ENDOR_ATTR_USER="$(endor_attr_username "$ENDOR_ATTR_LABEL" "$ENDOR_API_KEY_ID")"
 # npm _auth = base64(username:password)
 ENDOR_AUTH_B64="$(printf '%s:%s' "$ENDOR_ATTR_USER" "$ENDOR_API_SECRET" | endor_b64)"
 
-# pip / uv / go embed the username in URL userinfo — percent-encode it.
-ENDOR_PYPI_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):${ENDOR_API_SECRET}@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/pypi/simple/"
-ENDOR_GO_PROXY_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):${ENDOR_API_SECRET}@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/go/,direct"
+# pip / uv / go embed the credentials in URL userinfo — percent-encode both
+# halves ('/' in a secret would otherwise terminate the URL authority).
+ENDOR_PYPI_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):$(endor_urlenc_b64 "$ENDOR_API_SECRET")@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/pypi/simple/"
+ENDOR_GO_PROXY_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):$(endor_urlenc_b64 "$ENDOR_API_SECRET")@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/go/,direct"
 
-export ENDOR_ATTR_LABEL ENDOR_ATTR_USER ENDOR_AUTH_B64 ENDOR_PYPI_URL ENDOR_GO_PROXY_URL
+# No exports — every consumer is same-process template code inlined below.
 
 echo "[endor] user attribution → ${ENDOR_ATTR_LABEL}"
 CREDBLOCK

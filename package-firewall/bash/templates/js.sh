@@ -26,6 +26,10 @@ echo "[endor-js] ── JavaScript package managers ─────────�
 # username line after _auth would drop bun's attribution. Remove once Windows
 # gets attribution.
 NPMRC_BLOCK=${NPMRC_BLOCK//'${ENDOR_API_KEY_ID}'/'${ENDOR_ATTR_USER}'}
+if [[ "$NPMRC_BLOCK" != *'${ENDOR_ATTR_USER}'* ]]; then
+  echo "[endor-js] WARNING: attribution swap did not match — shared/blocks/npmrc.txt changed?" >&2
+  _ENDOR_WARNED=1
+fi
 
 warn_if_key_conflict \
   "$USER_HOME/.npmrc" \
@@ -66,6 +70,10 @@ echo "[endor-js]   covers: yarn classic (1.x)"
 # The shared block says ${ENDOR_API_KEY_ID} (Windows-safe); swap to the
 # attributed user on bash. Remove once Windows gets attribution.
 YARNRC_BLOCK=${YARNRC_BLOCK//'${ENDOR_API_KEY_ID}'/'${ENDOR_ATTR_USER}'}
+if [[ "$YARNRC_BLOCK" != *'${ENDOR_ATTR_USER}'* ]]; then
+  echo "[endor-js] WARNING: attribution swap did not match — shared/blocks/yarnrc.txt changed?" >&2
+  _ENDOR_WARNED=1
+fi
 
 warn_if_key_conflict \
   "$USER_HOME/.yarnrc.yml" \

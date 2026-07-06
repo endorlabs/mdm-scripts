@@ -70,6 +70,7 @@ remove_block "$USER_HOME/.yarnrc.yml" "$CONSOLE_USER" "$USER_GROUP"
 echo ""
 echo "[endor-remove] ── Python ────────────────────────────────────────────────────"
 
+# remove_block also restores pip keys disabled with '#endor-bak#' at install time
 for pip_conf in \
   "$USER_HOME/.pip/pip.conf" \
   "$USER_HOME/.config/pip/pip.conf" \

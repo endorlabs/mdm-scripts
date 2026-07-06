@@ -18,7 +18,7 @@ echo ""
 echo "[endor-go] ── Go package manager ───────────────────────────────────────────"
 
 # Fill the attributed GOPROXY into the block content (go env can't expand env vars).
-GO_BLOCK=${GO_BLOCK//'{{GO_PROXY_URL}}'/$ENDOR_GO_PROXY_URL}
+GO_BLOCK=${GO_BLOCK//'{{GO_PROXY_URL}}'/"$ENDOR_GO_PROXY_URL"}
 
 # ── Resolve go env file path ──────────────────────────────────────────────────
 # Run `go env GOENV` with the user's HOME so Go's os.UserConfigDir() returns

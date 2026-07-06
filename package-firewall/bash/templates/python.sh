@@ -17,18 +17,24 @@
 # pip/uv index-urls carry the attributed username, so their {{...}} tokens are
 # filled here at install time (from the credentials block).
 #
-# pip section uses [endor-firewall] named section — avoids clobbering admin's [global].
+# pip block uses [global] (the only section pip reads index-url from); when the
+# admin already has a [global], upsert_block merges into it — see lib/common.sh.
 
 echo ""
 echo "[endor-python] ── Python package managers ──────────────────────────────────"
 
 # Fill the attributed index-url into the block content (pip/uv can't expand env vars).
-PIP_BLOCK=${PIP_BLOCK//'{{PIP_INDEX_URL}}'/$ENDOR_PYPI_URL}
-UV_BLOCK=${UV_BLOCK//'{{ENDOR_PYPI_URL}}'/$ENDOR_PYPI_URL}
+PIP_BLOCK=${PIP_BLOCK//'{{PIP_INDEX_URL}}'/"$ENDOR_PYPI_URL"}
+UV_BLOCK=${UV_BLOCK//'{{ENDOR_PYPI_URL}}'/"$ENDOR_PYPI_URL"}
 
 # ── pip ───────────────────────────────────────────────────────────────────────
 # pip reads pip.conf automatically from all three locations below.
 # pip does not support env var expansion — credentials are literal values (see pipconf.txt).
+# upsert_block merges into a pre-existing [global] (pip rejects duplicates)
+# and reversibly disables conflicting index keys. The warn still matters:
+# it alerts once when existing keys get disabled, and persistently for
+# conflicts the merge cannot absorb (e.g. index-url under [install], which
+# overrides [global] in pip's precedence).
 for pip_conf in \
   "$USER_HOME/.pip/pip.conf" \
   "$USER_HOME/.config/pip/pip.conf" \
