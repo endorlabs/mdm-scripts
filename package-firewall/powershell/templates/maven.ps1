@@ -6,7 +6,7 @@
 #
 # Block content is defined in shared/blocks/mavensettings.txt.
 # {{MAVEN_REGISTRY_URL}} is substituted at generation time. Credentials are NOT
-# baked in -- settings.xml references ${env.ENDOR_API_KEY_ID} / ${env.ENDOR_API_SECRET},
+# baked in -- settings.xml references ${env.ENDOR_ATTR_USER} / ${env.ENDOR_API_SECRET},
 # which Maven expands at runtime from the env vars already set in HKCU:\Environment.
 
 Write-Host '[endor-maven] -- Maven ----------------------------------------------------'
@@ -29,5 +29,5 @@ Invoke-UpsertXmlBlock `
 Write-Host "[endor-maven] settings.xml  -> $mavenSettings"
 Write-Host '[endor-maven]   covers: maven (all versions), and Gradle when it reads ~/.m2'
 Write-Host '[endor-maven]   mirror: {{MAVEN_REGISTRY_URL}} (mirrorOf=*)'
-Write-Host '[endor-maven]   NOTE: credentials come from env vars (ENDOR_API_KEY_ID/SECRET).'
+Write-Host '[endor-maven]   NOTE: credentials come from env vars (ENDOR_ATTR_USER/API_SECRET).'
 Write-Host '[endor-maven] [done] Maven done'
