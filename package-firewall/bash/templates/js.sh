@@ -20,6 +20,13 @@ echo "[endor-js] ── JavaScript package managers ─────────�
 
 # ── .npmrc ────────────────────────────────────────────────────────────────────
 # Covers: npm (all versions), pnpm (8.x–11.x), yarn classic (1.x), bun (all versions)
+
+# The shared block says ${ENDOR_API_KEY_ID} (Windows-safe); swap to the
+# attributed user on bash — bun parses .npmrc last-write-wins, so a raw-key
+# username line after _auth would drop bun's attribution. Remove once Windows
+# gets attribution.
+NPMRC_BLOCK=${NPMRC_BLOCK//'${ENDOR_API_KEY_ID}'/'${ENDOR_ATTR_USER}'}
+
 warn_if_key_conflict \
   "$USER_HOME/.npmrc" \
   "^registry=" \
