@@ -60,26 +60,23 @@ $ENDOR_API_KEY_ID = $env:ENDOR_API_KEY_ID
 $ENDOR_API_SECRET = $env:ENDOR_API_SECRET
 $FQDN = if ($env:ENDOR_FQDN) { $env:ENDOR_FQDN.TrimEnd('/') } else { 'https://factory.endorlabs.com' }
 
+# Reject credential characters that would corrupt generated scripts/URLs.
+if ("${ENDOR_API_KEY_ID}${ENDOR_API_SECRET}" -match '[^A-Za-z0-9+/=_.-]') {
+    Write-Error 'ENDOR_API_KEY_ID / ENDOR_API_SECRET contain unsupported characters'
+    exit 1
+}
+
 # -- Compute derived values ----------------------------------------------------
+# Credentials are NOT precomputed here. The per-machine attributed username
+# (<console-user>@<machine>) only exists on the developer's machine, so all
+# auth values are computed at install time by templates/envvars.ps1. Only
+# machine-independent values are derived here.
 $FQDN_HOST        = $FQDN -replace '^https?://', ''
 $TRUSTED_HOST     = $FQDN_HOST -replace ':.*', ''
 
 $NPM_REGISTRY_URL  = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/npm/"
 $NPM_REGISTRY_HOST = "$FQDN_HOST/v1/namespaces/$ENDOR_NAMESPACE/firewall/npm/"
-
-$_bytes          = [System.Text.Encoding]::UTF8.GetBytes("${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}")
-$NPM_AUTH_B64    = [System.Convert]::ToBase64String($_bytes)
-$_secretBytes    = [System.Text.Encoding]::UTF8.GetBytes($ENDOR_API_SECRET)
-$API_SECRET_B64  = [System.Convert]::ToBase64String($_secretBytes)
-Remove-Variable _bytes, _secretBytes
-
-$PYPI_URL      = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/pypi/simple/"
-$PIP_INDEX_URL = "https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/$ENDOR_NAMESPACE/firewall/pypi/simple/"
-
-$GO_PROXY_URL  = "https://${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}@${FQDN_HOST}/v1/namespaces/$ENDOR_NAMESPACE/firewall/go/,direct"
-
-# Maven keeps credentials in a <server> block via ${env.*}, so — unlike Go — no
-# credentials are baked into this URL.
+$PYPI_URL          = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/pypi/simple/"
 $MAVEN_REGISTRY_URL = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/maven/"
 
 # -- Output directory ----------------------------------------------------------
@@ -91,18 +88,18 @@ New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 function Invoke-Substitute {
     param([string]$Content)
     $r = $Content
-    $r = $r.Replace('{{NAMESPACE}}',         $ENDOR_NAMESPACE)
-    $r = $r.Replace('{{API_KEY_ID}}',        $ENDOR_API_KEY_ID)
-    $r = $r.Replace('{{API_SECRET}}',        $ENDOR_API_SECRET)
-    $r = $r.Replace('{{FQDN}}',              $FQDN)
-    $r = $r.Replace('{{NPM_REGISTRY_URL}}',  $NPM_REGISTRY_URL)
-    $r = $r.Replace('{{NPM_REGISTRY_HOST}}', $NPM_REGISTRY_HOST)
-    $r = $r.Replace('{{NPM_AUTH_B64}}',      $NPM_AUTH_B64)
-    $r = $r.Replace('{{API_SECRET_B64}}',   $API_SECRET_B64)
-    $r = $r.Replace('{{PYPI_URL}}',          $PYPI_URL)
-    $r = $r.Replace('{{PIP_INDEX_URL}}',     $PIP_INDEX_URL)
-    $r = $r.Replace('{{TRUSTED_HOST}}',      $TRUSTED_HOST)
-    $r = $r.Replace('{{GO_PROXY_URL}}',      $GO_PROXY_URL)
+    # Attribution tokens ({{PIP_INDEX_URL}}, {{ENDOR_PYPI_URL}}, {{GO_PROXY_URL}},
+    # {{NPM_AUTH_B64}}) are NOT substituted here — the generated scripts fill
+    # them at install time from the values computed in envvars.ps1.
+    $r = $r.Replace('{{NAMESPACE}}',          $ENDOR_NAMESPACE)
+    $r = $r.Replace('{{API_KEY_ID}}',         $ENDOR_API_KEY_ID)
+    $r = $r.Replace('{{API_SECRET}}',         $ENDOR_API_SECRET)
+    $r = $r.Replace('{{FQDN}}',               $FQDN)
+    $r = $r.Replace('{{FQDN_HOST}}',          $FQDN_HOST)
+    $r = $r.Replace('{{NPM_REGISTRY_URL}}',   $NPM_REGISTRY_URL)
+    $r = $r.Replace('{{NPM_REGISTRY_HOST}}',  $NPM_REGISTRY_HOST)
+    $r = $r.Replace('{{PYPI_URL}}',           $PYPI_URL)
+    $r = $r.Replace('{{TRUSTED_HOST}}',       $TRUSTED_HOST)
     $r = $r.Replace('{{MAVEN_REGISTRY_URL}}', $MAVEN_REGISTRY_URL)
     $r
 }
@@ -148,6 +145,17 @@ function Get-ScriptHeader {
     $r
 }
 
+# Warning footer appended to install scripts (MDM alert hook, mirrors bash).
+$ScriptFooter = @'
+
+# -- Exit non-zero if any warnings were emitted (MDM alert hook) --
+if ($EndorWarned) {
+    Write-Host ''
+    Write-Warning '[endor] Script completed with warnings -- review output above.'
+    exit 1
+}
+'@
+
 # Build-Script <template> <outputpath> <description>
 function Build-Script {
     param([string]$Template, [string]$OutputPath, [string]$Description)
@@ -158,7 +166,8 @@ function Build-Script {
         '# == Env vars setup =====================================================',
         (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'envvars.ps1') -Raw -Encoding UTF8)),
         '',
-        (Invoke-Substitute (Get-Content $Template -Raw -Encoding UTF8))
+        (Invoke-Substitute (Get-Content $Template -Raw -Encoding UTF8)),
+        $ScriptFooter
     )
     Set-Content -Path $OutputPath -Value ($parts -join "`n") -Encoding UTF8
 }
@@ -220,7 +229,8 @@ $_allParts = @(
     (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'maven.ps1') -Raw -Encoding UTF8)),
     '',
     "Write-Host ''",
-    "Write-Host '[endor] [done] All package managers configured for $ENDOR_NAMESPACE (js + python + go + maven).'"
+    "Write-Host '[endor] [done] All package managers configured for $ENDOR_NAMESPACE (js + python + go + maven).'",
+    $ScriptFooter
 )
 Set-Content -Path (Join-Path $OutDir $_allName) -Value ($_allParts -join "`n") -Encoding UTF8
 Remove-Variable -Name _allName, _allParts

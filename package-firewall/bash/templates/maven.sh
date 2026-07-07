@@ -12,13 +12,6 @@
 echo ""
 echo "[endor-maven] ── Maven ────────────────────────────────────────────────────────"
 
-# Swap to the attributed user (shared block stays Windows-safe).
-MAVEN_BLOCK=${MAVEN_BLOCK//'${env.ENDOR_API_KEY_ID}'/'${env.ENDOR_ATTR_USER}'}
-if [[ "$MAVEN_BLOCK" != *'${env.ENDOR_ATTR_USER}'* ]]; then
-  echo "[endor-maven] WARNING: attribution swap did not match — shared/blocks/mavensettings.txt changed?" >&2
-  _ENDOR_WARNED=1
-fi
-
 MAVEN_SETTINGS="$USER_HOME/.m2/settings.xml"
 
 # warn if the admin already defines a mirror/server outside an Endor block --

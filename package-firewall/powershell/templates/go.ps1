@@ -5,14 +5,17 @@
 # The path is resolved via `go env GOENV` (Windows default: %APPDATA%\go\env).
 #
 # Block content is defined in shared/blocks/goenv.txt.
-# {{GO_PROXY_URL}} is substituted at generation time — Go env files do not support
-# env var expansion, so credentials are baked into the GOPROXY value.
+# Go env files can't expand env vars, so the {{GO_PROXY_URL}} token is filled
+# here at install time with the attributed literal (from envvars.ps1).
 #
 # The go env file takes lower precedence than the GOPROXY process env var, so
 # project-level overrides (go env -w GOPROXY=... in a workspace) remain possible.
 # Sentinel comment lines (# ...) are silently ignored by `go env` parsing.
 
 Write-Host '[endor-go] -- Go package manager ----------------------------------------'
+
+# Fill the attributed GOPROXY into the block content (go env can't expand env vars).
+$GO_BLOCK = $GO_BLOCK.Replace('{{GO_PROXY_URL}}', $ENDOR_GO_PROXY_URL)
 
 # -- Resolve go env file path --
 # Run `go env GOENV` with APPDATA pointed at the user's AppData so Go's
