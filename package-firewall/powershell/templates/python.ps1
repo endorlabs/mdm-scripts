@@ -6,20 +6,26 @@
 #   %APPDATA%\uv\uv.toml       uv  (does NOT read pip.ini)
 #
 # Credential approach per tool:
-#   pip    -- literal credentials in pip.ini (pip cannot expand env vars)
-#   uv     -- ${ENDOR_PYPI_URL} env var ref; resolved from HKCU:\Environment at runtime
+#   pip    -- literal index-url in pip.ini (pip cannot expand env vars)
+#   uv     -- literal index-url in uv.toml (baked at install time, like pip)
 #   poetry -- POETRY_HTTP_BASIC_ENDOR_FIREWALL_* set in HKCU:\Environment above
 #
-# pip uses [endor-firewall] named section -- avoids clobbering admin's [global].
+# pip block uses [global]; Invoke-UpsertBlock merges into a pre-existing one.
 #
 # macOS uses ~/.config/pip/pip.conf + ~/.pip/pip.conf + ~/Library/.../pip.conf.
 # Windows uses a single %APPDATA%\pip\pip.ini (no multi-path search needed).
 
 Write-Host '[endor-python] -- Python package managers --------------------------------'
 
+# Fill the attributed index-url into the block content (pip/uv can't expand env vars).
+$PIP_BLOCK = $PIP_BLOCK.Replace('{{PIP_INDEX_URL}}', $ENDOR_PYPI_URL)
+$UV_BLOCK  = $UV_BLOCK.Replace('{{ENDOR_PYPI_URL}}', $ENDOR_PYPI_URL)
+
 # -- pip.ini --
 # Windows: %APPDATA%\pip\pip.ini (equivalent of ~/.config/pip/pip.conf on macOS/Linux)
 # pip does not support env var expansion -- credentials are literal values.
+# warn alerts once when existing keys get disabled, and persistently for
+# conflicts the merge can't absorb (e.g. index-url under [install]).
 $_pipIni = Join-Path $AppData 'pip\pip.ini'
 
 Test-KeyConflict `
@@ -39,7 +45,7 @@ Remove-Variable _pipIni
 
 # -- uv.toml --
 # uv does NOT read pip.ini. %APPDATA%\uv\uv.toml is the user-level global config.
-# uv supports ${VAR} expansion -- ENDOR_PYPI_URL is resolved from HKCU:\Environment.
+# The index-url is baked as a literal at install time -- see the fill above.
 $_uvToml = Join-Path $AppData 'uv\uv.toml'
 
 Test-KeyConflict `

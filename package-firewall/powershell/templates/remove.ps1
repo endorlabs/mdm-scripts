@@ -44,11 +44,12 @@ Write-Host '[endor-remove] -- environment variables ----------------------------
 $_removeVars = @(
     'ENDOR_API_KEY_ID'
     'ENDOR_API_SECRET'
+    'ENDOR_ATTR_USER'
     'ENDOR_AUTH_B64'
     'ENDOR_API_SECRET_B64'
     'ENDOR_NPM_REGISTRY_URL'
-    'ENDOR_PYPI_URL'
-    'ENDOR_GO_PROXY_URL'
+    'ENDOR_PYPI_URL'      # no longer written; still removed to clean older deployments
+    'ENDOR_GO_PROXY_URL'  # no longer written; still removed to clean older deployments
     'POETRY_HTTP_BASIC_ENDOR_FIREWALL_USERNAME'
     'POETRY_HTTP_BASIC_ENDOR_FIREWALL_PASSWORD'
 )
@@ -70,6 +71,37 @@ Write-Host '[endor-remove] -- JavaScript ---------------------------------------
 Invoke-RemoveBlock -FilePath (Join-Path $UserHome '.npmrc')      -DryRun:$DryRun
 Invoke-RemoveBlock -FilePath (Join-Path $UserHome '.yarnrc')     -DryRun:$DryRun
 Invoke-RemoveBlock -FilePath (Join-Path $UserHome '.yarnrc.yml') -DryRun:$DryRun
+
+# yarn 1.x rewrites .yarnrc on its own and can copy the Endor registry outside
+# the managed block. Delete only lines exactly matching our URL — they can't be
+# anyone else's config.
+$_yarnrc    = Join-Path $UserHome '.yarnrc'
+$_endorLine = 'registry "{{NPM_REGISTRY_URL}}"'
+$_outside   = @()
+if (Test-Path $_yarnrc) {
+    $_inBlock = $false
+    foreach ($_l in @(Get-Content $_yarnrc -Encoding UTF8)) {
+        if ($_l -eq $ENDOR_BLOCK_START) { $_inBlock = $true;  continue }
+        if ($_l -eq $ENDOR_BLOCK_END)   { $_inBlock = $false; continue }
+        if (-not $_inBlock) { $_outside += $_l }
+    }
+}
+if ($_outside -contains $_endorLine) {
+    if ($DryRun) {
+        Write-Host "[dry-run]   action : DELETE yarn-copied Endor registry line from $_yarnrc"
+    } else {
+        $_kept = @(Get-Content $_yarnrc -Encoding UTF8) |
+                 Where-Object { $_ -ne $_endorLine -and $_ -ne 'always-auth true' }
+        if (-not (($_kept -join '') -replace '\s', '')) {
+            Remove-Item $_yarnrc -Force
+            Write-Host "[endor-remove] deleted (was empty) : $_yarnrc"
+        } else {
+            Write-EndorFile -FilePath $_yarnrc -Lines $_kept
+            Write-Host "[endor-remove] yarn-copied line removed: $_yarnrc"
+        }
+    }
+}
+Remove-Variable _yarnrc, _endorLine, _outside -ErrorAction SilentlyContinue
 Write-Host ''
 
 # -- Python config files --

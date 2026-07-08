@@ -2,7 +2,7 @@
   <servers>
     <server>
       <id>endor-firewall</id>
-      <username>${env.ENDOR_API_KEY_ID}</username>
+      <username>${env.ENDOR_ATTR_USER}</username>
       <password>${env.ENDOR_API_SECRET}</password>
     </server>
   </servers>

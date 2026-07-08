@@ -6,7 +6,7 @@
 #   %USERPROFILE%\.yarnrc         yarn classic (1.x) registry redirect
 #   %USERPROFILE%\.yarnrc.yml     yarn 2+ / berry (does NOT read .npmrc for registry)
 #
-# Auth note: .npmrc uses _auth, _username, _password (base64-encoded key:secret).
+# Auth note: .npmrc uses _auth, username, _password (attributed-user credentials).
 #   _authToken causes 401 with bun. _auth is verified working for all tools above.
 #
 # Yarn classic reads .npmrc for auth and .yarnrc for registry -- both written here.

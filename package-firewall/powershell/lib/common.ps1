@@ -6,8 +6,6 @@
 #   Get-ConsoleUser                              — finds the logged-in user when running as SYSTEM
 #   Set-UserEnvVar        <name> <value> <sid>   — writes persistent HKCU env var via user SID
 #   Remove-UserEnvVar     <name> <sid>           — removes HKCU env var
-#   Set-ProfileEnvBlock   <profilepath> <vars>   — upserts env var block into PowerShell profile
-#   Remove-ProfileEnvBlock <profilepath>         — removes env var block from PowerShell profile
 #   Set-FileRestrictedAcl <path> <username>      — restricts file to owner only
 #   Invoke-UpsertBlock    <path> <content> ...   — idempotent sentinel-block writer
 #   Invoke-RemoveBlock    <path> ...             — strips Endor sentinel block from a file
@@ -30,6 +28,40 @@ $ENDOR_BLOCK_END   = '# ===== END ENDOR PACKAGE FIREWALL ====='
 # and the bash ENDOR_XML_BLOCK_* markers, or re-runs and removal cannot find the block.
 $ENDOR_XML_BLOCK_START = '<!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->'
 $ENDOR_XML_BLOCK_END   = '<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->'
+
+# ── User attribution helpers ──────────────────────────────────────────────────
+# Encode <console-user>@<machine> into the Basic-auth username. The firewall
+# decodes the label, auths with the real API key, and logs it as "User".
+# Unverified telemetry only — never an authz signal.
+
+# Get-EndorAttrUsername <label> <apiKeyId>
+# Returns base64(base64("userattr:"+label)+":"+keyId) — the format
+# decodeAttributedUsername() expects in endorfactory's auth layer.
+function Get-EndorAttrUsername {
+    param([string]$Label, [string]$ApiKeyId)
+    $inner = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("userattr:$Label"))
+    [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("${inner}:${ApiKeyId}"))
+}
+
+# Get-EndorUrlEncB64 <b64> — percent-encode base64 chars (+ / =) for URL userinfo.
+function Get-EndorUrlEncB64 {
+    param([string]$B64)
+    $B64.Replace('+', '%2B').Replace('/', '%2F').Replace('=', '%3D')
+}
+
+# Get-EndorHostLabel — a stable, human-readable machine name for attribution.
+function Get-EndorHostLabel {
+    if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { [System.Net.Dns]::GetHostName() }
+}
+
+# Write-EndorFile <path> <lines>
+# UTF-8 WITHOUT BOM. Windows PowerShell 5.1's `-Encoding UTF8` writes a BOM,
+# which pip's configparser rejects — pip.ini would be silently ignored.
+function Write-EndorFile {
+    param([string]$FilePath, [string[]]$Lines)
+    $text = ($Lines -join [System.Environment]::NewLine) + [System.Environment]::NewLine
+    [System.IO.File]::WriteAllText($FilePath, $text, [System.Text.UTF8Encoding]::new($false))
+}
 
 # Get-ConsoleUser
 # Intune scripts run as SYSTEM by default. Detects the logged-in interactive user
@@ -118,83 +150,6 @@ function Remove-UserEnvVar {
     }
 }
 
-# Set-ProfileEnvBlock <profilepath> <hashtable of name=value>
-# Upserts a sentinel-guarded block of $env:VAR = 'value' assignments into the
-# PowerShell profile so env vars are available in every new PS session immediately,
-# without requiring a full logout/login cycle (unlike HKCU:\Environment).
-function Set-ProfileEnvBlock {
-    param([string]$ProfilePath, [hashtable]$Vars, [switch]$DryRun)
-
-    $lines = $Vars.GetEnumerator() | ForEach-Object {
-        "`$env:$($_.Key) = '$($_.Value)'"
-    }
-    $block = ($lines -join "`n")
-
-    if ($DryRun) {
-        Write-Host "[dry-run]   Set-ProfileEnvBlock : $ProfilePath"
-        $lines | ForEach-Object { Write-Host "[dry-run]     $_" }
-        return
-    }
-
-    $profileDir = Split-Path $ProfilePath
-    if ($profileDir -and -not (Test-Path $profileDir)) {
-        New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
-    }
-    if (-not (Test-Path $ProfilePath)) {
-        New-Item -ItemType File -Path $ProfilePath -Force | Out-Null
-    }
-
-    $raw      = Get-Content $ProfilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-    $hasBlock = $raw -match [regex]::Escape($ENDOR_BLOCK_START)
-
-    if ($hasBlock) {
-        $existing = Get-Content $ProfilePath -Encoding UTF8
-        $inBlock  = $false
-        $kept     = [System.Collections.Generic.List[string]]::new()
-        foreach ($line in $existing) {
-            if ($line -eq $ENDOR_BLOCK_START) { $inBlock = $true;  continue }
-            if ($line -eq $ENDOR_BLOCK_END)   { $inBlock = $false; continue }
-            if (-not $inBlock) { $kept.Add($line) }
-        }
-        Set-Content -Path $ProfilePath -Value $kept -Encoding UTF8
-    }
-
-    $entry = "`n$ENDOR_BLOCK_START`n$block`n$ENDOR_BLOCK_END"
-    Add-Content -Path $ProfilePath -Value $entry -Encoding UTF8 -NoNewline
-}
-
-# Remove-ProfileEnvBlock <profilepath>
-# Strips the Endor sentinel block from the PowerShell profile.
-function Remove-ProfileEnvBlock {
-    param([string]$ProfilePath, [switch]$DryRun)
-
-    if (-not (Test-Path $ProfilePath)) { return }
-    $raw = Get-Content $ProfilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-    if (-not ($raw -match [regex]::Escape($ENDOR_BLOCK_START))) { return }
-
-    $lines    = Get-Content $ProfilePath -Encoding UTF8
-    $inBlock  = $false
-    $kept     = [System.Collections.Generic.List[string]]::new()
-    foreach ($line in $lines) {
-        if ($line -eq $ENDOR_BLOCK_START) { $inBlock = $true;  continue }
-        if ($line -eq $ENDOR_BLOCK_END)   { $inBlock = $false; continue }
-        if (-not $inBlock) { $kept.Add($line) }
-    }
-
-    $remaining = ($kept -join '') -replace '\s', ''
-
-    if ($DryRun) {
-        Write-Host "[dry-run]   Remove-ProfileEnvBlock : $ProfilePath"
-        return
-    }
-
-    if (-not $remaining) {
-        Remove-Item $ProfilePath -Force
-    } else {
-        Set-Content -Path $ProfilePath -Value $kept -Encoding UTF8
-    }
-}
-
 # Set-FileRestrictedAcl <path> <username>
 # Disables ACL inheritance and grants Full Control to the owner only.
 function Set-FileRestrictedAcl {
@@ -219,6 +174,10 @@ function Set-FileRestrictedAcl {
 #   - File present, no block -> appends the block; existing content untouched
 #   - File present, block found -> replaces only the block; rest untouched
 #   - -DryRun                -> prints what would happen, writes nothing
+#
+# pip.ini special case: pip rejects duplicate [global] sections, so when both
+# <content> and the file declare [global], the keys are merged into the existing
+# section and conflicting keys are disabled reversibly with '#endor-bak#'.
 function Invoke-UpsertBlock {
     param(
         [string]$FilePath,
@@ -227,22 +186,44 @@ function Invoke-UpsertBlock {
         [switch]$DryRun
     )
 
-    $dir        = Split-Path $FilePath -Parent
-    $fileExists = Test-Path $FilePath
-    $raw        = if ($fileExists) { Get-Content $FilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue } else { '' }
-    $hasBlock   = $raw -match [regex]::Escape($ENDOR_BLOCK_START)
+    $Content      = $Content.Replace("`r", '')
+    $contentLines = $Content -split "`n"
+    $dir          = Split-Path $FilePath -Parent
+    $fileExists   = Test-Path $FilePath
+    $raw          = if ($fileExists) { Get-Content $FilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue } else { '' }
+    $hasBlock     = $raw -match [regex]::Escape($ENDOR_BLOCK_START)
+
+    # Existing lines outside the Endor block (block content excluded up front)
+    $outside = [System.Collections.Generic.List[string]]::new()
+    if ($fileExists) {
+        $inBlock = $false
+        foreach ($line in @(Get-Content $FilePath -Encoding UTF8)) {
+            if ($line -eq $ENDOR_BLOCK_START) { $inBlock = $true;  continue }
+            if ($line -eq $ENDOR_BLOCK_END)   { $inBlock = $false; continue }
+            if (-not $inBlock) { $outside.Add($line) }
+        }
+    }
+
+    # Merge only when both the content and the pre-existing file declare [global]
+    $merge = ($contentLines -contains '[global]') -and ($outside -contains '[global]')
 
     if ($DryRun) {
         if ($hasBlock) {
             Write-Host '[dry-run]   action : REPLACE existing Endor block'
+        } elseif ($merge) {
+            Write-Host '[dry-run]   action : MERGE into existing [global] (conflicting keys disabled via #endor-bak#)'
         } elseif ($fileExists) {
             Write-Host '[dry-run]   action : APPEND Endor block to existing file'
         } else {
             Write-Host '[dry-run]   action : CREATE file with Endor block'
         }
+        if ($merge) {
+            Write-Host "[dry-run]   note   : pre-existing index keys will be disabled via '#endor-bak#'"
+            Write-Host '[dry-run]            and the Endor keys merged into the existing [global]'
+        }
         Write-Host "[dry-run]   file   : $FilePath"
         Write-Host '[dry-run]   content:'
-        $Content -split "`n" | ForEach-Object { Write-Host "[dry-run]     $_" }
+        $contentLines | ForEach-Object { Write-Host "[dry-run]     $_" }
         Write-Host ''
         return
     }
@@ -251,33 +232,65 @@ function Invoke-UpsertBlock {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
 
-    # Strip existing Endor block, preserve everything else
-    if ($hasBlock) {
-        $lines    = Get-Content $FilePath -Encoding UTF8
-        $inBlock  = $false
-        $newLines = [System.Collections.Generic.List[string]]::new()
-        foreach ($line in $lines) {
-            if ($line -eq $ENDOR_BLOCK_START) { $inBlock = $true;  continue }
-            if ($line -eq $ENDOR_BLOCK_END)   { $inBlock = $false; continue }
-            if (-not $inBlock) { $newLines.Add($line) }
+    if ($merge) {
+        # Disable-keys derived from the content; pip treats '-'/'_' and '='/':' alike.
+        $keys = $contentLines | ForEach-Object {
+            if ($_ -match '^([A-Za-z0-9_-]+)\s*[=:]') { $Matches[1] }
         }
-        Set-Content -Path $FilePath -Value $newLines -Encoding UTF8
-    }
+        $keyPattern = ($keys | ForEach-Object { $_ -replace '[-_]', '[-_]' }) -join '|'
 
-    # Append block (leading newline keeps it visually separated from prior content)
-    $block = "`n$ENDOR_BLOCK_START`n$Content`n$ENDOR_BLOCK_END"
-    Add-Content -Path $FilePath -Value $block -Encoding UTF8 -NoNewline
+        # 1. Reversibly disable pre-existing copies of those keys and their
+        #    indented continuation lines.
+        $body     = [System.Collections.Generic.List[string]]::new()
+        $cont     = $false
+        $disabled = $false
+        foreach ($line in $outside) {
+            if ($keyPattern -and $line -match "^\s*($keyPattern)\s*[=:]") {
+                $body.Add("#endor-bak#$line"); $cont = $true; $disabled = $true; continue
+            }
+            if ($cont -and $line -match '^\s+\S') {
+                $body.Add("#endor-bak#$line"); continue
+            }
+            $cont = $false
+            $body.Add($line)
+        }
+        if ($disabled) {
+            Write-Host "[endor] NOTE: existing pip index keys in $FilePath disabled with '#endor-bak#' (restored on removal)"
+        }
+
+        # 2. Insert the sentinel-wrapped keys (minus the [global] header) after
+        #    the first [global].
+        $keysBlock = @($ENDOR_BLOCK_START) + @($contentLines | Where-Object { $_ -ne '[global]' }) + @($ENDOR_BLOCK_END)
+        $final = [System.Collections.Generic.List[string]]::new()
+        $done  = $false
+        foreach ($line in $body) {
+            $final.Add($line)
+            if (-not $done -and $line -eq '[global]') {
+                foreach ($k in $keysBlock) { $final.Add($k) }
+                $done = $true
+            }
+        }
+        Write-EndorFile -FilePath $FilePath -Lines $final
+    } else {
+        $final = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in $outside) { $final.Add($line) }
+        $final.Add('')
+        $final.Add($ENDOR_BLOCK_START)
+        foreach ($line in $contentLines) { $final.Add($line) }
+        $final.Add($ENDOR_BLOCK_END)
+        Write-EndorFile -FilePath $FilePath -Lines $final
+    }
 
     Set-FileRestrictedAcl -FilePath $FilePath -Username $Username
 }
 
 # Invoke-RemoveBlock <filepath> [-DryRun]
 #
-# Strips the Endor sentinel block from a config file.
+# Strips the Endor sentinel block and restores '#endor-bak#'-disabled keys.
 #   - File absent           -> skips silently
 #   - No Endor block found  -> skips with a notice
 #   - Block found           -> removes block; preserves everything else
-#   - File empty after removal -> deletes the file entirely
+#   - File empty after removal -> deletes it (a bare [global] counts as empty)
 function Invoke-RemoveBlock {
     param([string]$FilePath, [switch]$DryRun)
 
@@ -298,27 +311,32 @@ function Invoke-RemoveBlock {
     foreach ($line in $lines) {
         if ($line -eq $ENDOR_BLOCK_START) { $inBlock = $true;  continue }
         if ($line -eq $ENDOR_BLOCK_END)   { $inBlock = $false; continue }
-        if (-not $inBlock) { $newLines.Add($line) }
+        if (-not $inBlock) { $newLines.Add(($line -replace '^(\s*)#endor-bak#', '$1')) }
     }
 
+    # Effectively empty = whitespace only, or a bare [global] left from a pip merge
     $remaining = ($newLines -join '') -replace '\s', ''
+    $isEmpty   = (-not $remaining) -or ($remaining -eq '[global]')
 
     if ($DryRun) {
-        if (-not $remaining) {
+        if ($isEmpty) {
             Write-Host '[dry-run]   action : REMOVE block -> file would be empty -> DELETE file'
         } else {
             Write-Host '[dry-run]   action : REMOVE block, preserve remaining content'
+        }
+        if ($raw -match '#endor-bak#') {
+            Write-Host "[dry-run]   restore: keys disabled with '#endor-bak#'"
         }
         Write-Host "[dry-run]   file   : $FilePath"
         Write-Host ''
         return
     }
 
-    if (-not $remaining) {
+    if ($isEmpty) {
         Remove-Item $FilePath -Force
         Write-Host "[endor-remove] deleted (was empty) : $FilePath"
     } else {
-        Set-Content -Path $FilePath -Value $newLines -Encoding UTF8
+        Write-EndorFile -FilePath $FilePath -Lines $newLines
         Write-Host "[endor-remove] block removed       : $FilePath"
     }
 }
@@ -374,8 +392,8 @@ function Invoke-UpsertXmlBlock {
             '          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 http://maven.apache.org/xsd/settings-1.2.0.xsd">'
             $Content
             '</settings>'
-        ) -join "`n"
-        Set-Content -Path $FilePath -Value $scaffold -Encoding UTF8
+        )
+        Write-EndorFile -FilePath $FilePath -Lines $scaffold
         Set-FileRestrictedAcl -FilePath $FilePath -Username $Username
         return
     }
@@ -405,7 +423,7 @@ function Invoke-UpsertXmlBlock {
     }
     if (-not $inserted) { $out.Add($Content) }  # no closing tag found — append so it isn't lost
 
-    Set-Content -Path $FilePath -Value $out -Encoding UTF8
+    Write-EndorFile -FilePath $FilePath -Lines $out
     Set-FileRestrictedAcl -FilePath $FilePath -Username $Username
 }
 
@@ -448,7 +466,7 @@ function Remove-XmlBlock {
         Remove-Item $FilePath -Force
         Write-Host "[endor-remove] deleted (was empty) : $FilePath"
     } else {
-        Set-Content -Path $FilePath -Value $kept -Encoding UTF8
+        Write-EndorFile -FilePath $FilePath -Lines $kept
         Write-Host "[endor-remove] block removed       : $FilePath"
     }
 }
@@ -466,5 +484,6 @@ function Test-KeyConflict {
     if (Get-Content $FilePath -Encoding UTF8 | Where-Object { $_ -match $Pattern }) {
         Write-Warning "[endor] WARNING: existing '$Label' found in $FilePath."
         Write-Warning "[endor]          Endor block will be appended -- verify key precedence with your tool."
+        $script:EndorWarned = $true
     }
 }

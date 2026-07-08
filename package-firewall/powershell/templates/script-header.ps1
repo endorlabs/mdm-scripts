@@ -21,6 +21,9 @@ if ($DryRun) {
     Write-Host '[endor] DRY RUN -- no files will be modified and no registry keys will be written.'
 }
 
+# Set by Test-KeyConflict / swap guards; the script footer exits 1 when true (MDM alert hook).
+$EndorWarned = $false
+
 # -- Detect console user --
 # When running as SYSTEM (Intune default), Get-ConsoleUser detects the logged-in
 # user via explorer.exe and resolves their profile path + registry SID.
