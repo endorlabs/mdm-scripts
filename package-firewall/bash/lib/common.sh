@@ -19,6 +19,9 @@
 #                                                honours DRY_RUN=1 (prints intent, no writes)
 #   warn_if_key_conflict    <file> <pattern> <label>
 #                                              — warns when a key exists outside an Endor block
+#   warn_if_xml_key_conflict <file> <pattern> <label>
+#                                              — same, but for XML-comment-delimited blocks
+#                                                (e.g. Maven settings.xml)
 
 # Sentinel markers — identical across all config files so re-runs and remove work reliably
 ENDOR_BLOCK_START="# ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ====="
@@ -488,6 +491,29 @@ warn_if_key_conflict() {
   if awk "/$pattern/" "$file" 2>/dev/null | grep -q .; then
     echo "[endor] WARNING: existing '${label}' found in ${file}." >&2
     echo "[endor]          Endor block will be appended — verify key precedence with your tool." >&2
+    _ENDOR_WARNED=1
+  fi
+}
+
+# warn_if_xml_key_conflict <file> <awk-pattern> <label>
+# Warns when <pattern> exists in <file> outside an Endor-managed XML block.
+# Unlike warn_if_key_conflict, scans only lines outside ENDOR_XML_BLOCK_START/END
+# so re-runs on an already-managed settings.xml do not false-positive.
+warn_if_xml_key_conflict() {
+  local file="$1"
+  local pattern="$2"
+  local label="$3"
+
+  [[ -f "$file" ]] || return 0
+
+  if awk -v start="$ENDOR_XML_BLOCK_START" -v end="$ENDOR_XML_BLOCK_END" -v pat="$pattern" '
+    index($0, start) { skip=1; next }
+    index($0, end)   { skip=0; next }
+    !skip && $0 ~ pat { found=1 }
+    END { exit(found ? 0 : 1) }
+  ' "$file" 2>/dev/null; then
+    echo "[endor] WARNING: existing '${label}' found in ${file}." >&2
+    echo "[endor]          Endor block will be inserted — verify key precedence with your tool." >&2
     _ENDOR_WARNED=1
   fi
 }

@@ -18,6 +18,7 @@
 #   Invoke-UpsertXmlBlock <path> <content> ...   — XML-aware writer for Maven settings.xml
 #   Remove-XmlBlock       <path> ...             — strips Endor XML block from settings.xml
 #   Test-KeyConflict      <path> <pattern> <label> — warns when a key exists outside an Endor block
+#   Test-XmlKeyConflict   <path> <pattern> <label> — same, but for XML-comment-delimited blocks
 
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║  SENTINEL CONTRACT — DO NOT CHANGE THESE STRINGS                    ║
@@ -557,6 +558,30 @@ function Test-KeyConflict {
     if (Get-Content $FilePath -Encoding UTF8 | Where-Object { $_ -match $Pattern }) {
         Write-Warning "[endor] WARNING: existing '$Label' found in $FilePath."
         Write-Warning "[endor]          Endor block will be appended -- verify key precedence with your tool."
+        $script:EndorWarned = $true
+    }
+}
+
+# Test-XmlKeyConflict <filepath> <regex-pattern> <label>
+# Warns when <pattern> matches a line in <file> outside an Endor-managed XML block.
+# Unlike Test-KeyConflict, scans only lines outside ENDOR_XML_BLOCK_START/END
+# so re-runs on an already-managed settings.xml do not false-positive.
+function Test-XmlKeyConflict {
+    param([string]$FilePath, [string]$Pattern, [string]$Label)
+
+    if (-not (Test-Path $FilePath)) { return }
+
+    $inBlock = $false
+    $found   = $false
+    foreach ($line in @(Get-Content $FilePath -Encoding UTF8)) {
+        if ($line -match [regex]::Escape($ENDOR_XML_BLOCK_START)) { $inBlock = $true;  continue }
+        if ($line -match [regex]::Escape($ENDOR_XML_BLOCK_END))   { $inBlock = $false; continue }
+        if (-not $inBlock -and $line -match $Pattern) { $found = $true; break }
+    }
+
+    if ($found) {
+        Write-Warning "[endor] WARNING: existing '$Label' found in $FilePath."
+        Write-Warning "[endor]          Endor block will be inserted -- verify key precedence with your tool."
         $script:EndorWarned = $true
     }
 }

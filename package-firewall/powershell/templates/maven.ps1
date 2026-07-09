@@ -15,7 +15,7 @@ $mavenSettings = Join-Path $UserHome '.m2\settings.xml'
 
 # Warn if the admin already defines a mirror outside an Endor block --
 # Maven mirror precedence could conflict and needs a human decision.
-Test-KeyConflict `
+Test-XmlKeyConflict `
     -FilePath $mavenSettings `
     -Pattern  '<mirror>' `
     -Label    'existing <mirror> (Maven)'

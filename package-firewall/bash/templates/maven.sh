@@ -16,7 +16,7 @@ MAVEN_SETTINGS="$USER_HOME/.m2/settings.xml"
 
 # warn if the admin already defines a mirror/server outside an Endor block --
 # Maven mirror precedence could conflict and needs a human decision.
-warn_if_key_conflict \
+warn_if_xml_key_conflict \
     "$MAVEN_SETTINGS" \
     "<mirror>" \
     "existing <mirror> (Maven)"
