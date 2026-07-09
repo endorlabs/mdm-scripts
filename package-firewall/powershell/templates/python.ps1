@@ -10,7 +10,7 @@
 #   uv     -- literal index-url in uv.toml (baked at install time, like pip)
 #   poetry -- POETRY_HTTP_BASIC_ENDOR_FIREWALL_* set in HKCU:\Environment above
 #
-# pip block uses [global]; Invoke-UpsertBlock merges into a pre-existing one.
+# pip block uses [global]; Invoke-UpsertBlockPip merges into a pre-existing one.
 #
 # macOS uses ~/.config/pip/pip.conf + ~/.pip/pip.conf + ~/Library/.../pip.conf.
 # Windows uses a single %APPDATA%\pip\pip.ini (no multi-path search needed).
@@ -33,7 +33,7 @@ Test-KeyConflict `
     -Pattern  '^index-url' `
     -Label    'index-url (pip)'
 
-Invoke-UpsertBlock `
+Invoke-UpsertBlockPip `
     -FilePath  $_pipIni `
     -Content   $PIP_BLOCK `
     -Username  $ConsoleUser `

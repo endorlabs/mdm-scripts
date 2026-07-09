@@ -156,7 +156,7 @@ upsert_block() {
     mv "$tmp" "$file"
   fi
 
-  printf '\n%s\n%s\n%s\n' \
+  printf '%s\n%s\n%s' \
     "$ENDOR_BLOCK_START" \
     "$content" \
     "$ENDOR_BLOCK_END" >> "$file"
