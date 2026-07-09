@@ -17,7 +17,7 @@
 # pip/uv index-urls carry the attributed username, so their {{...}} tokens are
 # filled here at install time (from the credentials block).
 #
-# pip block uses [global]; upsert_block merges into a pre-existing one.
+# pip block uses [global]; upsert_block_pip merges into a pre-existing one.
 
 echo ""
 echo "[endor-python] ── Python package managers ──────────────────────────────────"
@@ -41,7 +41,7 @@ for pip_conf in \
     "^index-url" \
     "index-url (pip)"
 
-  upsert_block \
+  upsert_block_pip \
     "$pip_conf" \
     "$PIP_BLOCK" \
     "$CONSOLE_USER" \

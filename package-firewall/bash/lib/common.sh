@@ -7,8 +7,12 @@
 #   resolve_user_home       <user>             — resolves home via dscl / getent / POSIX
 #   upsert_block            <file> <content> <owner> <group>
 #                                              — non-destructive, idempotent sentinel-block writer
-#                                                merges into an existing [global] for pip.conf
-#                                                honours DRY_RUN=1 (prints intent, no writes)
+#                                                delegates to upsert_block_pip when <content> has
+#                                                [global]; honours DRY_RUN=1 (prints intent, no writes)
+#   upsert_block_pip        <file> <content> <owner> <group>
+#                                              — pip.conf writer; merges into an existing [global]
+#                                                (conflicting keys disabled with '#endor-bak#')
+#                                                when both <content> and the file declare [global]
 #   remove_block            <file> <owner> <group>
 #                                              — strips Endor sentinel block from a file,
 #                                                restores keys disabled with '#endor-bak#'
@@ -111,44 +115,25 @@ resolve_user_home() {
 #   - File present, block found → replaces only the block; rest untouched
 #   - DRY_RUN=1            → prints what would happen, writes nothing
 #
-# pip.conf special case: pip rejects duplicate [global] sections, so when both
-# <content> and the file declare [global], the keys are merged into the existing
-# section and conflicting keys are disabled reversibly with '#endor-bak#'.
+# Delegates to upsert_block_pip when <content> carries a [global] header (pip.conf).
 upsert_block() {
   local file="$1"
   local content="$2"
   local owner="$3"
   local group="$4"
-  local tmp merge=0
 
-  # Strip CRLF (block files are shared with the Windows generator).
-  content=${content//$'\r'/}
-
-  # Merge only when both the content and the pre-existing file declare [global]
-  if printf '%s\n' "$content" | grep -q '^\[global\]$' \
-     && [[ -f "$file" ]] \
-     && awk -v start="$ENDOR_BLOCK_START" -v end="$ENDOR_BLOCK_END" '
-          index($0, start) { skip=1; next }
-          index($0, end)   { skip=0; next }
-          !skip && /^\[global\]/ { found=1 }
-          END { exit !found }
-        ' "$file" 2>/dev/null; then
-    merge=1
+  if printf '%s\n' "$content" | grep -qxF '[global]'; then
+    upsert_block_pip "$file" "$content" "$owner" "$group"
+    return 0
   fi
 
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     if [[ -f "$file" ]] && grep -qF "$ENDOR_BLOCK_START" "$file" 2>/dev/null; then
       echo "[dry-run]   action : REPLACE existing Endor block"
-    elif [[ "$merge" -eq 1 ]]; then
-      echo "[dry-run]   action : MERGE into existing [global] (conflicting keys disabled via #endor-bak#)"
     elif [[ -f "$file" ]]; then
       echo "[dry-run]   action : APPEND Endor block to existing file"
     else
       echo "[dry-run]   action : CREATE file with Endor block"
-    fi
-    if [[ "$merge" -eq 1 ]]; then
-      echo "[dry-run]   note   : pre-existing index keys will be disabled via '#endor-bak#'"
-      echo "[dry-run]            and the Endor keys merged into the existing [global]"
     fi
     echo "[dry-run]   file   : $file"
     echo "[dry-run]   content:"
@@ -161,6 +146,7 @@ upsert_block() {
 
   # Strip any existing Endor block, preserving everything else
   if [[ -f "$file" ]] && grep -qF "$ENDOR_BLOCK_START" "$file" 2>/dev/null; then
+    local tmp
     tmp=$(mktemp)
     awk -v start="$ENDOR_BLOCK_START" -v end="$ENDOR_BLOCK_END" '
       index($0, start) { skip=1; next }
@@ -170,51 +156,143 @@ upsert_block() {
     mv "$tmp" "$file"
   fi
 
-  if [[ "$merge" -eq 1 ]]; then
-    # Disable-keys derived from the content; pip treats '-'/'_' and '='/':' alike.
-    local keys_re
-    keys_re=$(printf '%s\n' "$content" | sed -nE 's/^([A-Za-z0-9_-]+)[[:space:]]*[=:].*/\1/p' \
-              | sed 's/[-_]/[-_]/g' | paste -sd'|' -)
+  printf '%s\n%s\n%s' \
+    "$ENDOR_BLOCK_START" \
+    "$content" \
+    "$ENDOR_BLOCK_END" >> "$file"
 
-    # 1. Reversibly disable pre-existing copies of those keys and their
-    #    indented continuation lines.
-    if [[ -n "$keys_re" ]] && grep -qE "^[[:space:]]*(${keys_re})[[:space:]]*[=:]" "$file"; then
-      tmp=$(mktemp)
-      awk -v re="^[[:space:]]*(${keys_re})[[:space:]]*[=:]" '
-        $0 ~ re                             { print "#endor-bak#" $0; cont=1; next }
-        cont && /^[[:space:]]+[^[:space:]]/ { print "#endor-bak#" $0; next }
-                                            { cont=0; print }
-      ' "$file" > "$tmp"
-      mv "$tmp" "$file"
-      echo "[endor] NOTE: existing pip index keys in ${file} disabled with '#endor-bak#' (restored on removal)"
+  chown "$owner:$group" "$file"
+  chmod 600 "$file"
+}
+
+# upsert_block_pip <file> <content> <owner> <group>
+#
+# pip.conf-aware sentinel-block writer. Identical to upsert_block except when both
+# <content> and the pre-existing file (outside any Endor block) declare [global]:
+# pip rejects duplicate [global] sections, so the Endor keys are inserted inside the
+# existing section and conflicting keys are disabled reversibly with '#endor-bak#'.
+upsert_block_pip() {
+  local file="$1"
+  local content="$2"
+  local owner="$3"
+  local group="$4"
+  local outside merge=0 has_block=0 tmp key_pattern
+
+  if [[ -f "$file" ]] && grep -qF "$ENDOR_BLOCK_START" "$file" 2>/dev/null; then
+    has_block=1
+  fi
+
+  if [[ -f "$file" ]]; then
+    outside=$(awk -v start="$ENDOR_BLOCK_START" -v end="$ENDOR_BLOCK_END" '
+      index($0, start) { skip=1; next }
+      index($0, end)   { skip=0; next }
+      !skip             { print }
+    ' "$file")
+    if printf '%s\n' "$content" | grep -qxF '[global]' \
+        && printf '%s\n' "$outside" | grep -qxF '[global]'; then
+      merge=1
+    fi
+  fi
+
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    if [[ "$has_block" == "1" ]]; then
+      echo "[dry-run]   action : REPLACE existing Endor block"
+    elif [[ "$merge" == "1" ]]; then
+      echo "[dry-run]   action : MERGE into existing [global] (conflicting keys disabled via #endor-bak#)"
+      echo "[dry-run]   note   : pre-existing index keys will be disabled via '#endor-bak#'"
+      echo "[dry-run]            and the Endor keys merged into the existing [global]"
+    elif [[ -f "$file" ]]; then
+      echo "[dry-run]   action : APPEND Endor block to existing file"
+    else
+      echo "[dry-run]   action : CREATE file with Endor block"
+    fi
+    echo "[dry-run]   file   : $file"
+    echo "[dry-run]   content:"
+    echo "$content" | sed 's/^/[dry-run]     /'
+    echo ""
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$file")"
+
+  if [[ "$merge" == "1" ]]; then
+    key_pattern=$(printf '%s\n' "$content" | awk '
+      match($0, /^[A-Za-z0-9_-]+[[:space:]]*[=:]/) {
+        key = substr($0, RSTART, RLENGTH)
+        sub(/[[:space:]]*[=:].*/, "", key)
+        gsub(/[-_]/, "[-_]", key)
+        if (pattern != "") pattern = pattern "|"
+        pattern = pattern key
+      }
+      END { print pattern }
+    ')
+
+    local bodyfile keysfile outfile
+    bodyfile=$(mktemp)
+    keysfile=$(mktemp)
+    outfile=$(mktemp)
+
+    awk -v key_pattern="$key_pattern" '
+      BEGIN { cont = 0 }
+      {
+        if (key_pattern != "" && $0 ~ ("^[[:space:]]*(" key_pattern ")[[:space:]]*[=:]")) {
+          print "#endor-bak#" $0
+          cont = 1
+          next
+        }
+        if (cont && $0 ~ /^[[:space:]]+\S/) {
+          print "#endor-bak#" $0
+          next
+        }
+        cont = 0
+        print
+      }
+    ' <<< "$outside" > "$bodyfile"
+
+    if grep -qF '#endor-bak#' "$bodyfile" 2>/dev/null; then
+      echo "[endor] NOTE: existing pip index keys in $file disabled with '#endor-bak#' (restored on removal)"
     fi
 
-    # 2. Insert the sentinel-wrapped keys after the first [global]
-    #    (temp file + getline: BSD awk rejects multi-line -v).
-    local keyfile
-    keyfile=$(mktemp)
     {
       echo "$ENDOR_BLOCK_START"
-      printf '%s\n' "$content" | grep -v '^\[global\]'
+      printf '%s\n' "$content" | grep -vxF '[global]'
       echo "$ENDOR_BLOCK_END"
-    } > "$keyfile"
-    tmp=$(mktemp)
-    awk -v keyfile="$keyfile" '
-      { print }
-      /^\[global\]/ && !done {
-        while ((getline line < keyfile) > 0) print line
-        close(keyfile)
-        done=1
+    } > "$keysfile"
+
+    awk -v keysfile="$keysfile" '
+      BEGIN { done = 0 }
+      {
+        print
+        if (!done && $0 == "[global]") {
+          while ((getline line < keysfile) > 0) print line
+          close(keysfile)
+          done = 1
+        }
       }
+    ' "$bodyfile" > "$outfile"
+
+    mv "$outfile" "$file"
+    rm -f "$bodyfile" "$keysfile"
+    chown "$owner:$group" "$file"
+    chmod 600 "$file"
+    return 0
+  fi
+
+  # Non-merge path: identical to upsert_block
+  if [[ -f "$file" ]] && grep -qF "$ENDOR_BLOCK_START" "$file" 2>/dev/null; then
+    tmp=$(mktemp)
+    awk -v start="$ENDOR_BLOCK_START" -v end="$ENDOR_BLOCK_END" '
+      index($0, start) { skip=1; next }
+      index($0, end)   { skip=0; next }
+      !skip             { print }
     ' "$file" > "$tmp"
     mv "$tmp" "$file"
-    rm -f "$keyfile"
-  else
-    printf '\n%s\n%s\n%s\n' \
-      "$ENDOR_BLOCK_START" \
-      "$content" \
-      "$ENDOR_BLOCK_END" >> "$file"
   fi
+
+  printf '\n%s\n%s\n%s\n' \
+    "$ENDOR_BLOCK_START" \
+    "$content" \
+    "$ENDOR_BLOCK_END" >> "$file"
 
   chown "$owner:$group" "$file"
   chmod 600 "$file"

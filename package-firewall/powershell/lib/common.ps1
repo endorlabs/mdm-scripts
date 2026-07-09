@@ -7,7 +7,13 @@
 #   Set-UserEnvVar        <name> <value> <sid>   — writes persistent HKCU env var via user SID
 #   Remove-UserEnvVar     <name> <sid>           — removes HKCU env var
 #   Set-FileRestrictedAcl <path> <username>      — restricts file to owner only
-#   Invoke-UpsertBlock    <path> <content> ...   — idempotent sentinel-block writer
+#   Invoke-UpsertBlock    <path> <content> ...   — idempotent sentinel-block writer;
+#                                                  delegates to Invoke-UpsertBlockPip when
+#                                                  <content> has [global]
+#   Invoke-UpsertBlockPip <path> <content> ...   — pip.ini writer; merges into an existing
+#                                                  [global] (conflicting keys disabled with
+#                                                  '#endor-bak#') when both content and file
+#                                                  declare [global]
 #   Invoke-RemoveBlock    <path> ...             — strips Endor sentinel block from a file
 #   Invoke-UpsertXmlBlock <path> <content> ...   — XML-aware writer for Maven settings.xml
 #   Remove-XmlBlock       <path> ...             — strips Endor XML block from settings.xml
@@ -175,10 +181,77 @@ function Set-FileRestrictedAcl {
 #   - File present, block found -> replaces only the block; rest untouched
 #   - -DryRun                -> prints what would happen, writes nothing
 #
-# pip.ini special case: pip rejects duplicate [global] sections, so when both
-# <content> and the file declare [global], the keys are merged into the existing
-# section and conflicting keys are disabled reversibly with '#endor-bak#'.
+# Delegates to Invoke-UpsertBlockPip when <content> carries a [global] header (pip.ini).
 function Invoke-UpsertBlock {
+    param(
+        [string]$FilePath,
+        [string]$Content,
+        [string]$Username,
+        [switch]$DryRun
+    )
+
+    $Content = $Content.Replace("`r", '')
+    if (($Content -split "`n") -contains '[global]') {
+        Invoke-UpsertBlockPip @PSBoundParameters
+        return
+    }
+
+    $contentLines = $Content -split "`n"
+    $dir          = Split-Path $FilePath -Parent
+    $fileExists   = Test-Path $FilePath
+    $hasBlock     = $false
+    if ($fileExists) {
+        $raw = Get-Content $FilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        $hasBlock = $raw -match [regex]::Escape($ENDOR_BLOCK_START)
+    }
+
+    if ($DryRun) {
+        if ($hasBlock) {
+            Write-Host '[dry-run]   action : REPLACE existing Endor block'
+        } elseif ($fileExists) {
+            Write-Host '[dry-run]   action : APPEND Endor block to existing file'
+        } else {
+            Write-Host '[dry-run]   action : CREATE file with Endor block'
+        }
+        Write-Host "[dry-run]   file   : $FilePath"
+        Write-Host '[dry-run]   content:'
+        $contentLines | ForEach-Object { Write-Host "[dry-run]     $_" }
+        Write-Host ''
+        return
+    }
+
+    if ($dir -and -not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+
+    $outside = [System.Collections.Generic.List[string]]::new()
+    if ($fileExists) {
+        $inBlock = $false
+        foreach ($line in @(Get-Content $FilePath -Encoding UTF8)) {
+            if ($line -eq $ENDOR_BLOCK_START) { $inBlock = $true;  continue }
+            if ($line -eq $ENDOR_BLOCK_END)   { $inBlock = $false; continue }
+            if (-not $inBlock) { $outside.Add($line) }
+        }
+    }
+
+    $final = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in $outside) { $final.Add($line) }
+    $final.Add('')
+    $final.Add($ENDOR_BLOCK_START)
+    foreach ($line in $contentLines) { $final.Add($line) }
+    $final.Add($ENDOR_BLOCK_END)
+    Write-EndorFile -FilePath $FilePath -Lines $final
+
+    Set-FileRestrictedAcl -FilePath $FilePath -Username $Username
+}
+
+# Invoke-UpsertBlockPip <filepath> <content> <username> [-DryRun]
+#
+# pip.ini-aware sentinel-block writer. Identical to Invoke-UpsertBlock except when both
+# <content> and the pre-existing file (outside any Endor block) declare [global]:
+# pip rejects duplicate [global] sections, so the Endor keys are inserted inside the
+# existing section and conflicting keys are disabled reversibly with '#endor-bak#'.
+function Invoke-UpsertBlockPip {
     param(
         [string]$FilePath,
         [string]$Content,
