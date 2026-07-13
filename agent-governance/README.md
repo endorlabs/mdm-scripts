@@ -1,6 +1,6 @@
 # agent-governance
 
-Deploy Endor Labs audit hooks to every AI coding agent on your fleet — Claude Code and Cursor — through your MDM.
+Deploy Endor Labs audit hooks to every AI coding agent on your fleet — Claude Code, Cursor, and Codex — through your MDM.
 
 ## What this is
 
@@ -20,28 +20,33 @@ scripts/render.sh --agent cursor \
 # Claude Code — writes ~/.claude/settings.json
 scripts/render.sh --agent claude \
   --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o ~/.claude/settings.json
+
+# Codex — writes ~/.codex/config.toml (overwrites; merge its [hooks]/[features] if you already have one)
+scripts/render.sh --agent codex \
+  --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o ~/.codex/config.toml
 ```
 
-Start a new session in the tool: the hook installs `endorctl` on first run and begins reporting to your Endor namespace. When you're ready to roll this out to the fleet, pick a deployment path below.
+Start a new session in the tool: the hook installs `endorctl` on first run and begins reporting to your Endor namespace. (Codex treats hooks from a *user* file as untrusted until you approve them once — the fleet paths below deliver them from a managed source, where they're trusted automatically.) When you're ready to roll this out to the fleet, pick a deployment path below.
 
 ## Choose how to deploy
 
-Each tool is delivered the way it best supports it. On macOS, Claude Code takes a tamper-resistant MDM **profile**; Cursor's config is a plain file delivered by a small **script**. A laptop can run any combination.
+Each tool is delivered the way it best supports it. On macOS, Claude Code and Codex take a tamper-resistant MDM **profile**; Cursor's config is a plain file delivered by a small **script**. A laptop can run any combination.
 
 | Tool | macOS delivery | Why | Runbook |
 | --- | --- | --- | --- |
 | **Claude Code** | MDM **Custom Profile** (`.mobileconfig`) | Claude reads a managed-settings profile payload (`com.anthropic.claudecode`), enforced by the OS | [Deploy Claude via profile](docs/deploy-claude-profile.md) |
 | **Cursor** | MDM **Custom Script** (the runner) | `hooks.json` is a plain file, not a profile payload | [Deploy Cursor via the runner](docs/deploy-cursor-runner.md) |
+| **Codex** | MDM **Custom Profile** (`.mobileconfig`) | Codex reads a Forced `com.openai.codex` preference (`requirements_toml_base64`); hooks from that managed source are auto-trusted | [Deploy Codex via profile](docs/deploy-codex-profile.md) |
 
-**Linux** delivers the same JSON as a file — Cursor at `/etc/cursor/hooks.json`, Claude at `/etc/claude-code/managed-settings.json` — via the runner or your config management (Ansible, Chef, …).
+**Linux** delivers the same config as a file — Cursor at `/etc/cursor/hooks.json`, Claude at `/etc/claude-code/managed-settings.json`, Codex at `/etc/codex/requirements.toml` — via the runner or your config management (Ansible, Chef, …).
 
-**Windows** has no `.mobileconfig`. You pre-generate the config (`--target-os windows`) and push the file with **Intune**; the hook is a self-contained `powershell` command that runs regardless of how the agent launches it. See [Deploy on Windows via Intune](docs/deploy-windows-intune.md).
+**Windows** has no `.mobileconfig`. You pre-generate the config (`--target-os windows`) and push the file with **Intune** — Cursor/Claude as JSON, Codex as `%ProgramData%\OpenAI\Codex\requirements.toml`; the hook is a self-contained `powershell` command that runs regardless of how the agent launches it. See [Deploy on Windows via Intune](docs/deploy-windows-intune.md).
 
 Other paths: [JumpCloud](docs/deploy-jumpcloud.md) (any OS), and [manual / enterprise-platform install](docs/deploy-manual-enterprise.md) for trials or orgs governing through Cursor Team hooks / Claude's admin console. The full agent × OS × MDM grid is the [support matrix](docs/support-matrix.md).
 
 ## The generator
 
-[`scripts/render.sh`](scripts/render.sh) builds a tool's config as JSON. For the Claude macOS profile, pipe that JSON through [`scripts/render-plist.sh`](scripts/render-plist.sh), which wraps it in the profile envelope and converts it to a `.mobileconfig`.
+[`scripts/render.sh`](scripts/render.sh) builds a tool's config — JSON for Claude and Cursor, a `requirements.toml` for Codex. For a macOS profile, pipe that output through [`scripts/render-plist.sh`](scripts/render-plist.sh), which wraps it in the profile envelope and converts it to a `.mobileconfig` (`--style plist` for Claude's JSON payload, `--style mcx` for Codex's base64 TOML preference).
 
 ```sh
 # Cursor hooks.json
@@ -60,6 +65,14 @@ scripts/render.sh --agent claude \
   --name "Claude Code - Endor AI Governance" \
   -o com.anthropic.claudecode.mobileconfig
 
+# Codex MDM profile (.mobileconfig) — upload to your MDM
+scripts/render.sh --agent codex \
+  --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o - \
+| scripts/render-plist.sh --style mcx \
+  --identifier com.acme.ai-governance.codex --organization "Acme Corp" \
+  --name "Codex - Endor AI Governance" \
+  -o com.openai.codex.mobileconfig
+
 # Windows config (push via Intune)
 scripts/render.sh --agent cursor --target-os windows \
   --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o cursor-hooks.json
@@ -76,11 +89,11 @@ scripts/render.sh --agent cursor --target-os windows \
 
 **`--target-os {macos,linux,windows}`** (default `macos`; macOS and Linux are identical POSIX) chooses the hook form. `windows` inlines the PowerShell bootstrap as a base64 `powershell -NoProfile -EncodedCommand …` so it runs under Git Bash, PowerShell, or cmd alike.
 
-**Behavior settings** go through `--env KEY=VALUE` (repeatable) and land in the right place per tool. Response caching is on by default; monitor-only mode is just `--env ENDOR_AI_AUDIT_NO_BLOCKING=true`.
+**Behavior settings** go through `--env KEY=VALUE` (repeatable) and land in the right place per tool — Claude's `env` block, and inlined into Cursor's session hook / every Codex hook command (Codex has no managed env block). Response caching is on by default; monitor-only mode is just `--env ENDOR_AI_AUDIT_NO_BLOCKING=true`.
 
 **`--skip-endorctl-update`** makes the session hook use an already-installed `endorctl` instead of checking for a newer one every session — useful once the fleet is provisioned. It passes through the runner too.
 
-`render.sh` also takes `-o/--output` (`-` for stdout). `render-plist.sh` is agent-agnostic — `--payload-type` (default `com.anthropic.claudecode`) selects the app, and `--identifier`/`--organization` are required, with `--name`, `--profile-identifier`, and the UUID flags optional. Run either script with `--help` for the full list.
+`render.sh` also takes `-o/--output` (`-` for stdout). `render-plist.sh` is agent-agnostic — `--style plist` (default) with `--payload-type` (default `com.anthropic.claudecode`) selects a custom-settings app, or `--style mcx` with `--pref-domain`/`--pref-key` (defaults `com.openai.codex` / `requirements_toml_base64`) forces a managed preference; `--identifier`/`--organization` are required, with `--name`, `--profile-identifier`, and the UUID flags optional. Run either script with `--help` for the full list.
 
 ### Enforcing vs. monitor-only
 
@@ -99,16 +112,16 @@ A good rollout starts in monitor-only, watches the Endor audit log over a repres
 | --- | --- | --- |
 | `endorctl` binary | Self-updates on session start (SHA-256 verified); `--skip-endorctl-update` pins it | None |
 | Governance rules | Server-side at Endor, fetched at run time | None |
-| Claude profile config (macOS) | Regenerate the `.mobileconfig`, re-upload to the MDM | Re-upload |
-| Cursor runner config (macOS/Linux) | Runner re-fetches `REF` and re-renders on each scheduled run | None after setup |
+| Claude / Codex profile config (macOS) | Regenerate the `.mobileconfig`, re-upload to the MDM | Re-upload |
+| Cursor / Codex runner config (macOS/Linux) | Runner re-fetches `REF` and re-renders on each scheduled run | None after setup |
 | Windows config | Regenerate (`--target-os windows`), re-push via Intune | Re-push |
 
 **Security properties:**
 
-- **Tamper-resistance.** A profile-delivered config (Claude on macOS) is an OS-enforced managed setting — hard for a developer to override. A script-delivered file (Cursor, and the file-based Linux/Windows paths) is not OS-enforced; a determined developer could override it. Cursor has no profile mechanism today, so the profile path is Claude-only.
-- **Least-privilege credentials.** A generated profile carries the API key and secret to every laptop — scope it to an **audit-only** credential.
+- **Tamper-resistance.** A profile-delivered config (Claude and Codex on macOS) is an OS-enforced managed setting — hard for a developer to override, and Codex additionally marks managed-source hooks trusted-by-policy so a user can't disable them. A script-delivered file (Cursor, and the file-based Linux/Windows paths) is not OS-enforced; a determined developer could override it. Cursor has no profile mechanism today.
+- **Least-privilege credentials.** A generated profile (or Codex `requirements.toml`) carries the API key and secret to every laptop — scope it to an **audit-only** credential.
 - **Pin the revision.** The runner executes this repo's code as root, so it fetches a specific revision: set `REF` (at the top of `runner.sh`) to a reviewed tag, branch, or commit and each device runs only that, not the moving branch tip. Bump `REF` to roll out a change; the default (`main`) tracks the latest.
-- **Credential isolation (Claude).** The `env` block exports into every subprocess Claude spawns, including any `endorctl` the agent itself runs. To keep audit credentials out of the agent's process tree, hook-scoped variables use an `AGENT_HOOK_ENDOR_*` prefix that `endorctl` doesn't read natively, and the hook passes them through as `--api-key …` flags.
+- **Credential isolation (Claude).** The `env` block exports into every subprocess Claude spawns, including any `endorctl` the agent itself runs. To keep audit credentials out of the agent's process tree, hook-scoped variables use an `AGENT_HOOK_ENDOR_*` prefix that `endorctl` doesn't read natively, and the hook passes them through as `--api-key …` flags. Codex has no managed env block, so its credentials are passed as `--api-key …` flags directly on each hook command (never exported), which keeps them out of the agent's environment the same way.
 - **Robust quoting.** Credentials and `--env` values are escaped for their target — the shell (POSIX, via `@sh`), PowerShell (single-quote doubling), and JSON (`jq`) — and `$VAR` references in the generated commands are quoted, so a value containing a space, quote, `$`, `;`, `*`, or `` ` `` never word-splits or breaks the hook.
 
 ## Prerequisites
@@ -120,7 +133,7 @@ Each script needs only what's standard to where it runs; the laptop paths stay l
 | [`download_endorctl.sh`](scripts/download_endorctl.sh) | developer laptop (inlined into the session hook) | POSIX `sh` + `curl` (plus `awk`/`sed`/`uname`/`mktemp`/`tr` and `sha256sum` or `shasum` — all standard on macOS & Linux) |
 | [`download_endorctl.ps1`](scripts/download_endorctl.ps1) | Windows laptop (encoded into the session hook) | Windows PowerShell 5.1 (built in) |
 | [`scripts/render.sh`](scripts/render.sh) | admin machine (macOS/Linux, or Windows via Git Bash/WSL), or laptop via the runner | `jq`; for `--target-os windows` also `iconv` + `base64` |
-| [`scripts/render-plist.sh`](scripts/render-plist.sh) | admin machine (macOS) | `jq` + `plutil` |
+| [`scripts/render-plist.sh`](scripts/render-plist.sh) | admin machine (macOS) | `jq` + `plutil` (plus `base64` for `--style mcx`) |
 | [`scripts/runner.sh`](scripts/runner.sh) | developer laptop (run by the MDM) | `git` + POSIX `sh` + `jq` |
 
 ## Repository layout
@@ -147,9 +160,12 @@ docs/                     deployment runbooks + the support matrix
 | JSON (encoded PowerShell hook) | Claude | `examples/claude/settings.windows.json` |
 | JSON (POSIX hooks) | Cursor | `examples/cursor/hooks.json` |
 | JSON (encoded PowerShell hook) | Cursor | `examples/cursor/hooks.windows.json` |
+| TOML (POSIX hooks) | Codex | `examples/codex/requirements.toml` |
+| MDM profile (plist, mcx) | Codex | `examples/codex/com.openai.codex.mobileconfig` |
+| TOML (encoded PowerShell hook) | Codex | `examples/codex/requirements.windows.toml` |
 
-There's no separate Linux example: `settings.json` is exactly what Claude reads as the Linux `/etc/claude-code/managed-settings.json` and as the inner payload of the macOS profile, and JumpCloud reuses these same files. Only the Windows samples differ (the encoded `powershell` hook). After changing a script, regenerate the affected examples with the commands above so they stay in sync.
+There's no separate Linux example: `settings.json` is exactly what Claude reads as the Linux `/etc/claude-code/managed-settings.json` and as the inner payload of the macOS profile, `requirements.toml` is what Codex reads at `/etc/codex/`, and JumpCloud reuses these same files. Only the Windows samples differ (the encoded `powershell` hook). After changing a script, regenerate the affected examples with the commands above so they stay in sync.
 
 ## Extending
 
-To add another agent: add a `build_<agent>` jq builder and a `case` arm in [`scripts/render.sh`](scripts/render.sh), plus a default-`DEST` `case` arm in [`scripts/runner.sh`](scripts/runner.sh) if it's script-delivered.
+To add another agent: add a `build_<agent>` builder (jq for JSON, or printf for a format like Codex's TOML), a subcommand + compose arm, and a `case` arm in [`scripts/render.sh`](scripts/render.sh); a default-`DEST` `case` arm in [`scripts/runner.sh`](scripts/runner.sh) if it's file-delivered; and, if its macOS profile isn't a custom-settings payload (as with Codex's Forced preference), a `--style` in [`scripts/render-plist.sh`](scripts/render-plist.sh).

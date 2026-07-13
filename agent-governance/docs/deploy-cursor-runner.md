@@ -6,7 +6,7 @@ A few things to know:
 
 - **The endpoint needs `git` and `jq`** (the runner clones the repo once and renders on the machine). Windows endpoints have neither — pre-generate with `--target-os windows` and push via [Intune](deploy-windows-intune.md) instead.
 - **It isn't tamper-resistant.** A plain file isn't OS-enforced; a developer could override it (e.g. via `~/.cursor/`). Only Claude has an OS-enforced path, via its [managed-settings profile](deploy-claude-profile.md).
-- **Settings live at the top of `runner.sh`** — set `AGENT` (`cursor` or `claude`), `REF` (the revision to run), and optionally `EXTRA` (e.g. `--env ENDOR_AI_AUDIT_NO_BLOCKING=true` for monitor-only) or `DEST` (to override the install path).
+- **Settings live at the top of `runner.sh`** — set `AGENT` (`cursor`, `claude`, or `codex`), `REF` (the revision to run), and optionally `EXTRA` (e.g. `--env ENDOR_AI_AUDIT_NO_BLOCKING=true` for monitor-only) or `DEST` (to override the install path). For `codex` the runner writes `/etc/codex/requirements.toml`; because that path is root-owned, Codex treats its hooks as managed and auto-trusts them.
 - **Pin a version.** `REF` defaults to `main` (tracks latest); set it to a reviewed tag or commit (e.g. `v1.0.0`) so each device runs a known revision, since the runner executes this repo's code as root. Bump it deliberately to roll out a change.
 - **Credentials** must be in the environment before the runner renders. You add them at the top of the pasted script, per your MDM (below). Use an **audit-only / least-privilege** credential — never commit them.
 

@@ -16,7 +16,7 @@
 set -eu
 
 # --- settings: edit these ---------------------------------------------------
-AGENT=cursor                                       # cursor | claude
+AGENT=cursor                                       # cursor | claude | codex
 REF=main                                           # pin to a reviewed tag/commit, e.g. v1.0.0
 EXTRA=                                              # extra render flags, e.g. --env ENDOR_AI_AUDIT_NO_BLOCKING=true
 DEST=                                              # override install path; empty = OS default
@@ -36,6 +36,11 @@ if [ -z "$DEST" ]; then
     cursor:Darwin) DEST="/Library/Application Support/Cursor/hooks.json" ;;
     cursor:Linux)  DEST="/etc/cursor/hooks.json" ;;
     claude:Linux)  DEST="/etc/claude-code/managed-settings.json" ;;
+    # Codex reads a managed requirements.toml at /etc/codex on both macOS and
+    # Linux; hooks from this source are auto-trusted. On macOS the tamper-resistant
+    # alternative is an MDM profile (see docs/deploy-codex-profile.md) - deliver
+    # that through your MDM instead of running this on the endpoint.
+    codex:Darwin|codex:Linux) DEST="/etc/codex/requirements.toml" ;;
     *) echo "runner.sh: set DEST for agent '$AGENT' on $os" >&2; exit 2 ;;
   esac
 fi

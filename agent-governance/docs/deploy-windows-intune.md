@@ -24,6 +24,10 @@ scripts/render.sh --agent cursor --target-os windows \
 # Claude Code
 scripts/render.sh --agent claude --target-os windows \
   --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o claude-managed-settings.json
+
+# Codex
+scripts/render.sh --agent codex --target-os windows \
+  --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o codex-requirements.toml
 ```
 
 Add `--env ENDOR_AI_AUDIT_NO_BLOCKING=true` for a monitor-only rollout, or `--skip-endorctl-update` to pin to the installed binary. (Generating Windows configs needs `jq` + `iconv` + `base64`, all standard on macOS/Linux.)
@@ -34,6 +38,7 @@ Add `--env ENDOR_AI_AUDIT_NO_BLOCKING=true` for a monitor-only rollout, or `--sk
 | --- | --- | --- |
 | **Cursor** | `C:\ProgramData\Cursor\hooks.json` (system-wide) or `%USERPROFILE%\.cursor\hooks.json` (per-user) | system-wide outranks per-user |
 | **Claude Code** | `C:\Program Files\ClaudeCode\managed-settings.json` (+ `managed-settings.d\`) | managed settings; users can't override |
+| **Codex** | `%ProgramData%\OpenAI\Codex\requirements.toml` | managed requirements; hooks auto-trusted, users can't disable |
 
 ## 3. Push with Intune
 

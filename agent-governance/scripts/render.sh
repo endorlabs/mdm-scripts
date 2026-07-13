@@ -5,8 +5,10 @@
 # Claude MDM profile (.mobileconfig) is produced by piping this script's Claude
 # output through render-plist.sh.
 #
-# Outputs (JSON): --agent {claude,cursor}. The hook command strings are emitted
-# for --target-os: macos/linux share a POSIX shell form; windows inlines the
+# Outputs: --agent {claude,cursor} emit JSON; --agent codex emits a Codex
+# requirements.toml (managed hooks, auto-trusted) - wrap it for the macOS profile
+# by piping through 'render-plist.sh --style mcx'. The hook command strings are
+# emitted for --target-os: macos/linux share a POSIX shell form; windows inlines the
 # PowerShell bootstrap + audit, invoked as a self-contained, shell-agnostic
 #   powershell -NoProfile -EncodedCommand <base64-UTF16LE>
 # so it runs whether the agent launches hooks via Git Bash, PowerShell, or cmd.
@@ -23,7 +25,8 @@
 #   --api-url     ENDOR_API                  (default: https://api.endorlabs.com)
 #
 # Behavior settings go through --env KEY=VALUE (repeatable), routed to Claude's
-# env block / Cursor's sessionStart. Cache is on by default; monitor-only is just
+# env block / inlined into Cursor's sessionStart and every Codex hook command
+# (Codex has no managed env block). Cache is on by default; monitor-only is just
 # --env ENDOR_AI_AUDIT_NO_BLOCKING=true. --skip-endorctl-update uses an installed
 # endorctl as-is (no per-session version check), installing only when missing.
 #
@@ -79,16 +82,16 @@ while [ $# -gt 0 ]; do
     --api-key)              api_key="$2"; shift 2 ;;
     --api-secret)           api_secret="$2"; shift 2 ;;
     --namespace)            namespace="$2"; shift 2 ;;
-    -h|--help)              sed -n '2,32p' "$0"; exit 0 ;;
+    -h|--help)              sed -n '2,35p' "$0"; exit 0 ;;
     *)                      die "unknown argument: $1" ;;
   esac
 done
 
 # --- validation ---------------------------------------------------------------
 case "$agent" in
-  claude|cursor) ;;
-  "") die "--agent is required (claude|cursor)" ;;
-  *) die "unknown agent: $agent (claude|cursor)" ;;
+  claude|cursor|codex) ;;
+  "") die "--agent is required (claude|cursor|codex)" ;;
+  *) die "unknown agent: $agent (claude|cursor|codex)" ;;
 esac
 case "$target_os" in
   macos|linux|windows) ;;
@@ -148,7 +151,7 @@ psenc() {
 # The audit invocation each hook runs (literal $VARS expand at hook time; Cursor
 # non-session hooks read AGENT_HOOK_ENDOR_* that endorctl sets at sessionStart).
 # endorctl's audit subcommand per agent (Claude Code is "claudecode", not "claude").
-case "$agent" in claude) subcmd="claudecode" ;; cursor) subcmd="cursor" ;; esac
+case "$agent" in claude) subcmd="claudecode" ;; cursor) subcmd="cursor" ;; codex) subcmd="codex" ;; esac
 posix_audit='"$HOME/.endorctl/endorctl" --api "$AGENT_HOOK_ENDOR_API" --namespace "$AGENT_HOOK_ENDOR_NAMESPACE" --api-key "$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY" --api-secret "$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET" ai-audit '"$subcmd"
 ps_bin='& "$env:USERPROFILE\.endorctl\endorctl.exe"'
 ps_audit="$ps_bin"' --api "$env:AGENT_HOOK_ENDOR_API" --namespace "$env:AGENT_HOOK_ENDOR_NAMESPACE" --api-key "$env:AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY" --api-secret "$env:AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET" ai-audit '"$subcmd"'; exit $LASTEXITCODE'
@@ -183,6 +186,23 @@ case "$agent:$target_os" in
     # bytes so endorctl's JSON payload isn't mangled (avoid [Console]::InputEncoding,
     # whose setter throws on a piped handle).
     cmd_session=$(psenc "$(printf '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd()\n%s\n%s\n$in | %s --api %s --namespace %s --api-key %s --api-secret %s ai-audit cursor; exit $LASTEXITCODE' \
+      "$boot" "$ps_env_sets" "$ps_bin" "$(psq "$api_url")" "$(psq "$namespace")" "$(psq "$api_key")" "$(psq "$api_secret")")") ;;
+  codex:macos|codex:linux)
+    # Codex has no managed env block (unlike Claude), so creds are baked into every
+    # hook command and behavior envs are inlined; the requirements.toml is itself
+    # the credential-bearing artifact. Codex keeps the event pipe open (POSIX
+    # inherits it), so endorctl reads the event JSON from stdin directly - no
+    # capture-to-file dance is needed (that was a Cursor-only quirk).
+    cmd_audit=$(printf '%s"$HOME/.endorctl/endorctl" --api %s --namespace %s --api-key %s --api-secret %s ai-audit codex' \
+      "$env_prefix" "$(sq "$api_url")" "$(sq "$namespace")" "$(sq "$api_key")" "$(sq "$api_secret")")
+    cmd_session=$(printf '%s\n%s' "$boot" "$cmd_audit") ;;
+  codex:windows)
+    # As with Cursor on Windows, the EncodedCommand does not inherit the event
+    # pipe, so each hook reads stdin and pipes it into endorctl; creds/envs are
+    # inlined since Codex has no managed env block.
+    cmd_audit=$(psenc "$(printf '$ProgressPreference = "SilentlyContinue"\n$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = if ([Console]::IsInputRedirected) { [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd() } else { "" }\n%s$in | %s --api %s --namespace %s --api-key %s --api-secret %s ai-audit codex; exit $LASTEXITCODE' \
+      "$ps_env_sets" "$ps_bin" "$(psq "$api_url")" "$(psq "$namespace")" "$(psq "$api_key")" "$(psq "$api_secret")")")
+    cmd_session=$(psenc "$(printf '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd()\n%s\n%s$in | %s --api %s --namespace %s --api-key %s --api-secret %s ai-audit codex; exit $LASTEXITCODE' \
       "$boot" "$ps_env_sets" "$ps_bin" "$(psq "$api_url")" "$(psq "$namespace")" "$(psq "$api_key")" "$(psq "$api_secret")")") ;;
 esac
 
@@ -234,9 +254,41 @@ build_claude() {
     }'
 }
 
+# Codex takes its hooks as TOML (config.toml / requirements.toml schema), not
+# JSON, so it can't be built with jq. Each command is JSON-escaped with `jq -Rs`,
+# whose output ("...", with \n \" \\ escapes) is also a valid TOML basic string.
+# One artifact carries all events: on a managed/requirements source Codex marks
+# these hooks trusted-by-policy, so they run with no per-user approval.
+codex_event() {  # $1=event  $2=command (already a quoted TOML string)  $3=matcher or ""
+  printf '[[hooks.%s]]\n' "$1"
+  [ -n "$3" ] && printf 'matcher = "%s"\n' "$3"
+  printf '[[hooks.%s.hooks]]\ntype = "command"\ncommand = %s\n\n' "$1" "$2"
+}
+
+build_codex() {
+  _s=$(printf '%s' "$cmd_session" | jq -Rs .)
+  _a=$(printf '%s' "$cmd_audit"   | jq -Rs .)
+  printf '# Endor Labs AI governance - managed Codex hooks (generated by render.sh).\n'
+  printf '# Deliver as an MDM profile (com.openai.codex requirements_toml_base64) via\n'
+  printf '# "render-plist.sh --style mcx", or as a managed /etc/codex/requirements.toml.\n'
+  printf '# Hooks from a managed/requirements source are auto-trusted and cannot be\n'
+  printf '# disabled by the user; audit credentials are baked into each command.\n'
+  printf 'allow_managed_hooks_only = true\n\n'
+  printf '[features]\nhooks = true\n\n'
+  # Events endorctl governs (SessionStart also bootstraps endorctl). PreToolUse,
+  # PermissionRequest, and PostToolUse carry an all-tools matcher; the rest fire
+  # once per event. Codex has no PostToolUseFailure (PostToolUse covers failures).
+  codex_event SessionStart      "$_s" ""
+  codex_event UserPromptSubmit  "$_a" ""
+  codex_event PreToolUse        "$_a" ".*"
+  codex_event PermissionRequest "$_a" ".*"
+  codex_event PostToolUse       "$_a" ".*"
+  codex_event Stop              "$_a" ""
+}
+
 # --- emit ---------------------------------------------------------------------
-emit() { case "$agent" in claude) build_claude ;; cursor) build_cursor ;; esac; }
-case "$agent" in claude) def_out="claude-settings.json" ;; cursor) def_out="cursor-hooks.json" ;; esac
+emit() { case "$agent" in claude) build_claude ;; cursor) build_cursor ;; codex) build_codex ;; esac; }
+case "$agent" in claude) def_out="claude-settings.json" ;; cursor) def_out="cursor-hooks.json" ;; codex) def_out="codex-requirements.toml" ;; esac
 out_path="${output:-$def_out}"
 
 if [ "$out_path" = "-" ]; then
