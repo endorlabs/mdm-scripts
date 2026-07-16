@@ -1,7 +1,7 @@
 # templates/envsh.sh
 # Writes ~/.config/endor/env.sh — the single credential source for all
 # env-var-based tools (npm, yarn 2+, maven, poetry).
-# Then adds a one-line source directive to existing shell profiles.
+# Then adds a one-line source directive to shell profiles.
 #
 # Block content comes from shared/blocks/envsh.txt; attribution tokens are
 # filled at install time. Leftover {{...}} tokens warn and exit non-zero.
@@ -32,12 +32,30 @@ echo "[endor] env.sh         → $ENDOR_ENV_SH"
 
 SOURCE_BLOCK='[ -f "$HOME/.config/endor/env.sh" ] && source "$HOME/.config/endor/env.sh"'
 
-_PROFILE_UPDATED=0
+# Resolve the console user's login shell; MDM runs as root, so $SHELL is unreliable.
+_OS=$(uname -s)
+if [[ "$_OS" == "Darwin" ]]; then
+  _USER_SHELL=$(dscl . -read "/Users/$CONSOLE_USER" UserShell 2>/dev/null \
+    | awk '{print $2}' || true)
+else
+  _USER_SHELL=$(getent passwd "$CONSOLE_USER" 2>/dev/null | cut -d: -f7 || true)
+fi
+
+case "$_USER_SHELL" in
+  *zsh*)  _PRIMARY_PROFILE="$USER_HOME/.zshrc" ;;
+  *bash*) [[ "$_OS" == "Darwin" ]] \
+            && _PRIMARY_PROFILE="$USER_HOME/.bash_profile" \
+            || _PRIMARY_PROFILE="$USER_HOME/.bashrc" ;;
+  *)      [[ "$_OS" == "Darwin" ]] \
+            && _PRIMARY_PROFILE="$USER_HOME/.zshrc" \
+            || _PRIMARY_PROFILE="$USER_HOME/.bashrc" ;;
+esac
+
 for _profile in \
   "$USER_HOME/.zshrc" \
   "$USER_HOME/.bash_profile" \
   "$USER_HOME/.bashrc"; do
-  [[ -f "$_profile" ]] || continue
+  [[ -f "$_profile" || "$_profile" == "$_PRIMARY_PROFILE" ]] || continue
 
   upsert_block \
     "$_profile" \
@@ -46,16 +64,7 @@ for _profile in \
     "$USER_GROUP"
 
   echo "[endor] sourced from   → $_profile"
-  _PROFILE_UPDATED=1
 done
 
-if [[ $_PROFILE_UPDATED -eq 0 ]]; then
-  echo "" >&2
-  echo "[endor] WARNING: no shell profile found (.zshrc / .bash_profile / .bashrc)." >&2
-  echo "[endor]   Add this line manually to your shell profile:" >&2
-  echo "[endor]     [ -f \"\$HOME/.config/endor/env.sh\" ] && source \"\$HOME/.config/endor/env.sh\"" >&2
-  _ENDOR_WARNED=1
-fi
-
-unset _profile _PROFILE_UPDATED
+unset _profile _OS _USER_SHELL _PRIMARY_PROFILE
 echo "[endor] ✓ env.sh done"
