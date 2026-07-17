@@ -2,14 +2,7 @@
 
 On macOS, OpenAI Codex reads managed configuration from a Configuration Profile that Forces the `com.openai.codex` preference domain — specifically a base64-encoded `requirements.toml` under the key `requirements_toml_base64`. Hooks that come from a **managed / requirements source are auto-trusted by policy** and can't be disabled from Codex's hook browser, so a profile is **tamper-resistant**: the OS enforces it and the developer can't opt out. The one tradeoff, as with Claude, is that an update means regenerating the profile and re-uploading it.
 
-You'll generate a `.mobileconfig` on an admin Mac (you need `plutil` and `base64`, both native to macOS), then upload it through Jamf or Kandji.
-
-## Prerequisites
-
-Nothing beyond what the other agents need — the `requirements.toml` is emitted with `printf` (no TOML tooling), and Codex parses it with its own built-in parser, so **no TOML library is required on the admin machine or the endpoint**.
-
-- **Admin machine:** `plutil` + `base64` (native to macOS) for the profile; `sh` + `awk` + `sed` for `render.sh`, plus `iconv` + `base64` for `--target-os windows`.
-- **Endpoint:** just the hook runtime the other agents use — POSIX `sh` + `curl` on macOS/Linux, PowerShell 5.1 on Windows — and a **Codex build that supports managed hooks**: the `hooks` feature (stable, on by default) and the `requirements_toml_base64` managed preference on macOS. Verified against Codex CLI 0.142.2; older builds without managed-hook support won't apply these.
+You'll generate a `.mobileconfig` on an admin Mac (you need `plutil` and `base64`, both native to macOS), then upload it through Jamf or Kandji. The one endpoint requirement is a Codex build that supports **managed hooks** (verified against Codex CLI 0.142.2; older builds won't apply the config).
 
 ## How it differs from Claude
 
