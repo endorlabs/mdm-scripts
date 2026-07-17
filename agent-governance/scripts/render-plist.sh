@@ -10,8 +10,9 @@
 #     | render-plist.sh --identifier com.acme.ai-governance.claudecode \
 #                       --organization "Acme Corp" -o profile.mobileconfig
 #
-# Prerequisites: jq and plutil (plutil is native on macOS, where profiles are
-# made). UUIDs default to freshly generated.
+# Prerequisites: plutil (native on macOS, where profiles are made) - it parses
+# the JSON envelope and converts it to a plist, so no jq is needed. UUIDs default
+# to freshly generated.
 #
 #   --identifier          required; reverse-DNS base. Inner payload is <id>.settings
 #   --organization        required; profile PayloadOrganization
@@ -25,8 +26,14 @@
 set -eu
 
 die() { echo "render-plist.sh: error: $*" >&2; exit 1; }
-command -v jq >/dev/null     || die "jq is required (install it, e.g. 'brew install jq')"
 command -v plutil >/dev/null || die "plutil is required (macOS)"
+
+# JSON-escape a string for use inside "..." (backslash, double-quote, newlines).
+# Same escaper render.sh uses - keeps this script jq-free.
+js() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+    | awk 'BEGIN{ORS=""} {printf "%s%s", sep, $0; sep="\\n"}'
+}
 
 identifier=""; profile_identifier=""; organization=""
 payload_type="com.anthropic.claudecode"; name="Endor AI Governance"
@@ -56,33 +63,45 @@ done
 [ -n "$profile_uuid" ] || profile_uuid=$(uuidgen)
 [ -n "$content_uuid" ] || content_uuid=$(uuidgen)
 
-# Read the managed-settings object produced by render.sh and embed it whole.
+# Read the managed-settings object produced by render.sh. It must be a JSON
+# object; its members are spliced into the inner payload dict (the flattening
+# jq's `{...} + $s` did). Confirm it opens with `{`, then strip the outermost
+# braces to get the body to splice; plutil re-parses the result and rejects it
+# if the splice produced anything malformed, so it doubles as validation.
 settings=$(cat)
-printf '%s' "$settings" | jq -e 'type == "object"' >/dev/null 2>&1 \
+[ "$(printf '%s' "$settings" | tr -d '[:space:]' | cut -c1)" = "{" ] \
   || die "stdin is not a JSON settings object (pipe: render.sh --agent <name> ... -o -)"
+inner=$(printf '%s' "$settings" | awk 'BEGIN{RS="\1"} { sub(/^[ \t\r\n]*\{/,""); sub(/\}[ \t\r\n]*$/,""); printf "%s", $0 }')
+merge=""
+[ -n "$(printf '%s' "$inner" | tr -d '[:space:]')" ] && merge=",
+$inner"
 
-jq -n --argjson s "$settings" \
-  --arg ident "$identifier" --arg pident "$profile_identifier" \
-  --arg name "$name" --arg org "$organization" --arg ptype "$payload_type" \
-  --arg puuid "$profile_uuid" --arg cuuid "$content_uuid" '
-  {
-    PayloadContent: [({
-      PayloadDescription: "Managed settings (env + hooks) for Endor Labs AI governance auditing.",
-      PayloadDisplayName: $name,
-      PayloadEnabled:     true,
-      PayloadIdentifier:  ($ident + ".settings"),
-      PayloadType:        $ptype,
-      PayloadUUID:        $cuuid,
-      PayloadVersion:     1
-    } + $s)],
-    PayloadDescription:  "Deploys managed AI-tool settings for Endor Labs AI auditing.",
-    PayloadDisplayName:  $name,
-    PayloadIdentifier:   $pident,
-    PayloadOrganization: $org,
-    PayloadScope:        "System",
-    PayloadType:         "Configuration",
-    PayloadUUID:         $puuid,
-    PayloadVersion:      1
-  }' | plutil -convert xml1 -o "$output" -
+# Pre-escape the string values, then print the profile as JSON and let plutil
+# parse + convert it. Keys are fixed; only these operator-supplied values need it.
+_ident=$(js "$identifier"); _pident=$(js "$profile_identifier")
+_name=$(js "$name"); _org=$(js "$organization"); _ptype=$(js "$payload_type")
+_puuid=$(js "$profile_uuid"); _cuuid=$(js "$content_uuid")
+{
+  printf '{\n'
+  printf '  "PayloadContent": [{\n'
+  printf '    "PayloadDescription": "Managed settings (env + hooks) for Endor Labs AI governance auditing.",\n'
+  printf '    "PayloadDisplayName": "%s",\n' "$_name"
+  printf '    "PayloadEnabled": true,\n'
+  printf '    "PayloadIdentifier": "%s.settings",\n' "$_ident"
+  printf '    "PayloadType": "%s",\n' "$_ptype"
+  printf '    "PayloadUUID": "%s",\n' "$_cuuid"
+  printf '    "PayloadVersion": 1%s\n' "$merge"
+  printf '  }],\n'
+  printf '  "PayloadDescription": "Deploys managed AI-tool settings for Endor Labs AI auditing.",\n'
+  printf '  "PayloadDisplayName": "%s",\n' "$_name"
+  printf '  "PayloadIdentifier": "%s",\n' "$_pident"
+  printf '  "PayloadOrganization": "%s",\n' "$_org"
+  printf '  "PayloadScope": "System",\n'
+  printf '  "PayloadType": "Configuration",\n'
+  printf '  "PayloadUUID": "%s",\n' "$_puuid"
+  printf '  "PayloadVersion": 1\n'
+  printf '}\n'
+} | plutil -convert xml1 -o "$output" - \
+  || die "could not build the profile (is stdin a valid render.sh settings object?)"
 
 [ "$output" = "-" ] || echo "render-plist.sh: wrote $output" >&2

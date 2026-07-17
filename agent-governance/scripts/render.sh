@@ -1,9 +1,10 @@
 #!/bin/sh
 # render.sh - generate Endor AI-governance hook config (JSON) for an AI coding agent.
 #
-# Builds the config with jq, which escapes JSON correctly by construction. The
-# Claude MDM profile (.mobileconfig) is produced by piping this script's Claude
-# output through render-plist.sh.
+# Builds the config with printf + a small awk/sed JSON escaper (no jq), so it
+# renders with only system tools on a stock endpoint. The Claude MDM profile
+# (.mobileconfig) is produced by piping this script's Claude output through
+# render-plist.sh.
 #
 # Outputs (JSON): --agent {claude,cursor}. The hook command strings are emitted
 # for --target-os: macos/linux share a POSIX shell form; windows inlines the
@@ -12,8 +13,9 @@
 # so it runs whether the agent launches hooks via Git Bash, PowerShell, or cmd.
 # (The readable source is download_endorctl.ps1; the config carries its encoding.)
 #
-# Prerequisites: jq; for --target-os windows also iconv + base64 (all standard
-# on the macOS/Linux machine that generates the config).
+# Prerequisites: only system tools (sh, sed, awk, printf); for --target-os windows
+# also iconv + base64. All ship with macOS/Linux, so this renders on a stock
+# endpoint - no jq/Homebrew, and no git/Xcode CLT (the runner fetches via curl).
 #
 # Credentials (dedicated flags) resolve flag > env var > prompt. The prompt fires
 # only when stdin is a TTY, so unattended callers (the runner) never block.
@@ -36,12 +38,24 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 DEFAULT_API_URL="https://api.endorlabs.com"
 
 die() { echo "render.sh: error: $*" >&2; exit 1; }
-command -v jq >/dev/null || die "jq is required (install it, e.g. 'brew install jq')"
+# No jq: config is built with printf + a small awk/sed JSON escaper (js, below),
+# so this renders on a stock macOS/Linux endpoint with only system tools. awk,
+# sed, printf are always present; --target-os windows also needs iconv + base64.
 
 # Quote a value for safe interpolation into a command string. Values (creds,
 # --env) may contain spaces, quotes, $, ;, globs - so never inline them raw.
-sq()  { printf '%s' "$1" | jq -Rrs '@sh'; }                    # POSIX single-quoted
+# POSIX @sh: wrap in single quotes, rewrite each ' as '\'' (close-escape-reopen).
+sq()  { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 psq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; } # PowerShell single-quoted
+
+# JSON-escape a string for use inside "...". Handles backslash, double-quote, and
+# real newlines (folded to \n). The values escaped here are creds/namespaces and
+# the hook command strings - ASCII shell/PowerShell that carries no other control
+# chars - so this targeted escaper is sufficient and matches what jq -Rs produced.
+js() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+    | awk 'BEGIN{ORS=""} {printf "%s%s", sep, $0; sep="\\n"}'
+}
 
 # Behavior env vars, newline-separated KEY=VALUE. Cache is on by default;
 # add_env replaces any existing entry for the same key (later flag wins).
@@ -118,12 +132,20 @@ prompt_if_tty api_secret "api-secret" secret
 prompt_if_tty namespace  "namespace"  plain
 
 # --- behavior envs ------------------------------------------------------------
-# env_obj: JSON object for Claude's env block.
-# env_prefix: "K=V " inline prefix for the POSIX Cursor sessionStart.
+# env_json: pretty ",\n    \"K\": \"V\"" fragments appended into Claude's env
+#   block (each begins with a comma - the block always has the AGENT_HOOK_* keys
+#   before it); indented to match the 2-space layout the builders emit.
+# env_prefix: "K='V' " inline prefix for the POSIX Cursor sessionStart.
 # ps_env_sets: "$env:K = 'V'" lines for the PowerShell Cursor sessionStart.
-env_obj=$(printf '%s\n' "$env_lines" | jq -Rn \
-  '[inputs | select(length > 0) | {key: .[:index("=")], value: .[index("=")+1:]}] | from_entries')
-env_prefix=$(printf '%s' "$env_obj" | jq -r 'to_entries | map(.key + "=" + (.value|@sh) + " ") | add // ""')
+# Keys are validated [A-Za-z_][A-Za-z0-9_]* (add_env), so they need no escaping.
+env_json=$(printf '%s\n' "$env_lines" | while IFS= read -r kv; do
+  [ -n "$kv" ] || continue
+  printf ',\n    "%s": "%s"' "${kv%%=*}" "$(js "${kv#*=}")"
+done)
+env_prefix=$(printf '%s\n' "$env_lines" | while IFS= read -r kv; do
+  [ -n "$kv" ] || continue
+  printf '%s=%s ' "${kv%%=*}" "$(sq "${kv#*=}")"
+done)
 ps_env_sets=$(printf '%s\n' "$env_lines" | while IFS= read -r kv; do
   [ -n "$kv" ] || continue
   printf '$env:%s = %s\n' "${kv%%=*}" "$(psq "${kv#*=}")"
@@ -186,52 +208,44 @@ case "$agent:$target_os" in
       "$boot" "$ps_env_sets" "$ps_bin" "$(psq "$api_url")" "$(psq "$namespace")" "$(psq "$api_key")" "$(psq "$api_secret")")") ;;
 esac
 
-# --- build (jq is pure structure; commands are injected) ----------------------
+# --- build (printf is pure structure; commands are JSON-escaped via js) --------
+# Output matches jq's 2-space pretty-print exactly, so the checked-in examples/
+# stay byte-identical when regenerated. $3 is the trailing "," (or "" for the
+# last entry in a block).
+cursor_hook()  { printf '    "%s": [\n      {\n        "command": "%s"\n      }\n    ]%s\n' "$1" "$2" "$3"; }
+claude_hook()  { printf '    "%s": [\n      {\n        "hooks": [\n          {\n            "type": "command",\n            "command": "%s"\n          }\n        ]\n      }\n    ]%s\n' "$1" "$2" "$3"; }
+claude_mhook() { printf '    "%s": [\n      {\n        "hooks": [\n          {\n            "type": "command",\n            "command": "%s"\n          }\n        ],\n        "matcher": ".*"\n      }\n    ]%s\n' "$1" "$2" "$3"; }
+
 build_cursor() {
-  jq -n --arg session "$cmd_session" --arg audit "$cmd_audit" '
-    def hook($c): {command: $c};
-    {
-      version: 1,
-      hooks: {
-        sessionStart:         [hook($session)],
-        sessionEnd:           [hook($audit)],
-        beforeSubmitPrompt:   [hook($audit)],
-        preToolUse:           [hook($audit)],
-        postToolUse:          [hook($audit)],
-        postToolUseFailure:   [hook($audit)],
-        beforeShellExecution: [hook($audit)],
-        afterShellExecution:  [hook($audit)],
-        beforeMCPExecution:   [hook($audit)],
-        beforeReadFile:       [hook($audit)],
-        afterFileEdit:        [hook($audit)],
-        stop:                 [hook($audit)]
-      }
-    }'
+  _s=$(js "$cmd_session"); _a=$(js "$cmd_audit")
+  printf '{\n  "version": 1,\n  "hooks": {\n'
+  cursor_hook sessionStart "$_s" ,
+  for _h in sessionEnd beforeSubmitPrompt preToolUse postToolUse postToolUseFailure \
+            beforeShellExecution afterShellExecution beforeMCPExecution beforeReadFile afterFileEdit; do
+    cursor_hook "$_h" "$_a" ,
+  done
+  cursor_hook stop "$_a" ""
+  printf '  }\n}\n'
 }
 
 build_claude() {
-  jq -n --arg session "$cmd_session" --arg audit "$cmd_audit" --argjson envobj "$env_obj" \
-    --arg url "$api_url" --arg key "$api_key" --arg secret "$api_secret" --arg ns "$namespace" '
-    def hook($c):  {hooks: [{type: "command", command: $c}]};
-    def mhook($c): hook($c) + {matcher: ".*"};
-    # Hook-scoped AGENT_HOOK_ENDOR_* names keep audit creds out of any endorctl
-    # the agent itself spawns; behavior envs use their canonical names.
-    {
-      env: ({
-        AGENT_HOOK_ENDOR_API:                    $url,
-        AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY:    $key,
-        AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET: $secret,
-        AGENT_HOOK_ENDOR_NAMESPACE:              $ns
-      } + $envobj),
-      hooks: {
-        SessionStart:       [hook($session)],
-        UserPromptSubmit:   [hook($audit)],
-        PreToolUse:         [mhook($audit)],
-        PostToolUse:        [mhook($audit)],
-        PostToolUseFailure: [mhook($audit)],
-        Stop:               [hook($audit)]
-      }
-    }'
+  _s=$(js "$cmd_session"); _a=$(js "$cmd_audit")
+  _url=$(js "$api_url"); _key=$(js "$api_key"); _secret=$(js "$api_secret"); _ns=$(js "$namespace")
+  # Hook-scoped AGENT_HOOK_ENDOR_* names keep audit creds out of any endorctl the
+  # agent itself spawns; behavior envs (env_json) use their canonical names.
+  printf '{\n  "env": {\n'
+  printf '    "AGENT_HOOK_ENDOR_API": "%s",\n' "$_url"
+  printf '    "AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY": "%s",\n' "$_key"
+  printf '    "AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET": "%s",\n' "$_secret"
+  printf '    "AGENT_HOOK_ENDOR_NAMESPACE": "%s"%s\n' "$_ns" "$env_json"
+  printf '  },\n  "hooks": {\n'
+  claude_hook  SessionStart       "$_s" ,
+  claude_hook  UserPromptSubmit   "$_a" ,
+  claude_mhook PreToolUse         "$_a" ,
+  claude_mhook PostToolUse        "$_a" ,
+  claude_mhook PostToolUseFailure "$_a" ,
+  claude_hook  Stop               "$_a" ""
+  printf '  }\n}\n'
 }
 
 # --- emit ---------------------------------------------------------------------

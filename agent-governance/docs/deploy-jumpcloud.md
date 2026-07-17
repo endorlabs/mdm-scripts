@@ -30,15 +30,15 @@ This is JumpCloud's equivalent of a Jamf recurring policy or a Kandji schedule.
    export ENDOR_API_CREDENTIALS_KEY='…' ENDOR_API_CREDENTIALS_SECRET='…' ENDOR_NAMESPACE='…'
    # …contents of scripts/runner.sh below (set AGENT=cursor or claude, REF=<tag>)…
    ```
-   Single-quote the values so a `"`, `$`, or backtick can't break the assignment (escape any literal single quote as `'\''`). In `runner.sh`, set `AGENT` and `REF` (a reviewed tag/commit to pin). The endpoint needs `git` + `jq`.
+   Single-quote the values so a `"`, `$`, or backtick can't break the assignment (escape any literal single quote as `'\''`). In `runner.sh`, set `AGENT` and `REF` (a reviewed tag/commit to pin). The endpoint needs only `curl` + `tar` (both ship with macOS/Linux).
 2. Set the launch type to **Run as Repeating** (e.g. hourly) so each run re-fetches `REF` and re-renders, swapping only on change — repo and credential/flag changes flow automatically.
 3. Scope it to a Device Group.
 
-If you'd rather not require `git`/`jq` on Linux, use the file-writing Command pattern below (pre-generate, embed the JSON) for Linux too.
+If you'd rather not fetch-and-render on the endpoint at all, use the file-writing Command pattern below (pre-generate, embed the JSON) for Linux too.
 
 ## Windows — a PowerShell Command
 
-Windows endpoints have no `git`/`jq`, so **pre-generate** the config on a macOS/Linux (or WSL/Git Bash) admin box:
+Windows endpoints can't run the POSIX runner (no `sh`), so **pre-generate** the config on a macOS/Linux (or WSL/Git Bash) admin box:
 
 ```sh
 scripts/render.sh --agent cursor --target-os windows --api-key … --api-secret … --namespace … -o cursor-hooks.json

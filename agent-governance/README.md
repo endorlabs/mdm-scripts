@@ -109,7 +109,7 @@ A good rollout starts in monitor-only, watches the Endor audit log over a repres
 - **Least-privilege credentials.** A generated profile carries the API key and secret to every laptop — scope it to an **audit-only** credential.
 - **Pin the revision.** The runner executes this repo's code as root, so it fetches a specific revision: set `REF` (at the top of `runner.sh`) to a reviewed tag, branch, or commit and each device runs only that, not the moving branch tip. Bump `REF` to roll out a change; the default (`main`) tracks the latest.
 - **Credential isolation (Claude).** The `env` block exports into every subprocess Claude spawns, including any `endorctl` the agent itself runs. To keep audit credentials out of the agent's process tree, hook-scoped variables use an `AGENT_HOOK_ENDOR_*` prefix that `endorctl` doesn't read natively, and the hook passes them through as `--api-key …` flags.
-- **Robust quoting.** Credentials and `--env` values are escaped for their target — the shell (POSIX, via `@sh`), PowerShell (single-quote doubling), and JSON (`jq`) — and `$VAR` references in the generated commands are quoted, so a value containing a space, quote, `$`, `;`, `*`, or `` ` `` never word-splits or breaks the hook.
+- **Robust quoting.** Credentials and `--env` values are escaped for their target — the shell (POSIX single-quoting), PowerShell (single-quote doubling), and JSON (an `awk`/`sed` escaper) — and `$VAR` references in the generated commands are quoted, so a value containing a space, quote, `$`, `;`, `*`, or `` ` `` never word-splits or breaks the hook.
 
 ## Prerequisites
 
@@ -119,9 +119,9 @@ Each script needs only what's standard to where it runs; the laptop paths stay l
 | --- | --- | --- |
 | [`download_endorctl.sh`](scripts/download_endorctl.sh) | developer laptop (inlined into the session hook) | POSIX `sh` + `curl` (plus `awk`/`sed`/`uname`/`mktemp`/`tr` and `sha256sum` or `shasum` — all standard on macOS & Linux) |
 | [`download_endorctl.ps1`](scripts/download_endorctl.ps1) | Windows laptop (encoded into the session hook) | Windows PowerShell 5.1 (built in) |
-| [`scripts/render.sh`](scripts/render.sh) | admin machine (macOS/Linux, or Windows via Git Bash/WSL), or laptop via the runner | `jq`; for `--target-os windows` also `iconv` + `base64` |
-| [`scripts/render-plist.sh`](scripts/render-plist.sh) | admin machine (macOS) | `jq` + `plutil` |
-| [`scripts/runner.sh`](scripts/runner.sh) | developer laptop (run by the MDM) | `git` + POSIX `sh` + `jq` |
+| [`scripts/render.sh`](scripts/render.sh) | admin machine (macOS/Linux, or Windows via Git Bash/WSL), or laptop via the runner | POSIX `sh` + `awk` + `sed`; for `--target-os windows` also `iconv` + `base64` |
+| [`scripts/render-plist.sh`](scripts/render-plist.sh) | admin machine (macOS) | `plutil` (native to macOS) |
+| [`scripts/runner.sh`](scripts/runner.sh) | developer laptop (run by the MDM) | `curl` + `tar` + POSIX `sh` |
 
 ## Repository layout
 
@@ -152,4 +152,4 @@ There's no separate Linux example: `settings.json` is exactly what Claude reads 
 
 ## Extending
 
-To add another agent: add a `build_<agent>` jq builder and a `case` arm in [`scripts/render.sh`](scripts/render.sh), plus a default-`DEST` `case` arm in [`scripts/runner.sh`](scripts/runner.sh) if it's script-delivered.
+To add another agent: add a `build_<agent>` printf builder and a `case` arm in [`scripts/render.sh`](scripts/render.sh), plus a default-`DEST` `case` arm in [`scripts/runner.sh`](scripts/runner.sh) if it's script-delivered.
