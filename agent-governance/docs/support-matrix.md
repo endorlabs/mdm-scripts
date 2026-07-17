@@ -20,14 +20,14 @@ Every combination of agent × installation mechanism × OS this repo covers, and
 
 - **macOS Claude and macOS Codex** are the **profile** paths (`.mobileconfig`, OS-enforced, tamper-resistant) — Claude embeds a managed-settings JSON payload; Codex embeds a base64 `requirements.toml` as a Forced `com.openai.codex` preference. Every other cell is a **plain file** (JSON, or Codex's TOML) at a system path.
 - **macOS and Linux** can keep that file current automatically with `runner.sh` (re-render and swap-on-change, on the MDM's schedule).
-- **Windows** has no `git`/`jq` on the endpoint, so you **pre-generate** (`--target-os windows`) and push the file centrally.
-- **Config management** (Ansible, Chef, Puppet, Salt, …) works for any file-based cell on any OS — the artifact is just a file at a known path. The exceptions are the macOS profiles (rows 6, 9), which need an MDM to install the `.mobileconfig`.
+- **Windows** can't run the POSIX runner (no `sh`), so you **pre-generate** (`--target-os windows`) and push the file centrally.
+- **Config management** (Ansible, Chef, Puppet, Salt, …) works for any file-based cell on any OS — the artifact is just a file (JSON, or Codex's TOML) at a known path. The exceptions are the macOS profiles (rows 6, 9), which need an MDM to install the `.mobileconfig`.
 
 ## Worth knowing
 
-- **The runner needs `git` + `jq` on the endpoint** (rows 2, 3, 7, 10). The profile paths (rows 6, 9) and the Windows pre-generate paths (rows 4, 8, 11) need nothing beyond what ships with the OS. If you'd rather not add `git`/`jq` to Linux endpoints, deliver the pre-generated file via config management instead.
+- **The runner needs only `curl` + `tar` on the endpoint** (rows 2, 3, 7, 10), both of which ship with macOS and Linux. The profile paths (rows 6, 9) and the Windows pre-generate paths (rows 4, 8, 11) also need nothing beyond what ships with the OS. Prefer not to run the fetch-and-render on endpoints at all? Deliver the pre-generated file via config management instead.
 - **Smoke-test Windows before a fleet rollout.** The encoded PowerShell hook is verified by decode/round-trip; confirm `endorctl.exe` installs and audits on a real Windows endpoint for each agent before going wide.
 - **Codex hooks are auto-trusted only from a managed source.** Rows 9–11 (profile or root-owned `requirements.toml`) are treated as managed, so Codex runs them without a per-user trust prompt and users can't disable them; a `requirements.toml` a user could edit would not get that treatment.
-- **Generation is POSIX-only** — `render.sh` needs `sh` + `jq` (and `iconv` + `base64` for Windows targets, plus `base64` for the Codex profile). A Windows-only admin generates under WSL or Git Bash.
+- **Generation is POSIX-only** — `render.sh` needs `sh` + `awk` + `sed` (and `iconv` + `base64` for Windows targets; `base64` also for the Codex `--style mcx` profile). A Windows-only admin generates under WSL or Git Bash.
 - **Cursor Team hooks** take a manual paste of the generated `hooks.json` — supported, not automated.
 - **JumpCloud** delivers files via a Command (no native file-push) and recurs via *Run as Repeating* (which can miss a window during device sleep); macOS profiles go through its MDM Custom Configuration Profile policy, which rewrites the outer profile UUID/identifier.

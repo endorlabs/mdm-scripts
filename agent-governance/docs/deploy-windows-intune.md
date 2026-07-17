@@ -1,6 +1,6 @@
 # Deploy on Windows via Intune
 
-Windows has no Configuration Profiles for these tools — both agents read a plain JSON config from a known path. So the pattern is different from macOS: you **pre-generate the config on a macOS/Linux admin machine** (a Windows laptop has no `jq`/`sh`) and use **Microsoft Intune** to place the file. The endpoint never runs the generator.
+Windows has no Configuration Profiles for these tools — both agents read a plain JSON config from a known path. So the pattern is different from macOS: you **pre-generate the config on a macOS/Linux admin machine** (the generator is a POSIX shell script; a plain Windows laptop has no `sh`) and use **Microsoft Intune** to place the file. The endpoint never runs the generator.
 
 ## How the Windows hook runs
 
@@ -14,7 +14,7 @@ Base64 is plain alphanumeric, so it runs identically whether the agent launches 
 
 ## 1. Generate the config (admin machine)
 
-Generate on macOS/Linux, or on Windows under Git Bash (ships with Git for Windows) or WSL with `jq` installed — the output is identical.
+Generate on macOS/Linux, or on Windows under Git Bash (ships with Git for Windows) or WSL — the output is identical.
 
 ```sh
 # Cursor
@@ -30,7 +30,7 @@ scripts/render.sh --agent codex --target-os windows \
   --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o codex-requirements.toml
 ```
 
-Add `--env ENDOR_AI_AUDIT_NO_BLOCKING=true` for a monitor-only rollout, or `--skip-endorctl-update` to pin to the installed binary. (Generating Windows configs needs `jq` + `iconv` + `base64`, all standard on macOS/Linux.)
+Add `--env ENDOR_AI_AUDIT_NO_BLOCKING=true` for a monitor-only rollout, or `--skip-endorctl-update` to pin to the installed binary. (Generating Windows configs needs `sh` + `awk` + `sed` + `iconv` + `base64`, all standard on macOS/Linux.)
 
 ## 2. Where the file goes
 

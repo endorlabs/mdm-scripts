@@ -11,8 +11,9 @@
 #   Kandji / JumpCloud: prepend  export ENDOR_API_CREDENTIALS_KEY='...' ...  (single-quoted)
 # Use an audit-only / least-privilege credential.
 #
-# Endpoint needs git + jq. Windows doesn't use this - pre-generate and push via
-# Intune (see docs/deploy-windows-intune.md).
+# Endpoint needs only curl + tar (both ship with macOS/Linux) - no git/Xcode CLT
+# and no jq/Homebrew. Windows doesn't use this - pre-generate and push via Intune
+# (see docs/deploy-windows-intune.md).
 set -eu
 
 # --- settings: edit these ---------------------------------------------------
@@ -20,7 +21,7 @@ AGENT=cursor                                       # cursor | claude | codex
 REF=main                                           # pin to a reviewed tag/commit, e.g. v1.0.0
 EXTRA=                                              # extra render flags, e.g. --env ENDOR_AI_AUDIT_NO_BLOCKING=true
 DEST=                                              # override install path; empty = OS default
-REPO_URL=https://github.com/endorlabs/mdm-scripts
+REPO_SLUG=endorlabs/mdm-scripts                    # owner/repo the tarball is fetched from
 # -----------------------------------------------------------------------------
 
 os=$(uname -s)
@@ -47,14 +48,18 @@ fi
 
 mkdir -p "$(dirname "$REPO")" "$(dirname "$DEST")"
 
-# Fetch this repo at the pinned ref - one clone, into a root-owned path (never
-# /tmp). Checking out an explicit ref means the device runs a reviewed revision.
-if [ ! -d "$REPO/.git" ]; then
-  git init -q "$REPO"
-  git -C "$REPO" remote add origin "$REPO_URL"
-fi
-git -C "$REPO" fetch --depth 1 origin "$REF"
-git -C "$REPO" -c advice.detachedHead=false checkout -f FETCH_HEAD
+# Fetch this repo at the pinned ref as a tarball with curl - no git, so no Xcode
+# Command Line Tools (macOS /usr/bin/git is a CLT stub that fails with no GUI
+# session). codeload serves a branch, tag, or commit SHA at this path over TLS;
+# pinning REF to a reviewed tag/commit means the device runs a known revision.
+# Extract into a root-owned path (never /tmp), replacing any prior copy so a
+# removed file can't linger. --strip-components=1 drops the "<repo>-<ref>/" top
+# dir GitHub tarballs wrap everything in.
+rm -rf "$REPO"
+mkdir -p "$REPO"
+curl -fsSL --retry 5 --retry-connrefused --retry-all-errors \
+  "https://codeload.github.com/$REPO_SLUG/tar.gz/$REF" \
+  | tar -xz -C "$REPO" --strip-components=1
 
 # Render the config and swap it in only if it changed. Comparing the output (not
 # the repo revision) means credential and flag changes take effect too.

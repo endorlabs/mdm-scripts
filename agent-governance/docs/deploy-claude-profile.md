@@ -2,7 +2,7 @@
 
 On macOS, Claude Code reads managed settings from a Configuration Profile payload of type `com.anthropic.claudecode`, so a profile is **tamper-resistant** — the OS enforces it, and nothing extra runs on the laptop. The one tradeoff: an update means regenerating the profile and re-uploading it.
 
-You'll generate a `.mobileconfig` on an admin Mac (you need `jq` and `plutil`), then upload it through Jamf or Kandji.
+You'll generate a `.mobileconfig` on an admin Mac (you need `plutil`, which is native to macOS), then upload it through Jamf or Kandji.
 
 ## 1. Generate the profile
 
