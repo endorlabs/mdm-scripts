@@ -4,6 +4,13 @@ On macOS, OpenAI Codex reads managed configuration from a Configuration Profile 
 
 You'll generate a `.mobileconfig` on an admin Mac (you need `plutil` and `base64`, both native to macOS), then upload it through Jamf or Kandji.
 
+## Prerequisites
+
+Nothing beyond what the other agents need — the `requirements.toml` is emitted with `printf` (no TOML tooling), and Codex parses it with its own built-in parser, so **no TOML library is required on the admin machine or the endpoint**.
+
+- **Admin machine:** `plutil` + `base64` (native to macOS) for the profile; `sh` + `awk` + `sed` for `render.sh`, plus `iconv` + `base64` for `--target-os windows`.
+- **Endpoint:** just the hook runtime the other agents use — POSIX `sh` + `curl` on macOS/Linux, PowerShell 5.1 on Windows — and a **Codex build that supports managed hooks**: the `hooks` feature (stable, on by default) and the `requirements_toml_base64` managed preference on macOS. Verified against Codex CLI 0.142.2; older builds without managed-hook support won't apply these.
+
 ## How it differs from Claude
 
 - **Codex takes TOML, not JSON.** `render.sh --agent codex` emits a `requirements.toml`; `render-plist.sh --style mcx` base64-encodes it and wraps it in the `com.openai.codex` MCX manifest.
