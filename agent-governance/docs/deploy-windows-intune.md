@@ -1,6 +1,6 @@
 # Deploy on Windows via Intune
 
-Windows has no Configuration Profiles for these tools — both agents read a plain JSON config from a known path. So the pattern is different from macOS: you **pre-generate the config on a macOS/Linux admin machine** (the generator is a POSIX shell script; a plain Windows laptop has no `sh`) and use **Microsoft Intune** to place the file. The endpoint never runs the generator.
+Windows has no Configuration Profiles for these tools — each agent reads a plain config file from a known path (Cursor/Claude as JSON, Codex as TOML). So the pattern is different from macOS: you **pre-generate the config on a macOS/Linux admin machine** (the generator is a POSIX shell script; a plain Windows laptop has no `sh`) and use **Microsoft Intune** to place the file. The endpoint never runs the generator.
 
 ## How the Windows hook runs
 
@@ -42,17 +42,17 @@ Add `--env ENDOR_AI_AUDIT_NO_BLOCKING=true` for a monitor-only rollout, or `--sk
 
 ## 3. Push with Intune
 
-Use a **Platform script** (Devices → Scripts → Add → Windows 10 and later) or a Win32 app, run in system context, that writes the generated JSON to the path above:
+Use a **Platform script** (Devices → Scripts → Add → Windows 10 and later) or a Win32 app, run in system context, that writes the generated config to the path above:
 
 ```powershell
-$dest = "$env:ProgramData\Cursor\hooks.json"   # or C:\Program Files\ClaudeCode\managed-settings.json
+$dest = "$env:ProgramData\Cursor\hooks.json"   # or C:\Program Files\ClaudeCode\managed-settings.json, or $env:ProgramData\OpenAI\Codex\requirements.toml
 # Paste the generated config between the single-quoted here-string markers. Single
 # quotes (@'  '@) keep it literal so PowerShell doesn't interpret $ / quotes in it.
-$json = @'
-<paste the contents of the generated cursor-hooks.json / managed-settings.json here>
+$config = @'
+<paste the contents of the generated hooks.json / managed-settings.json / requirements.toml here>
 '@
 New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
-Set-Content -Path $dest -Value $json -Encoding UTF8
+Set-Content -Path $dest -Value $config -Encoding UTF8
 ```
 
 Scope it to the target device or user groups. (For the per-user path `%USERPROFILE%\.cursor\hooks.json`, run the script in the user's context instead of system.)
@@ -65,4 +65,4 @@ Just `powershell.exe` (Windows PowerShell 5.1, built in) — invoked by the hook
 
 ## Updating
 
-Regenerate the config (step 1) and re-deploy it. Since a platform script only re-runs when its content changes, "re-push" means updating the script body (the embedded JSON) in the policy — re-saving an unchanged policy won't re-run. There's no on-endpoint auto-pull on Windows, so updates are centrally driven.
+Regenerate the config (step 1) and re-deploy it. Since a platform script only re-runs when its content changes, "re-push" means updating the script body (the embedded config) in the policy — re-saving an unchanged policy won't re-run. There's no on-endpoint auto-pull on Windows, so updates are centrally driven.
