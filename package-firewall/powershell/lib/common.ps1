@@ -36,6 +36,18 @@ $ENDOR_BLOCK_END   = '# ===== END ENDOR PACKAGE FIREWALL ====='
 $ENDOR_XML_BLOCK_START = '<!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->'
 $ENDOR_XML_BLOCK_END   = '<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->'
 
+# Per-entry sentinel markers wrapping our <server> and <mirror>. They live in the
+# shared fragment (shared/blocks/mavensettings.txt) and are what let each entry be
+# merged into whichever <servers>/<mirrors> container already exists — Maven's
+# schema forbids a second container. These MUST match that fragment and the bash
+# ENDOR_XML_SERVER_*/MIRROR_* markers byte-for-byte. The legacy $ENDOR_XML_BLOCK_*
+# pair above is still recognised on strip/remove so files written by older versions
+# are cleaned up correctly.
+$ENDOR_XML_SERVER_START = '<!-- ===== BEGIN ENDOR PACKAGE FIREWALL server (managed — do not edit) ===== -->'
+$ENDOR_XML_SERVER_END   = '<!-- ===== END ENDOR PACKAGE FIREWALL server ===== -->'
+$ENDOR_XML_MIRROR_START = '<!-- ===== BEGIN ENDOR PACKAGE FIREWALL mirror (managed — do not edit) ===== -->'
+$ENDOR_XML_MIRROR_END   = '<!-- ===== END ENDOR PACKAGE FIREWALL mirror ===== -->'
+
 # ── User attribution helpers ──────────────────────────────────────────────────
 # Encode <console-user>@<machine> into the Basic-auth username. The firewall
 # decodes the label, auths with the real API key, and logs it as "User".
@@ -415,17 +427,125 @@ function Invoke-RemoveBlock {
     }
 }
 
+# ── Maven XML helpers (parity with the bash upsert_xml_block machinery) ────────
+# Maven's schema allows at most ONE <servers> and ONE <mirrors> container, so we
+# never emit our own wrapper when one already exists — we merge our sentinel-
+# delimited <server>/<mirror> entry into it. These helpers operate on line arrays.
+
+# Get-EndorXmlSubBlock <lines[]> <start> <end> -> inclusive marker block (string[])
+function Get-EndorXmlSubBlock {
+    param([string[]]$Lines, [string]$Start, [string]$End)
+    $out  = [System.Collections.Generic.List[string]]::new()
+    $grab = $false
+    foreach ($line in $Lines) {
+        if ($line.Contains($Start)) { $grab = $true }
+        if ($grab)                  { $out.Add($line) }
+        if ($line.Contains($End))   { $grab = $false }
+    }
+    return ,$out.ToArray()
+}
+
+# Remove-EndorXmlManaged <lines[]> -> lines with every managed region removed
+# (new per-entry server/mirror sub-blocks AND the legacy combined block).
+function Remove-EndorXmlManaged {
+    param([string[]]$Lines)
+    $out  = [System.Collections.Generic.List[string]]::new()
+    $skip = $false
+    foreach ($line in $Lines) {
+        if ($line.Contains($ENDOR_XML_SERVER_START) -or $line.Contains($ENDOR_XML_MIRROR_START) -or $line.Contains($ENDOR_XML_BLOCK_START)) { $skip = $true }
+        if (-not $skip) { $out.Add($line) }
+        if ($line.Contains($ENDOR_XML_SERVER_END)   -or $line.Contains($ENDOR_XML_MIRROR_END)   -or $line.Contains($ENDOR_XML_BLOCK_END))   { $skip = $false }
+    }
+    return ,$out.ToArray()
+}
+
+# Add-EndorIntoContainer <lines[]> <open> <close> <selfclose> <subblock[]>
+# Inserts <subblock> as the FIRST child of an existing container (so the Endor
+# catch-all mirror wins Maven precedence). Returns the new lines[] on success, or
+# $null when the container is absent (caller must create it). Handles the multi-
+# line <servers> … </servers> form and the self-closed <servers/> form.
+function Add-EndorIntoContainer {
+    param([string[]]$Lines, [string]$Open, [string]$Close, [string]$SelfClose, [string[]]$SubBlock)
+
+    $hasOpen = $false; $hasSelf = $false
+    foreach ($l in $Lines) {
+        if ($l.Contains($Open))      { $hasOpen = $true }
+        if ($l.Contains($SelfClose)) { $hasSelf = $true }
+    }
+
+    $out  = [System.Collections.Generic.List[string]]::new()
+    $done = $false
+
+    if ($hasOpen) {
+        foreach ($l in $Lines) {
+            if (-not $done) {
+                $p = $l.IndexOf($Open)
+                if ($p -ge 0) {
+                    $out.Add($l.Substring(0, $p + $Open.Length))
+                    foreach ($b in $SubBlock) { $out.Add($b) }
+                    $rest = $l.Substring($p + $Open.Length)
+                    if ($rest -ne '') { $out.Add($rest) }
+                    $done = $true
+                    continue
+                }
+            }
+            $out.Add($l)
+        }
+        return ,$out.ToArray()
+    }
+    elseif ($hasSelf) {
+        foreach ($l in $Lines) {
+            if (-not $done) {
+                $p = $l.IndexOf($SelfClose)
+                if ($p -ge 0) {
+                    $out.Add($l.Substring(0, $p) + $Open)
+                    foreach ($b in $SubBlock) { $out.Add($b) }
+                    $out.Add($Close + $l.Substring($p + $SelfClose.Length))
+                    $done = $true
+                    continue
+                }
+            }
+            $out.Add($l)
+        }
+        return ,$out.ToArray()
+    }
+    return $null
+}
+
+# Add-EndorOrdered <lines[]> <block[]> <laterTags[]>
+# Inserts a newly-created container <block> before the first line containing any
+# of <laterTags> (Maven schema order servers→mirrors→profiles→activeProfiles→
+# pluginGroups), else before </settings>, keeping the file schema-valid.
+function Add-EndorOrdered {
+    param([string[]]$Lines, [string[]]$Block, [string[]]$LaterTags)
+    $out  = [System.Collections.Generic.List[string]]::new()
+    $done = $false
+    foreach ($l in $Lines) {
+        if (-not $done) {
+            foreach ($t in $LaterTags) {
+                if ($l.Contains($t)) { foreach ($b in $Block) { $out.Add($b) }; $done = $true; break }
+            }
+        }
+        if (-not $done -and $l.Contains('</settings>')) { foreach ($b in $Block) { $out.Add($b) }; $done = $true }
+        $out.Add($l)
+    }
+    if (-not $done) { foreach ($b in $Block) { $out.Add($b) } }
+    return ,$out.ToArray()
+}
+
 # Invoke-UpsertXmlBlock <filepath> <content> <username> [-DryRun]
 #
-# Idempotent writer for an XML settings file (Maven %USERPROFILE%\.m2\settings.xml).
-# The generic Invoke-UpsertBlock appends to EOF, which for XML would land after
-# </settings> and produce invalid XML — so Maven needs this XML-aware variant.
-#   - File absent             -> create a minimal settings.xml wrapping the fragment
-#   - File present, has block  -> replace only the delimited fragment
-#   - File present, no block   -> insert fragment just before </settings>
-#   - -DryRun                 -> prints what would happen, writes nothing
-# The fragment carries its own XML-comment sentinels (from mavensettings.txt), so
-# this helper detects/strips by the marker strings rather than adding them itself.
+# Idempotent, MERGE-AWARE writer for Maven %USERPROFILE%\.m2\settings.xml. The
+# fragment carries two sentinel-delimited entries — a <server> and a <mirror>.
+# Maven's schema forbids a second <servers>/<mirrors>, so each entry is merged into
+# whichever singleton container already exists; a container is created only when it
+# is absent.
+#   - File absent              -> create a minimal settings.xml with both containers
+#   - <servers> present        -> insert our <server> as its first child
+#   - <servers> absent         -> create <servers> (in schema order) wrapping our entry
+#   - <mirrors> present/absent -> same treatment for our <mirror>
+#   - Re-run                   -> prior managed entries (new or legacy) stripped first
+#   - -DryRun                  -> prints what would happen, writes nothing
 function Invoke-UpsertXmlBlock {
     param(
         [string]$FilePath,
@@ -434,18 +554,23 @@ function Invoke-UpsertXmlBlock {
         [switch]$DryRun
     )
 
+    # Split the fragment into its two independently-sentineled managed entries.
+    $fragLines = $Content -split "`r?`n"
+    $serverBlk = Get-EndorXmlSubBlock -Lines $fragLines -Start $ENDOR_XML_SERVER_START -End $ENDOR_XML_SERVER_END
+    $mirrorBlk = Get-EndorXmlSubBlock -Lines $fragLines -Start $ENDOR_XML_MIRROR_START -End $ENDOR_XML_MIRROR_END
+
     $dir        = Split-Path $FilePath -Parent
     $fileExists = Test-Path $FilePath
-    $raw        = if ($fileExists) { Get-Content $FilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue } else { '' }
-    $hasBlock   = $raw -match [regex]::Escape($ENDOR_XML_BLOCK_START)
 
     if ($DryRun) {
-        if ($hasBlock) {
-            Write-Host '[dry-run]   action : REPLACE Endor block in settings.xml'
-        } elseif ($fileExists) {
-            Write-Host '[dry-run]   action : INSERT Endor block before </settings>'
+        if (-not $fileExists) {
+            Write-Host '[dry-run]   action : CREATE settings.xml with <servers> + <mirrors>'
         } else {
-            Write-Host '[dry-run]   action : CREATE settings.xml with Endor block'
+            $raw = Get-Content $FilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+            if ($raw -match '<servers>') { Write-Host '[dry-run]   action : MERGE <server> into existing <servers>' }
+            else                         { Write-Host '[dry-run]   action : CREATE <servers> with Endor <server>' }
+            if ($raw -match '<mirrors>') { Write-Host '[dry-run]   action : MERGE <mirror> into existing <mirrors> (inserted first)' }
+            else                         { Write-Host '[dry-run]   action : CREATE <mirrors> with Endor <mirror>' }
         }
         Write-Host "[dry-run]   file   : $FilePath"
         $Content -split "`n" | ForEach-Object { Write-Host "[dry-run]     $_" }
@@ -457,54 +582,56 @@ function Invoke-UpsertXmlBlock {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
 
-    # Case 1: file absent -> write a complete minimal settings.xml
+    # Case 1: file absent -> minimal settings.xml with both containers, in order.
     if (-not $fileExists) {
-        $scaffold = @(
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            '<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"'
-            '          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
-            '          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 http://maven.apache.org/xsd/settings-1.2.0.xsd">'
-            $Content
-            '</settings>'
-        )
-        Write-EndorFile -FilePath $FilePath -Lines $scaffold
+        $scaffold = [System.Collections.Generic.List[string]]::new()
+        $scaffold.Add('<?xml version="1.0" encoding="UTF-8"?>')
+        $scaffold.Add('<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"')
+        $scaffold.Add('          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"')
+        $scaffold.Add('          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 http://maven.apache.org/xsd/settings-1.2.0.xsd">')
+        $scaffold.Add('  <servers>'); foreach ($b in $serverBlk) { $scaffold.Add($b) }; $scaffold.Add('  </servers>')
+        $scaffold.Add('  <mirrors>'); foreach ($b in $mirrorBlk) { $scaffold.Add($b) }; $scaffold.Add('  </mirrors>')
+        $scaffold.Add('</settings>')
+        Write-EndorFile -FilePath $FilePath -Lines $scaffold.ToArray()
         Set-FileRestrictedAcl -FilePath $FilePath -Username $Username
         return
     }
 
-    # Case 2: existing Endor block -> strip it (between and including the markers)
+    # Case 2: strip any prior managed entries so re-runs stay idempotent.
     $lines = @(Get-Content $FilePath -Encoding UTF8)
-    if ($hasBlock) {
-        $inBlock = $false
-        $kept    = [System.Collections.Generic.List[string]]::new()
-        foreach ($line in $lines) {
-            if ($line -match [regex]::Escape($ENDOR_XML_BLOCK_START)) { $inBlock = $true;  continue }
-            if ($line -match [regex]::Escape($ENDOR_XML_BLOCK_END))   { $inBlock = $false; continue }
-            if (-not $inBlock) { $kept.Add($line) }
-        }
-        $lines = $kept.ToArray()
+    $lines = Remove-EndorXmlManaged -Lines $lines
+
+    # Case 3a: merge the <server> entry (create <servers> only if absent).
+    $merged = Add-EndorIntoContainer -Lines $lines -Open '<servers>' -Close '</servers>' -SelfClose '<servers/>' -SubBlock $serverBlk
+    if ($null -ne $merged) {
+        $lines = $merged
+    } else {
+        $container = [System.Collections.Generic.List[string]]::new()
+        $container.Add('  <servers>'); foreach ($b in $serverBlk) { $container.Add($b) }; $container.Add('  </servers>')
+        $lines = Add-EndorOrdered -Lines $lines -Block $container.ToArray() -LaterTags @('<mirrors', '<profiles', '<activeProfiles', '<pluginGroups')
     }
 
-    # Case 3: insert the fresh fragment immediately before the first </settings>
-    $out      = [System.Collections.Generic.List[string]]::new()
-    $inserted = $false
-    foreach ($line in $lines) {
-        if (-not $inserted -and $line -match '</settings>') {
-            $out.Add($Content)
-            $inserted = $true
-        }
-        $out.Add($line)
+    # Case 3b: merge the <mirror> entry (create <mirrors> only if absent).
+    $merged = Add-EndorIntoContainer -Lines $lines -Open '<mirrors>' -Close '</mirrors>' -SelfClose '<mirrors/>' -SubBlock $mirrorBlk
+    if ($null -ne $merged) {
+        $lines = $merged
+    } else {
+        $container = [System.Collections.Generic.List[string]]::new()
+        $container.Add('  <mirrors>'); foreach ($b in $mirrorBlk) { $container.Add($b) }; $container.Add('  </mirrors>')
+        $lines = Add-EndorOrdered -Lines $lines -Block $container.ToArray() -LaterTags @('<profiles', '<activeProfiles', '<pluginGroups')
     }
-    if (-not $inserted) { $out.Add($Content) }  # no closing tag found — append so it isn't lost
 
-    Write-EndorFile -FilePath $FilePath -Lines $out
+    Write-EndorFile -FilePath $FilePath -Lines $lines
     Set-FileRestrictedAcl -FilePath $FilePath -Username $Username
 }
 
 # Remove-XmlBlock <filepath> [-DryRun]
 #
-# Strips the Endor XML fragment from settings.xml. If the file is left with only
-# the empty <settings> scaffold (i.e. it was Endor-only), the whole file is deleted.
+# Strips the Endor managed entries (new per-entry server/mirror sub-blocks AND the
+# legacy combined block) from settings.xml. Any pre-existing <server>/<mirror> the
+# user had is preserved. If nothing but empty scaffolding remains, the file is
+# deleted. An emptied <servers></servers>/<mirrors></mirrors> we may have created
+# is harmless (valid, no-op) and is left in place when other content survives.
 function Remove-XmlBlock {
     param([string]$FilePath, [switch]$DryRun)
 
@@ -513,29 +640,27 @@ function Remove-XmlBlock {
         return
     }
     $raw = Get-Content $FilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-    if (-not ($raw -match [regex]::Escape($ENDOR_XML_BLOCK_START))) {
+    if (-not ($raw -match [regex]::Escape($ENDOR_XML_SERVER_START) `
+          -or $raw -match [regex]::Escape($ENDOR_XML_MIRROR_START) `
+          -or $raw -match [regex]::Escape($ENDOR_XML_BLOCK_START))) {
         Write-Host "[endor-remove] skip (no Endor block): $FilePath"
         return
     }
 
     if ($DryRun) {
-        Write-Host '[dry-run]   action : REMOVE Endor block from settings.xml'
+        Write-Host '[dry-run]   action : REMOVE Endor <server>/<mirror> from settings.xml'
         Write-Host "[dry-run]   file   : $FilePath"
         Write-Host ''
         return
     }
 
-    $lines   = @(Get-Content $FilePath -Encoding UTF8)
-    $inBlock = $false
-    $kept    = [System.Collections.Generic.List[string]]::new()
-    foreach ($line in $lines) {
-        if ($line -match [regex]::Escape($ENDOR_XML_BLOCK_START)) { $inBlock = $true;  continue }
-        if ($line -match [regex]::Escape($ENDOR_XML_BLOCK_END))   { $inBlock = $false; continue }
-        if (-not $inBlock) { $kept.Add($line) }
-    }
+    $lines = @(Get-Content $FilePath -Encoding UTF8)
+    $kept  = Remove-EndorXmlManaged -Lines $lines
 
-    # If only the empty XML scaffold remains (no real Maven elements), delete the file
-    $hasContent = ($kept -join "`n") -match '<(server|mirror|profile|proxy|pluginGroup|repository)'
+    # Delete only if no real child entry survives. The regex matches the SINGULAR
+    # child tags (a following '>' or space) but not the plural containers, so an
+    # emptied <servers></servers> does not count as content.
+    $hasContent = ($kept -join "`n") -match '<(server|mirror|profile|proxy|pluginGroup|repository|activeProfile|localRepository)[ >]'
     if (-not $hasContent) {
         Remove-Item $FilePath -Force
         Write-Host "[endor-remove] deleted (was empty) : $FilePath"
@@ -584,4 +709,25 @@ function Test-XmlKeyConflict {
         Write-Warning "[endor]          Endor block will be inserted -- verify key precedence with your tool."
         $script:EndorWarned = $true
     }
+}
+
+# Test-XmlForeignMirror <filepath> -> $true when a <mirror> exists OUTSIDE any
+# Endor-managed region (new server/mirror sub-blocks or the legacy block). A user's
+# catch-all mirror ahead of ours would bypass the firewall, so this is a genuine
+# precedence conflict worth warning about. Endor's own mirror is NOT foreign, so
+# re-runs on an already-managed settings.xml do not false-positive (parity with
+# bash xml_has_foreign_mirror).
+function Test-XmlForeignMirror {
+    param([string]$FilePath)
+
+    if (-not (Test-Path $FilePath)) { return $false }
+
+    $skip  = $false
+    $found = $false
+    foreach ($line in @(Get-Content $FilePath -Encoding UTF8)) {
+        if ($line.Contains($ENDOR_XML_SERVER_START) -or $line.Contains($ENDOR_XML_MIRROR_START) -or $line.Contains($ENDOR_XML_BLOCK_START)) { $skip = $true }
+        if (-not $skip -and $line -match '<mirror[ >]') { $found = $true }
+        if ($line.Contains($ENDOR_XML_SERVER_END)   -or $line.Contains($ENDOR_XML_MIRROR_END)   -or $line.Contains($ENDOR_XML_BLOCK_END))   { $skip = $false }
+    }
+    return $found
 }
