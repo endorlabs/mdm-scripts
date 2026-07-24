@@ -13,12 +13,18 @@ Write-Host '[endor-maven] -- Maven ---------------------------------------------
 
 $mavenSettings = Join-Path $UserHome '.m2\settings.xml'
 
-# Warn if the admin already defines a mirror outside an Endor block --
-# Maven mirror precedence could conflict and needs a human decision.
-Test-XmlKeyConflict `
-    -FilePath $mavenSettings `
-    -Pattern  '<mirror>' `
-    -Label    'existing <mirror> (Maven)'
+# Our <server> merges into any existing <servers> with no conflict (servers are
+# keyed by id). A pre-existing <mirror> is a precedence consideration: Maven uses
+# the FIRST matching mirror, so the Endor firewall mirror is ALWAYS inserted first
+# to win. When a foreign mirror is present we warn (for admin awareness) but
+# proceed unconditionally -- the firewall must be active.
+if (Test-XmlForeignMirror -FilePath $mavenSettings) {
+    Write-Warning "[endor-maven] an existing <mirror> is defined in $mavenSettings."
+    Write-Warning '[endor-maven]   Maven uses the first matching <mirror>; the Endor firewall mirror'
+    Write-Warning '[endor-maven]   will be inserted FIRST so it takes precedence. Your existing mirror'
+    Write-Warning '[endor-maven]   is preserved but shadowed for repos the Endor catch-all (mirrorOf=*) covers.'
+    $script:EndorWarned = $true
+}
 
 Invoke-UpsertXmlBlock `
     -FilePath $mavenSettings `
