@@ -2,9 +2,9 @@
 # Deliver as an MDM profile (com.openai.codex requirements_toml_base64) via
 # "render-plist.sh --style mcx", or as a managed /etc/codex/requirements.toml.
 # Hooks from a managed/requirements source are auto-trusted and cannot be
-# disabled by the user; audit credentials are baked into each command.
-allow_managed_hooks_only = true
-
+# disabled by the user; audit credentials are baked into each command. These
+# run alongside any user/project hooks (like Claude/Cursor); to instead run
+# only managed hooks, an admin can add "allow_managed_hooks_only = true".
 [features]
 hooks = true
 

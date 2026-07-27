@@ -285,8 +285,9 @@ build_codex() {
   printf '# Deliver as an MDM profile (com.openai.codex requirements_toml_base64) via\n'
   printf '# "render-plist.sh --style mcx", or as a managed /etc/codex/requirements.toml.\n'
   printf '# Hooks from a managed/requirements source are auto-trusted and cannot be\n'
-  printf '# disabled by the user; audit credentials are baked into each command.\n'
-  printf 'allow_managed_hooks_only = true\n\n'
+  printf '# disabled by the user; audit credentials are baked into each command. These\n'
+  printf '# run alongside any user/project hooks (like Claude/Cursor); to instead run\n'
+  printf '# only managed hooks, an admin can add "allow_managed_hooks_only = true".\n'
   printf '[features]\nhooks = true\n\n'
   # Events endorctl governs (SessionStart also bootstraps endorctl). PreToolUse,
   # PermissionRequest, and PostToolUse carry an all-tools matcher; the rest fire

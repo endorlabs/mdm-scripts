@@ -9,7 +9,7 @@ You'll generate a `.mobileconfig` on an admin Mac (you need `plutil` and `base64
 - **Codex takes TOML, not JSON.** `render.sh --agent codex` emits a `requirements.toml`; `render-plist.sh --style mcx` base64-encodes it and wraps it in the `com.openai.codex` MCX manifest.
 - **No managed env block.** Claude carries audit credentials in a profile `env` block; Codex has no equivalent, so the credentials are baked into each hook command. The profile is the credential-bearing artifact either way — use an **audit-only** credential.
 - **One artifact, inline hooks.** Codex runs a hook `command` through a shell exactly like Claude, so the same self-installing `endorctl` bootstrap is inlined — there is no separate script to deliver.
-- **Events.** Endor governs `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`. `allow_managed_hooks_only = true` in the generated file makes Codex ignore any user/project/plugin hooks and run only these.
+- **Events.** Endor governs `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`. As with Claude and Cursor, these run **alongside** the developer's own user/project hooks — the managed ones are still auto-trusted and can't be disabled. If you'd rather lock the fleet down to managed hooks only, add `allow_managed_hooks_only = true` to the generated `requirements.toml`.
 
 ## 1. Generate the profile
 
