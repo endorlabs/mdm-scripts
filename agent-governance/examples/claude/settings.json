@@ -60,7 +60,17 @@
         "matcher": ".*"
       }
     ],
-    "Stop": [
+    "ConfigChange": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit claudecode"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
       {
         "hooks": [
           {

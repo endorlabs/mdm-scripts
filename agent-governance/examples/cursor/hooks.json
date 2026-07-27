@@ -36,12 +36,12 @@
         "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
       }
     ],
-    "afterShellExecution": [
+    "beforeMCPExecution": [
       {
         "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
       }
     ],
-    "beforeMCPExecution": [
+    "afterMCPExecution": [
       {
         "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
       }
@@ -51,12 +51,7 @@
         "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
       }
     ],
-    "afterFileEdit": [
-      {
-        "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
-      }
-    ],
-    "stop": [
+    "beforeTabFileRead": [
       {
         "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
       }

@@ -239,12 +239,16 @@ claude_mhook() { printf '    "%s": [\n      {\n        "hooks": [\n          {\n
 build_cursor() {
   _s=$(js "$cmd_session"); _a=$(js "$cmd_audit")
   printf '{\n  "version": 1,\n  "hooks": {\n'
+  # Every event endorctl's Cursor processor handles (its dispatch table), in
+  # dispatch order. Events outside this set (stop, afterShellExecution,
+  # afterFileEdit, subagent/compaction events) are accepted-and-ignored no-ops,
+  # so they are not registered.
   cursor_hook sessionStart "$_s" ,
   for _h in sessionEnd beforeSubmitPrompt preToolUse postToolUse postToolUseFailure \
-            beforeShellExecution afterShellExecution beforeMCPExecution beforeReadFile afterFileEdit; do
+            beforeShellExecution beforeMCPExecution afterMCPExecution beforeReadFile; do
     cursor_hook "$_h" "$_a" ,
   done
-  cursor_hook stop "$_a" ""
+  cursor_hook beforeTabFileRead "$_a" ""
   printf '  }\n}\n'
 }
 
@@ -259,12 +263,17 @@ build_claude() {
   printf '    "AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET": "%s",\n' "$_secret"
   printf '    "AGENT_HOOK_ENDOR_NAMESPACE": "%s"%s\n' "$_ns" "$env_json"
   printf '  },\n  "hooks": {\n'
+  # Every event endorctl's Claude Code processor handles (its dispatch table).
+  # Stop is an accepted-and-ignored no-op, so it is not registered; SessionEnd
+  # is the real flush point, and ConfigChange enforces File Access edit
+  # policies when Claude Code configuration files change.
   claude_hook  SessionStart       "$_s" ,
   claude_hook  UserPromptSubmit   "$_a" ,
   claude_mhook PreToolUse         "$_a" ,
   claude_mhook PostToolUse        "$_a" ,
   claude_mhook PostToolUseFailure "$_a" ,
-  claude_hook  Stop               "$_a" ""
+  claude_hook  ConfigChange       "$_a" ,
+  claude_hook  SessionEnd         "$_a" ""
   printf '  }\n}\n'
 }
 
