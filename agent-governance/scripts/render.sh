@@ -30,7 +30,13 @@
 # env block / inlined into Cursor's sessionStart and every Codex hook command
 # (Codex has no managed env block). Cache is on by default; monitor-only is just
 # --env ENDOR_AI_AUDIT_NO_BLOCKING=true. --skip-endorctl-update uses an installed
-# endorctl as-is (no per-session version check), installing only when missing.
+# endorctl as-is (no version check at all), installing only when missing.
+#
+# On macOS/Linux the session hook never waits on the download: download_endorctl.sh
+# hands installs and updates to a detached background job, so the session audits
+# with the binary already on disk (or, on a machine that has none yet, skips that
+# one audit). The version check is throttled to once a day - override with
+# --env ENDORCTL_UPDATE_TTL_MINUTES=<minutes>. Windows still fetches inline.
 #
 # Example:
 #   render.sh --agent cursor --api-key K --api-secret S --namespace NS -o hooks.json
@@ -96,7 +102,7 @@ while [ $# -gt 0 ]; do
     --api-key)              api_key="$2"; shift 2 ;;
     --api-secret)           api_secret="$2"; shift 2 ;;
     --namespace)            namespace="$2"; shift 2 ;;
-    -h|--help)              sed -n '2,37p' "$0"; exit 0 ;;
+    -h|--help)              sed -n '2,43p' "$0"; exit 0 ;;
     *)                      die "unknown argument: $1" ;;
   esac
 done

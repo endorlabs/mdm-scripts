@@ -1,31 +1,157 @@
+# Non-blocking endorctl bootstrap, inlined into each agent's session hook.
+#
+# The foreground path never touches the network: it decides whether work is
+# needed, hands it to a detached subshell, and returns. The audit call appended
+# after this snippet then runs against whatever binary is already installed, so
+# a ~300 MB download never holds up a session start. Steady state costs one
+# executable test and one stamp-age test - no metadata request, no binary spawn.
+#
+# A machine with no endorctl yet skips its first audit rather than blocking on
+# the install; the download proceeds in the background and later sessions are
+# audited. Downloads resume across sessions, so a killed background job wastes
+# nothing, and a lock keeps concurrent agents from each pulling their own copy.
 BIN="${HOME}/.endorctl/endorctl"
-skip=
-[ -n "${ENDORCTL_SKIP_UPDATE:-}" ] && [ -x "$BIN" ] && skip=1
-if [ -z "$skip" ]; then
-  case "$(uname -s)" in Darwin) os=macos ;; Linux) os=linux ;; *) exit 1 ;; esac
-  case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) exit 1 ;; esac
-  URL="https://api.endorlabs.com/download/latest/endorctl_${os}_${arch}"
-  ARCH_KEY="ARCH_TYPE_$(echo "${os}_${arch}" | tr '[:lower:]' '[:upper:]')"
-  current=$([ -x "$BIN" ] && "$BIN" --version 2>/dev/null | awk '/version/ {print $NF; exit}')
-  meta=$(curl -fsSL --retry 5 --retry-connrefused --retry-all-errors https://api.endorlabs.com/meta/version)
-  latest=$(echo "$meta" | sed -n 's/.*"ClientVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-  expected_sha=$(echo "$meta" | sed -n "s/.*\"${ARCH_KEY}\"[[:space:]]*:[[:space:]]*\"\([a-f0-9]*\)\".*/\1/p")
-  uptodate=
-  [ -n "$current" ] && { [ -z "$latest" ] || [ "$current" = "$latest" ]; } && uptodate=1
-  if [ -z "$uptodate" ]; then
-    DIR=$(dirname "$BIN")
-    mkdir -p "$DIR"
-    # Sweep leftovers from interrupted past runs. Age-gated so a concurrent
-    # session's in-flight download is never deleted; the name cannot match the
-    # installed binary ("endorctl").
-    find "$DIR" -name 'endorctl-download-*' -mmin +60 -delete 2>/dev/null
-    TMP=$(mktemp "$DIR/endorctl-download-XXXXXX") || exit 1
-    curl -fsSL --retry 5 --retry-connrefused --retry-all-errors -o "$TMP" "$URL" || { rm -f "$TMP"; exit 1; }
-    [ ${#expected_sha} -eq 64 ] || { rm -f "$TMP"; exit 1; }
-    case "$expected_sha" in *[!0-9a-f]*) rm -f "$TMP"; exit 1 ;; esac
-    if command -v sha256sum >/dev/null 2>&1; then sum=$(sha256sum "$TMP" | awk '{print $1}'); else sum=$(shasum -a 256 "$TMP" | awk '{print $1}'); fi
-    [ "$sum" = "$expected_sha" ] || { rm -f "$TMP"; exit 1; }
-    chmod +x "$TMP" || { rm -f "$TMP"; exit 1; }
-    mv "$TMP" "$BIN"
-  fi
+DIR="${HOME}/.endorctl"
+STAMP="$DIR/.update-check"
+TTL="${ENDORCTL_UPDATE_TTL_MINUTES:-1440}"
+case "$TTL" in ''|*[!0-9]*) TTL=1440 ;; esac
+
+need=
+if [ ! -x "$BIN" ]; then
+  need=1
+elif [ -z "${ENDORCTL_SKIP_UPDATE:-}" ]; then
+  # A stamp newer than the TTL means we checked recently, so skip even the
+  # metadata request - a steady-state session start does no network I/O at all.
+  [ -f "$STAMP" ] && [ -z "$(find "$STAMP" -mmin +"$TTL" 2>/dev/null)" ] || need=1
 fi
+
+if [ -n "$need" ]; then
+  (
+    # Detached: the redirections release the hook's stdout pipe, which the agent
+    # waits on, and ignoring HUP is nohup's effect without depending on nohup.
+    # Clear any EXIT trap inherited from the caller (Cursor's wrapper sets one,
+    # and subshell trap inheritance varies by shell). A process-group kill is
+    # survivable regardless - the next session resumes the partial download.
+    trap '' HUP
+    trap - EXIT
+
+    LOCK="$DIR/.update.lock"
+    PART="$DIR/.endorctl.part"
+    SHAF="$DIR/.endorctl.sha"
+    sha256() {
+      if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+      else shasum -a 256 "$1" | awk '{print $1}'; fi
+    }
+    mkdir -p "$DIR" || exit 0
+
+    # One downloader per machine: concurrent agents (Claude, Cursor, Codex, or
+    # several windows) would otherwise each pull their own copy and compete for
+    # the same scarce bandwidth. mkdir is the atomic primitive. Staleness is
+    # judged by the partial's mtime, which curl advances as it writes - a fixed
+    # timeout would kill a live download on a very slow link.
+    if [ -d "$LOCK" ]; then
+      ref="$PART"; [ -f "$PART" ] || ref="$LOCK"
+      [ -n "$(find "$ref" -mmin +30 2>/dev/null)" ] || exit 0
+      mv "$LOCK" "$LOCK.stale.$$" 2>/dev/null && rm -rf "$LOCK.stale.$$"
+    fi
+    mkdir "$LOCK" 2>/dev/null || exit 0
+    # Another process could have broken and retaken the lock between that mv and
+    # this mkdir, so stand down unless the marker is ours - and do it before
+    # arming the trap, or we would delete a lock we do not hold. Should this
+    # still race, the cost is a duplicated download; the digest gate below is
+    # what keeps a bad binary from ever being installed.
+    echo "$$" > "$LOCK/owner" 2>/dev/null || { rmdir "$LOCK" 2>/dev/null; exit 0; }
+    [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$$" ] || exit 0
+    # INT/TERM route through exit rather than cleaning up in place: a signal trap
+    # resumes the script when it returns, which would drop the lock while the
+    # download carried on. This way the EXIT trap does the one cleanup.
+    # A trap does not run until the command in progress returns, so a signal
+    # arriving mid-transfer takes effect when curl drains - correct, since curl
+    # still owns the partial until then. Killing with -9 skips the trap and
+    # leaves the lock behind; the staleness check above is what recovers that.
+    trap 'rm -rf "$LOCK"' EXIT
+    trap 'exit 1' INT TERM
+
+    # Leftovers from the previous mktemp-based scheme, and from any run killed
+    # before it could clean up. Age-gated so nothing in flight is deleted.
+    find "$DIR" -name 'endorctl-download-*' -mmin +60 -delete 2>/dev/null
+
+    case "$(uname -s)" in Darwin) os=macos ;; Linux) os=linux ;; *) exit 0 ;; esac
+    case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) exit 0 ;; esac
+    URL="https://api.endorlabs.com/download/latest/endorctl_${os}_${arch}"
+    ARCH_KEY="ARCH_TYPE_$(echo "${os}_${arch}" | tr '[:lower:]' '[:upper:]')"
+    current=$([ -x "$BIN" ] && "$BIN" --version 2>/dev/null | awk '/version/ {print $NF; exit}')
+    meta=$(curl -fsSL --connect-timeout 5 --max-time 30 https://api.endorlabs.com/meta/version) || exit 0
+    latest=$(echo "$meta" | sed -n 's/.*"ClientVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    expected_sha=$(echo "$meta" | sed -n "s/.*\"${ARCH_KEY}\"[[:space:]]*:[[:space:]]*\"\([a-f0-9]*\)\".*/\1/p")
+    [ -n "$latest" ] || exit 0
+    # Validate the digest up front - a download it could not gate is wasted bandwidth.
+    [ ${#expected_sha} -eq 64 ] || exit 0
+    case "$expected_sha" in *[!0-9a-f]*) exit 0 ;; esac
+
+    if [ -n "$current" ] && [ "$current" = "$latest" ]; then
+      rm -f "$PART" "$SHAF"
+      : > "$STAMP"
+      exit 0
+    fi
+
+    # Pin the partial to the digest it is being built for. endorctl is rebuilt
+    # roughly daily, so a partial spanning two builds could never verify - if the
+    # expected digest moved while it sat on disk, start over rather than resume
+    # into a mismatch that would repeat every session.
+    if [ ! -f "$SHAF" ] || [ "$(cat "$SHAF" 2>/dev/null)" != "$expected_sha" ]; then
+      rm -f "$PART"
+      printf '%s\n' "$expected_sha" > "$SHAF" || exit 0
+    fi
+
+    # A complete-but-uninstalled partial is possible if a previous run was killed
+    # between the download and the swap, so verify before refetching.
+    if [ ! -f "$PART" ] || [ "$(sha256 "$PART")" != "$expected_sha" ]; then
+      # Resume with an explicit closed range, not `curl -C -`. The download
+      # endpoint answers a closed range (bytes=A-B) with a 206, but an open-ended
+      # one (bytes=A-) with the whole file - and the open form is what -C - sends,
+      # so it fails outright with "server doesn't seem to support byte ranges".
+      # Asking for the closed form means knowing the total length up front.
+      total=$(curl -fsSLI --connect-timeout 5 --max-time 30 "$URL" 2>/dev/null \
+        | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ll]ength: *//p' | tail -1)
+      case "$total" in ''|*[!0-9]*) total= ;; esac
+      size=$(wc -c < "$PART" 2>/dev/null | tr -d ' ')
+      case "$size" in ''|*[!0-9]*) size=0 ;; esac
+      # No length means nothing to resume against; a partial at or past full
+      # length that failed its digest is corrupt (two racing downloaders can do
+      # it). Either way the only way forward is to start over.
+      if [ -z "$total" ] || [ "$size" -ge "$total" ]; then rm -f "$PART"; fi
+
+      n=0; ok=
+      while [ "$n" -lt 3 ]; do
+        n=$((n + 1))
+        # Recomputed per attempt: one that dies midway still leaves a correct
+        # prefix on disk, so the next attempt continues from there.
+        size=$(wc -c < "$PART" 2>/dev/null | tr -d ' ')
+        case "$size" in ''|*[!0-9]*) size=0 ;; esac
+        rng=
+        [ -n "$total" ] && [ "$size" -gt 0 ] && rng="-r $size-$((total - 1))"
+        # No --max-time: off the critical path, a genuinely slow link should be
+        # allowed to finish. --speed-limit aborts a stalled transfer instead.
+        # $rng is deliberately unquoted - it is either empty or two words.
+        if curl -fsSL --connect-timeout 10 --speed-limit 10240 --speed-time 60 \
+             $rng "$URL" >> "$PART"; then ok=1; break; fi
+        sleep 5
+      done
+      [ -n "$ok" ] || exit 0
+      # Also catches a server that ignored the range and resent the whole body:
+      # the partial ends up over-long, fails here, and is rebuilt from scratch.
+      [ "$(sha256 "$PART")" = "$expected_sha" ] || { rm -f "$PART" "$SHAF"; exit 0; }
+    fi
+
+    chmod +x "$PART" || exit 0
+    mv "$PART" "$BIN" || exit 0
+    rm -f "$SHAF"
+    : > "$STAMP"
+  ) >/dev/null 2>&1 </dev/null &
+fi
+
+# Nothing to audit with yet: skip this session rather than block on the install.
+# Exiting 0 (not 1) keeps the hook successful and stops the appended audit call
+# from running against a binary that is not there.
+[ -x "$BIN" ] || exit 0
