@@ -2,7 +2,7 @@
 # foreground decides what is needed and hands it to a detached background job,
 # so a ~300 MB download cannot hold up a session start. A machine with no
 # endorctl yet skips that one audit rather than waiting for the install.
-# Rationale for the non-obvious parts: docs/design/2026-07-30-nonblocking-endorctl-bootstrap.md
+# Comments are stripped when render.sh inlines this, so they cost nothing here.
 BIN="${HOME}/.endorctl/endorctl"
 DIR="${HOME}/.endorctl"
 STAMP="$DIR/.update-check"

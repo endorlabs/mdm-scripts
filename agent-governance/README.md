@@ -156,7 +156,7 @@ scripts/
   runner.sh               MDM runner: clone → render → swap-if-changed
 examples/                 checked-in samples (demo creds, placeholder UUIDs)
 tests/run-tests.sh        test suite (offline by default)
-docs/                     deployment runbooks, design notes, the support matrix
+docs/                     deployment runbooks + the support matrix
 ```
 
 ## Tests

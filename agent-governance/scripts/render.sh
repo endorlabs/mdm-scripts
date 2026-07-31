@@ -120,7 +120,7 @@ esac
 # The bootstrap is embedded in every session hook (and base64'd into the Windows
 # form), so its comments and blank lines are dropped on the way in - they would
 # otherwise bloat every generated profile. Only whole-line comments are removed;
-# read the script itself, or docs/design/, for why it does what it does.
+# read scripts/download_endorctl.sh for why it does what it does.
 strip_src() { sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$1"; }
 if [ "$target_os" = windows ]; then
   command -v iconv >/dev/null || die "iconv is required for --target-os windows"
