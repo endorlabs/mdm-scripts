@@ -66,6 +66,12 @@ Five defects in the current script:
   and it is less acutely broken because it already has timeouts.
 - **No explicit marker for un-audited sessions** for now. Absence of events from
   a device is the admin's signal. Revisit later.
+- **Keep the bootstrap's comments short, and strip them at render time.** The
+  script is embedded in every session hook and base64'd into the Windows form,
+  so its commentary lands in every generated profile. `render.sh` drops
+  whole-line comments and blank lines when inlining (`strip_src`), which took
+  the Claude `SessionStart` command from 7,879 to 3,796 bytes. The longer
+  rationale lives in this document rather than in the script.
 
 ## Target design
 
@@ -132,6 +138,20 @@ Today's logic, hardened:
   range and resends the whole body, which would leave the partial over-long.
 - **Stamp on success only** (`$DIR/.update-check`), so a failed check retries on
   the next session rather than being suppressed for the full TTL.
+- **Signals route through `exit`.** `trap 'exit 1' INT TERM` alongside
+  `trap 'rm -rf "$LOCK"' EXIT`, rather than cleaning up in the signal handler: a
+  signal trap *resumes* the script when it returns, which would drop the lock
+  while the download carried on. Note also that a trap does not fire until the
+  command in progress returns, so a signal arriving mid-transfer takes effect
+  when curl drains — correct, since curl still owns the partial until then.
+  A `kill -9` skips the trap entirely and leaks the lock; the staleness check is
+  what recovers that.
+- **`exit 0`, never `exit 1`, when there is nothing to audit with.** The session
+  hook is composed as `bootstrap \n audit`, so exiting stops the audit call from
+  running against a missing binary, and exiting *zero* keeps the hook successful
+  so the agent shows the developer no error. Verified to behave identically in
+  all three of `render.sh`'s compositions, including Cursor's, where the
+  wrapper's `EXIT` trap still removes its stdin temp file.
 
 Verify SHA → `chmod +x` → atomic `mv` is unchanged from today.
 

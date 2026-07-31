@@ -117,12 +117,17 @@ case "$target_os" in
   macos|linux|windows) ;;
   *) die "unknown --target-os: $target_os (macos|linux|windows)" ;;
 esac
+# The bootstrap is embedded in every session hook (and base64'd into the Windows
+# form), so its comments and blank lines are dropped on the way in - they would
+# otherwise bloat every generated profile. Only whole-line comments are removed;
+# read the script itself, or docs/design/, for why it does what it does.
+strip_src() { sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$1"; }
 if [ "$target_os" = windows ]; then
   command -v iconv >/dev/null || die "iconv is required for --target-os windows"
   command -v base64 >/dev/null || die "base64 is required for --target-os windows"
-  boot=$(cat "$SCRIPT_DIR/download_endorctl.ps1")
+  boot=$(strip_src "$SCRIPT_DIR/download_endorctl.ps1")
 else
-  boot=$(cat "$SCRIPT_DIR/download_endorctl.sh")
+  boot=$(strip_src "$SCRIPT_DIR/download_endorctl.sh")
 fi
 
 # Prompt only when interactive; unattended runs must supply creds up front.

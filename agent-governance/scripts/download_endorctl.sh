@@ -1,15 +1,8 @@
-# Non-blocking endorctl bootstrap, inlined into each agent's session hook.
-#
-# The foreground path never touches the network: it decides whether work is
-# needed, hands it to a detached subshell, and returns. The audit call appended
-# after this snippet then runs against whatever binary is already installed, so
-# a ~300 MB download never holds up a session start. Steady state costs one
-# executable test and one stamp-age test - no metadata request, no binary spawn.
-#
-# A machine with no endorctl yet skips its first audit rather than blocking on
-# the install; the download proceeds in the background and later sessions are
-# audited. Downloads resume across sessions, so a killed background job wastes
-# nothing, and a lock keeps concurrent agents from each pulling their own copy.
+# endorctl bootstrap, inlined into each agent's session hook. Never blocks: the
+# foreground decides what is needed and hands it to a detached background job,
+# so a ~300 MB download cannot hold up a session start. A machine with no
+# endorctl yet skips that one audit rather than waiting for the install.
+# Rationale for the non-obvious parts: docs/design/2026-07-30-nonblocking-endorctl-bootstrap.md
 BIN="${HOME}/.endorctl/endorctl"
 DIR="${HOME}/.endorctl"
 STAMP="$DIR/.update-check"
@@ -20,18 +13,14 @@ need=
 if [ ! -x "$BIN" ]; then
   need=1
 elif [ -z "${ENDORCTL_SKIP_UPDATE:-}" ]; then
-  # A stamp newer than the TTL means we checked recently, so skip even the
-  # metadata request - a steady-state session start does no network I/O at all.
+  # A stamp newer than the TTL means no network I/O at all this session.
   [ -f "$STAMP" ] && [ -z "$(find "$STAMP" -mmin +"$TTL" 2>/dev/null)" ] || need=1
 fi
 
 if [ -n "$need" ]; then
   (
-    # Detached: the redirections release the hook's stdout pipe, which the agent
-    # waits on, and ignoring HUP is nohup's effect without depending on nohup.
-    # Clear any EXIT trap inherited from the caller (Cursor's wrapper sets one,
-    # and subshell trap inheritance varies by shell). A process-group kill is
-    # survivable regardless - the next session resumes the partial download.
+    # The redirections release the hook's stdout pipe, which the agent waits on.
+    # Clear any EXIT trap inherited from the caller (Cursor's wrapper sets one).
     trap '' HUP
     trap - EXIT
 
@@ -44,36 +33,22 @@ if [ -n "$need" ]; then
     }
     mkdir -p "$DIR" || exit 0
 
-    # One downloader per machine: concurrent agents (Claude, Cursor, Codex, or
-    # several windows) would otherwise each pull their own copy and compete for
-    # the same scarce bandwidth. mkdir is the atomic primitive. Staleness is
-    # judged by the partial's mtime, which curl advances as it writes - a fixed
-    # timeout would kill a live download on a very slow link.
+    # One downloader per machine. Staleness is judged by the partial's mtime,
+    # which curl advances as it writes, so a live slow download is never broken.
     if [ -d "$LOCK" ]; then
       ref="$PART"; [ -f "$PART" ] || ref="$LOCK"
       [ -n "$(find "$ref" -mmin +30 2>/dev/null)" ] || exit 0
       mv "$LOCK" "$LOCK.stale.$$" 2>/dev/null && rm -rf "$LOCK.stale.$$"
     fi
     mkdir "$LOCK" 2>/dev/null || exit 0
-    # Another process could have broken and retaken the lock between that mv and
-    # this mkdir, so stand down unless the marker is ours - and do it before
-    # arming the trap, or we would delete a lock we do not hold. Should this
-    # still race, the cost is a duplicated download; the digest gate below is
-    # what keeps a bad binary from ever being installed.
+    # Stand down unless the lock is ours, before arming the trap that removes it.
     echo "$$" > "$LOCK/owner" 2>/dev/null || { rmdir "$LOCK" 2>/dev/null; exit 0; }
     [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$$" ] || exit 0
-    # INT/TERM route through exit rather than cleaning up in place: a signal trap
-    # resumes the script when it returns, which would drop the lock while the
-    # download carried on. This way the EXIT trap does the one cleanup.
-    # A trap does not run until the command in progress returns, so a signal
-    # arriving mid-transfer takes effect when curl drains - correct, since curl
-    # still owns the partial until then. Killing with -9 skips the trap and
-    # leaves the lock behind; the staleness check above is what recovers that.
+    # INT/TERM route through exit so the EXIT trap does the one cleanup.
     trap 'rm -rf "$LOCK"' EXIT
     trap 'exit 1' INT TERM
 
-    # Leftovers from the previous mktemp-based scheme, and from any run killed
-    # before it could clean up. Age-gated so nothing in flight is deleted.
+    # Leftovers from the previous mktemp-based scheme, and from killed runs.
     find "$DIR" -name 'endorctl-download-*' -mmin +60 -delete 2>/dev/null
 
     case "$(uname -s)" in Darwin) os=macos ;; Linux) os=linux ;; *) exit 0 ;; esac
@@ -85,7 +60,6 @@ if [ -n "$need" ]; then
     latest=$(echo "$meta" | sed -n 's/.*"ClientVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     expected_sha=$(echo "$meta" | sed -n "s/.*\"${ARCH_KEY}\"[[:space:]]*:[[:space:]]*\"\([a-f0-9]*\)\".*/\1/p")
     [ -n "$latest" ] || exit 0
-    # Validate the digest up front - a download it could not gate is wasted bandwidth.
     [ ${#expected_sha} -eq 64 ] || exit 0
     case "$expected_sha" in *[!0-9a-f]*) exit 0 ;; esac
 
@@ -95,52 +69,41 @@ if [ -n "$need" ]; then
       exit 0
     fi
 
-    # Pin the partial to the digest it is being built for. endorctl is rebuilt
-    # roughly daily, so a partial spanning two builds could never verify - if the
-    # expected digest moved while it sat on disk, start over rather than resume
-    # into a mismatch that would repeat every session.
+    # Pin the partial to the digest it is being built for: endorctl is rebuilt
+    # roughly daily, and a partial spanning two builds could never verify.
     if [ ! -f "$SHAF" ] || [ "$(cat "$SHAF" 2>/dev/null)" != "$expected_sha" ]; then
       rm -f "$PART"
       printf '%s\n' "$expected_sha" > "$SHAF" || exit 0
     fi
 
-    # A complete-but-uninstalled partial is possible if a previous run was killed
-    # between the download and the swap, so verify before refetching.
     if [ ! -f "$PART" ] || [ "$(sha256 "$PART")" != "$expected_sha" ]; then
-      # Resume with an explicit closed range, not `curl -C -`. The download
-      # endpoint answers a closed range (bytes=A-B) with a 206, but an open-ended
-      # one (bytes=A-) with the whole file - and the open form is what -C - sends,
-      # so it fails outright with "server doesn't seem to support byte ranges".
-      # Asking for the closed form means knowing the total length up front.
+      # Resume with an explicit closed range, not `curl -C -`: this endpoint
+      # answers a closed bytes=A-B with a 206 but an open-ended bytes=A- with the
+      # whole file, and the open form is what -C - sends. Hence the HEAD probe.
       total=$(curl -fsSLI --connect-timeout 5 --max-time 30 "$URL" 2>/dev/null \
         | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ll]ength: *//p' | tail -1)
       case "$total" in ''|*[!0-9]*) total= ;; esac
       size=$(wc -c < "$PART" 2>/dev/null | tr -d ' ')
       case "$size" in ''|*[!0-9]*) size=0 ;; esac
-      # No length means nothing to resume against; a partial at or past full
-      # length that failed its digest is corrupt (two racing downloaders can do
-      # it). Either way the only way forward is to start over.
+      # No length to resume against, or a full-length partial that failed its
+      # digest (racing downloaders can make one): either way, start over.
       if [ -z "$total" ] || [ "$size" -ge "$total" ]; then rm -f "$PART"; fi
 
       n=0; ok=
       while [ "$n" -lt 3 ]; do
         n=$((n + 1))
-        # Recomputed per attempt: one that dies midway still leaves a correct
-        # prefix on disk, so the next attempt continues from there.
+        # Recomputed per attempt: one that dies midway leaves a correct prefix.
         size=$(wc -c < "$PART" 2>/dev/null | tr -d ' ')
         case "$size" in ''|*[!0-9]*) size=0 ;; esac
         rng=
         [ -n "$total" ] && [ "$size" -gt 0 ] && rng="-r $size-$((total - 1))"
-        # No --max-time: off the critical path, a genuinely slow link should be
-        # allowed to finish. --speed-limit aborts a stalled transfer instead.
+        # No --max-time: off the critical path, a slow link should finish.
         # $rng is deliberately unquoted - it is either empty or two words.
         if curl -fsSL --connect-timeout 10 --speed-limit 10240 --speed-time 60 \
              $rng "$URL" >> "$PART"; then ok=1; break; fi
         sleep 5
       done
       [ -n "$ok" ] || exit 0
-      # Also catches a server that ignored the range and resent the whole body:
-      # the partial ends up over-long, fails here, and is rebuilt from scratch.
       [ "$(sha256 "$PART")" = "$expected_sha" ] || { rm -f "$PART" "$SHAF"; exit 0; }
     fi
 
@@ -151,7 +114,6 @@ if [ -n "$need" ]; then
   ) >/dev/null 2>&1 </dev/null &
 fi
 
-# Nothing to audit with yet: skip this session rather than block on the install.
-# Exiting 0 (not 1) keeps the hook successful and stops the appended audit call
-# from running against a binary that is not there.
+# Nothing to audit with yet. Exiting 0 (not 1) keeps the hook successful and
+# stops the appended audit call from running against a missing binary.
 [ -x "$BIN" ] || exit 0
