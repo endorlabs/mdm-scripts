@@ -66,6 +66,10 @@ NPM_REGISTRY_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/npm/"
 NPM_REGISTRY_HOST="${FQDN_HOST}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/npm/"
 PYPI_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/pypi/simple/"
 MAVEN_REGISTRY_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/maven/"
+# VS Code carries its credential as a URL path segment (_ak/<token>) rather than
+# in userinfo, so only the base is known here; the token is appended at install
+# time once the attribution label exists.
+VSCODE_GALLERY_BASE="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/vscode"
 API_SECRET_B64=$(printf '%s' "${ENDOR_API_SECRET}" | base64 | tr -d '\n')
 
 # ─── Output directory ─────────────────────────────────────────────────────────
@@ -85,7 +89,8 @@ substitute() {
     -e "s|{{NPM_REGISTRY_HOST}}|${NPM_REGISTRY_HOST}|g" \
     -e "s|{{PYPI_URL}}|${PYPI_URL}|g" \
     -e "s|{{TRUSTED_HOST}}|${TRUSTED_HOST}|g" \
-    -e "s|{{MAVEN_REGISTRY_URL}}|${MAVEN_REGISTRY_URL}|g"
+    -e "s|{{MAVEN_REGISTRY_URL}}|${MAVEN_REGISTRY_URL}|g" \
+    -e "s|{{VSCODE_GALLERY_BASE}}|${VSCODE_GALLERY_BASE}|g"
 }
 
 # inline_common
@@ -121,6 +126,7 @@ emit_all_blocks() {
   emit_block_assignment "UV_BLOCK"            "$SHARED_BLOCKS_DIR/uvtoml.txt"
   emit_block_assignment "GO_BLOCK"            "$SHARED_BLOCKS_DIR/goenv.txt"
   emit_block_assignment "MAVEN_BLOCK"         "$SHARED_BLOCKS_DIR/mavensettings.txt"
+  emit_block_assignment "VSCODE_GALLERY_BLOCK" "$SHARED_BLOCKS_DIR/vscodegallery.txt"
   echo "# ─────────────────────────────────────────────────────────────────────────────"
   echo ""
 }
@@ -129,11 +135,13 @@ arg_parsing_block() {
   cat << 'ARGBLOCK'
 # ── Argument parsing ──────────────────────────────────────────────────────────
 DRY_RUN=0
+VSCODE_WATCHER=1
 _ENDOR_WARNED=0
 for _arg in "$@"; do
   case "$_arg" in
     --dry-run) DRY_RUN=1 ;;
-    *) echo "[endor] Unknown argument: $_arg  (supported: --dry-run)" >&2; exit 1 ;;
+    --no-vscode-watcher) VSCODE_WATCHER=0 ;;
+    *) echo "[endor] Unknown argument: $_arg  (supported: --dry-run, --no-vscode-watcher)" >&2; exit 1 ;;
   esac
 done
 unset _arg
@@ -179,6 +187,13 @@ ENDOR_AUTH_B64="$(printf '%s:%s' "$ENDOR_ATTR_USER" "$ENDOR_API_SECRET" | endor_
 ENDOR_PYPI_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):$(endor_urlenc_b64 "$ENDOR_API_SECRET")@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/pypi/simple/"
 ENDOR_GO_PROXY_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):$(endor_urlenc_b64 "$ENDOR_API_SECRET")@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/go/,direct"
 
+# VS Code cannot send Basic auth for the gallery and cannot expand env vars in
+# product.json, so the credential travels as a base64url path segment instead.
+# Same attributed username as every other ecosystem — the firewall runs
+# applyUserAttribution after resolving the _ak path token.
+ENDOR_VSCODE_TOKEN="$(printf '%s:%s' "$ENDOR_ATTR_USER" "$ENDOR_API_SECRET" | endor_b64url)"
+ENDOR_VSCODE_GALLERY_URL="{{VSCODE_GALLERY_BASE}}/_ak/${ENDOR_VSCODE_TOKEN}"
+
 # No exports — every consumer is same-process template code inlined below.
 
 echo "[endor] user attribution → ${ENDOR_ATTR_LABEL}"
@@ -207,22 +222,114 @@ script_header() {
   echo ""
 }
 
-# build_script <template> <output> <description>
+# ── VS Code re-apply watcher payload ──────────────────────────────────────────
+# VS Code replaces product.json on every update, so a watcher re-applies the
+# patch. The watcher needs a script at a stable path; copying "$0" is not an
+# option because MDM tools routinely pipe scripts to bash or exec them from an
+# already-unlinked temp file. Instead the repatch script is generated here, then
+# base64'd into the installer, which decodes it next to the sidecar state.
+#
+# It deliberately re-uses neither credentials_block nor user_detection_block: the
+# watcher can fire from launchd at boot with no console user, and detect_console_user
+# exits 1 in that case. The already-rendered URL and home are read back from the
+# 0600 root-owned sidecar state instead, so nothing has to be recomputed.
+
+# repatch_prelude — stands in for arg parsing, user detection and credentials.
+repatch_prelude() {
+  cat << 'REPATCHBLOCK'
+DRY_RUN=0
+_ENDOR_WARNED=0
+VSCODE_WATCHER=0
+_ENDOR_VSCODE_MODE=repatch
+
+ENDOR_VSCODE_GALLERY_URL="$(vscode_state_get gallery_url 2>/dev/null || true)"
+USER_HOME="$(vscode_state_get user_home 2>/dev/null || true)"
+
+if [[ -z "$ENDOR_VSCODE_GALLERY_URL" ]]; then
+  echo "[endor-vscode] ERROR: no gallery_url in sidecar state — cannot re-apply." >&2
+  echo "[endor-vscode]        Re-run endor-vscode.sh (or endor-all.sh) to reinitialise." >&2
+  exit 1
+fi
+REPATCHBLOCK
+}
+
+# build_repatch_script <output>
+build_repatch_script() {
+  local output="$1"
+  {
+    echo "#!/usr/bin/env bash"
+    echo "# MDM-deployable: re-applies the Endor VS Code gallery patch to product.json."
+    echo "# Installed by endor-vscode.sh and run by launchd/systemd/cron after VS Code"
+    echo "# updates replace product.json. Not intended to be run by hand."
+    echo "# Generated for namespace=${ENDOR_NAMESPACE} fqdn=${FQDN}."
+    echo "# Do not edit — regenerate with generate.sh."
+    echo ""
+    echo "set -euo pipefail"
+    echo ""
+    echo "# ── Common functions (inlined from lib/common.sh) ────────────────────────────"
+    inline_common
+    echo "# ─────────────────────────────────────────────────────────────────────────────"
+    echo ""
+    repatch_prelude
+    echo ""
+    emit_block_assignment "VSCODE_GALLERY_BLOCK" "$SHARED_BLOCKS_DIR/vscodegallery.txt"
+    echo ""
+    substitute < "$TMPL_DIR/vscode.sh"
+    echo ""
+    script_footer
+  } > "$output"
+
+  chmod 700 "$output"
+}
+
+# emit_repatch_payload <repatch_script>
+# Emits the base64 payload assignment the installer decodes to a stable path.
+emit_repatch_payload() {
+  echo "# ── VS Code update-watcher payload (endor-vscode-repatch.sh) ────────────────"
+  echo "_ENDOR_VSCODE_REPATCH_B64=\$(cat <<'ENDOR_VSCODE_REPATCH_B64'"
+  endor_b64_file "$1"
+  echo "ENDOR_VSCODE_REPATCH_B64"
+  echo ")"
+  echo "# ─────────────────────────────────────────────────────────────────────────────"
+  echo ""
+}
+
+# endor_b64_file <file> — base64, no line wrapping (GNU wraps at 76 by default).
+endor_b64_file() {
+  if base64 --help 2>&1 | grep -q -- '-w'; then
+    base64 -w0 < "$1"
+  else
+    base64 < "$1" | tr -d '\n'
+  fi
+  echo ""
+}
+
+# build_script <template> <output> <description> [extra_emitter] [no_envsh]
+# <extra_emitter> runs after the block assignments, before the ecosystem template
+#   — used to inject the VS Code watcher payload.
+# <no_envsh> set to 1 skips the env.sh / shell-rc setup. VS Code reads no ENDOR_*
+#   env vars (its credential is baked into product.json), so writing env.sh and
+#   sourcing it from the user's .zshrc would be a side effect with no purpose.
 build_script() {
   local template="$1"
   local output="$2"
   local description="$3"
+  local extra_emitter="${4:-}"
+  local no_envsh="${5:-0}"
 
   {
     script_header "$output" "$description"
     credentials_block
     echo ""
     emit_all_blocks
-    echo "# ════════════════════════════════════════════════════════════════════════════"
-    echo "# Env setup"
-    echo "# ════════════════════════════════════════════════════════════════════════════"
-    substitute < "$TMPL_DIR/envsh.sh"
-    echo ""
+    [[ -n "$extra_emitter" ]] && "$extra_emitter"
+    if [[ "$no_envsh" != "1" ]]; then
+      echo "# ════════════════════════════════════════════════════════════════════════════"
+      echo "# Env setup"
+      echo "# ════════════════════════════════════════════════════════════════════════════"
+      substitute < "$TMPL_DIR/envsh.sh"
+      echo ""
+    fi
     substitute < "$template"
     echo ""
     script_footer
@@ -265,10 +372,28 @@ build_script \
   "$OUT_DIR/endor-maven.sh" \
   "Configures Maven (~/.m2/settings.xml) for Endor Package Firewall."
 
+# The repatch script must exist before anything that embeds it.
+build_repatch_script "$OUT_DIR/endor-vscode-repatch.sh"
+REPATCH_SCRIPT="$OUT_DIR/endor-vscode-repatch.sh"
+emit_vscode_repatch_payload() { emit_repatch_payload "$REPATCH_SCRIPT"; }
+
+build_script \
+  "$TMPL_DIR/vscode.sh" \
+  "$OUT_DIR/endor-vscode.sh" \
+  "Configures VS Code (product.json extension gallery) for Endor Package Firewall." \
+  emit_vscode_repatch_payload \
+  1
+
 # ─── Generate remove script ───────────────────────────────────────────────────
 build_remove_script "$OUT_DIR/endor-remove.sh"
 
 # ─── Generate combined all.sh ─────────────────────────────────────────────────
+# VS Code is deliberately NOT part of endor-all. It is the only ecosystem that
+# writes inside an application bundle (which breaks codesign verification and, on
+# macOS Ventura+, needs the App Management TCC grant) and the only one that
+# installs a persistent daemon. Folding it in here would silently widen the blast
+# radius of every existing endor-all deployment on the next regeneration.
+# Deploy endor-vscode.sh alongside endor-all.sh instead — see the READMEs.
 {
   script_header "$OUT_DIR/endor-all.sh" \
     "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry · go · maven"
@@ -316,10 +441,23 @@ printf "   %-24s  %s\n" "endor-python.sh" "pip · uv · poetry"
 printf "   %-24s  %s\n" "endor-go.sh"     "go modules (GOPROXY)"
 printf "   %-24s  %s\n" "endor-maven.sh"  "maven (~/.m2/settings.xml)"
 printf "   %-24s  %s\n" "endor-all.sh"    "all of the above (single-script deploy)"
+printf "   %-24s  %s\n" "endor-vscode.sh" "VS Code + Insiders extension gallery (deploy alongside endor-all.sh)"
 printf "   %-24s  %s\n" "endor-remove.sh" "offboarding — strips all Endor config"
 echo ""
+printf "   %-24s  %s\n" "endor-vscode-repatch.sh" "installed by endor-vscode.sh; shown so you can read it"
+echo ""
 echo "   All scripts accept --dry-run to preview changes without writing anything."
+echo "   endor-vscode.sh also accepts --no-vscode-watcher (not recommended — see below)."
 echo "   Upload to your MDM tool. Each script is self-contained and idempotent."
+echo ""
+echo "   ⚠  VS Code prerequisites — endor-vscode.sh is NOT included in endor-all.sh:"
+echo "      · macOS Ventura+ requires the App Management (SystemPolicyAppBundles) TCC"
+echo "        grant for your MDM agent, via a PPPC profile. root is NOT exempt."
+echo "      · The gallery token lands in world-readable product.json (0644) — VS Code"
+echo "        offers no indirection. Use a dedicated, separately revocable API key."
+echo "      · Keep *.vsassets.io / *.vscode-unpkg.net reachable: extension downloads"
+echo "        still come from Microsoft's CDN by design."
+echo "      · codesign --verify will report the bundle as modified. Expected. Do not re-sign."
 echo ""
 echo "   To customise: edit shared/blocks/*.txt (shared config content)"
 echo "                 or shared/blocks/envsh.txt (bash env var block)"
