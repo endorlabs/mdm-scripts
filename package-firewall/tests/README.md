@@ -42,6 +42,7 @@ byte-level fidelity wrong:
 | `bash/harness.sh` | paths, assertion helpers, the stripped-lib loader, fixture installs |
 | `bash/json-primitives.sh` | the awk JSON editing primitives in isolation |
 | `bash/lib.sh` | `vscode_*` lifecycle: discovery, state machine, both writers, failure modes |
+| `bash/watcher.sh` | launchd plist, systemd units, cron fallback, sidecar telemetry |
 
 ## The fixture, and why not a real install
 

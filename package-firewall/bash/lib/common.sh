@@ -27,12 +27,14 @@
 #   endor_b64url / endor_b64d                  — base64url encode (stdin) / decode
 #   endor_json_*                               — dependency-free depth-1 JSON editors
 #   vscode_install_paths / vscode_managed_state / vscode_patch / vscode_unpatch
+#   vscode_install_watcher / vscode_remove_watcher
 #
 # NOTE for anyone adding to this file: generate.sh inlines it via
 #   grep -v '^# ' lib/common.sh | sed '/^[[:space:]]*$/d'
 # so every column-0 comment and every blank line is stripped from the generated
 # scripts. Nothing here may depend on a blank line or a '# '-prefixed line *inside*
-# a heredoc — use printf for any block whose content matters.
+# a heredoc — which is why the launchd plist and systemd units below are emitted
+# with printf rather than heredocs.
 
 # Sentinel markers — identical across all config files so re-runs and remove work reliably
 ENDOR_BLOCK_START="# ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ====="
@@ -49,6 +51,15 @@ ENDOR_XML_BLOCK_END="<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->"
 # above: changing it orphans the marker on every already-deployed machine, and the
 # marker is the only record of the original extensionsGallery. Do not change it.
 ENDOR_JSON_MARKER_KEY="_endorPackageFirewall"
+
+# launchd / systemd identifiers for the product.json re-apply watcher.
+# The three directories are overridable purely so the generated plist and unit
+# files can be inspected and linted without root; deployments use the defaults.
+ENDOR_VSCODE_LABEL="com.endorlabs.pkgfirewall.vscode"
+ENDOR_VSCODE_LOG="${ENDOR_VSCODE_LOG:-/var/log/endor-vscode-firewall.log}"
+ENDOR_VSCODE_LAUNCHD_DIR="${ENDOR_VSCODE_LAUNCHD_DIR:-/Library/LaunchDaemons}"
+ENDOR_VSCODE_SYSTEMD_DIR="${ENDOR_VSCODE_SYSTEMD_DIR:-/etc/systemd/system}"
+ENDOR_VSCODE_CRON_DIR="${ENDOR_VSCODE_CRON_DIR:-/etc/cron.hourly}"
 
 # ── User attribution helpers ──────────────────────────────────────────────────
 # Encode <console-user>@<machine> into the Basic-auth username. The firewall
@@ -1170,3 +1181,238 @@ vscode_unpatch() {
   return 0
 }
 
+# ── product.json re-apply watcher ─────────────────────────────────────────────
+# VS Code replaces product.json wholesale on every update — monthly for stable,
+# nightly for Insiders — on a schedule uncorrelated with MDM check-in. Waiting for
+# the next check-in would leave the fleet unfiltered for part of every day once
+# Insiders is in scope, so a watcher is the default rather than an extra.
+#
+# The race is not fully closable: if the user relaunches VS Code before the
+# watcher fires, that session talks to the public marketplace. Both platforms
+# therefore watch the file *and* its parent directory (the updater swaps the whole
+# directory, so a file-only vnode watch goes stale) and keep an hourly trigger as
+# the real backstop. repatch_count in the state file makes the races countable
+# instead of invisible.
+
+# endor_vscode_state_dir — sidecar dir for watcher telemetry and the repatch
+# payload. Never inside the app bundle. Overridable for the same reason as the
+# watcher directories above: so it can be exercised without root.
+endor_vscode_state_dir() {
+  if [[ -n "${ENDOR_VSCODE_STATE_DIR:-}" ]]; then
+    printf '%s' "$ENDOR_VSCODE_STATE_DIR"
+  elif [[ "$(uname -s)" == "Darwin" ]]; then
+    printf '%s' "/Library/Application Support/Endor/package-firewall/vscode"
+  else
+    printf '%s' "/var/lib/endor/package-firewall/vscode"
+  fi
+}
+
+# vscode_state_set <key> <value> — KEY=VALUE sidecar, deliberately not JSON so the
+# removal path needs no parser.
+vscode_state_set() {
+  local dir key="$1" value="$2" f tmp
+  dir=$(endor_vscode_state_dir); f="$dir/state"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  tmp=$(mktemp)
+  [[ -f "$f" ]] && grep -v "^${key}=" "$f" > "$tmp" 2>/dev/null
+  printf '%s=%s\n' "$key" "$value" >> "$tmp"
+  mv "$tmp" "$f" 2>/dev/null && chmod 600 "$f" 2>/dev/null
+  return 0
+}
+
+# vscode_state_get <key>
+vscode_state_get() {
+  local f
+  f="$(endor_vscode_state_dir)/state"
+  [[ -f "$f" ]] || return 1
+  sed -n "s/^${1}=//p" "$f" | tail -1
+}
+
+# vscode_state_report — surface watcher activity into MDM logs, so an admin can
+# see that updates really are clobbering product.json on this fleet.
+vscode_state_report() {
+  local n last
+  n=$(vscode_state_get repatch_count 2>/dev/null) || n=""
+  last=$(vscode_state_get last_repatch 2>/dev/null) || last=""
+  if [[ -n "$n" && "$n" != "0" ]]; then
+    echo "[endor-vscode]       watcher has re-applied the patch ${n}× (last: ${last:-unknown})"
+  fi
+  return 0
+}
+
+# vscode_install_watcher <repatch_script> <pathsfile>
+vscode_install_watcher() {
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      echo "[dry-run]   watcher: ${ENDOR_VSCODE_LAUNCHD_DIR}/${ENDOR_VSCODE_LABEL}.plist (WatchPaths + hourly)"
+    else
+      echo "[dry-run]   watcher: systemd endor-vscode-firewall.{service,path,timer}, or /etc/cron.hourly fallback"
+    fi
+    echo "[dry-run]   repatch: $1"
+    return 0
+  fi
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    _vscode_watcher_launchd "$1" "$2"
+  else
+    _vscode_watcher_linux "$1" "$2"
+  fi
+}
+
+# _vscode_watcher_launchd <repatch_script> <pathsfile>
+# Built with printf, not a heredoc: inline_common() strips blank and '# '-prefixed
+# lines, which would silently mangle heredoc content.
+_vscode_watcher_launchd() {
+  local script="$1" pathsfile="$2" plist p dir
+  plist="${ENDOR_VSCODE_LAUNCHD_DIR}/${ENDOR_VSCODE_LABEL}.plist"
+
+  {
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+    printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+    printf '%s\n' '<plist version="1.0">'
+    printf '%s\n' '<dict>'
+    printf '\t<key>Label</key><string>%s</string>\n' "$ENDOR_VSCODE_LABEL"
+    printf '%s\n' '	<key>ProgramArguments</key>'
+    printf '%s\n' '	<array>'
+    printf '\t\t<string>/bin/bash</string>\n'
+    printf '\t\t<string>%s</string>\n' "$script"
+    printf '%s\n' '	</array>'
+    printf '%s\n' '	<key>RunAtLoad</key><true/>'
+    printf '%s\n' '	<key>StartInterval</key><integer>3600</integer>'
+    printf '%s\n' '	<key>WatchPaths</key>'
+    printf '%s\n' '	<array>'
+    while IFS= read -r p; do
+      [[ -n "$p" ]] || continue
+      dir=$(dirname "$p")
+      printf '\t\t<string>%s</string>\n' "$p"
+      printf '\t\t<string>%s</string>\n' "$dir"
+    done < "$pathsfile"
+    printf '%s\n' '	</array>'
+    printf '\t<key>StandardOutPath</key><string>%s</string>\n' "$ENDOR_VSCODE_LOG"
+    printf '\t<key>StandardErrorPath</key><string>%s</string>\n' "$ENDOR_VSCODE_LOG"
+    printf '%s\n' '</dict>'
+    printf '%s\n' '</plist>'
+  } > "$plist"
+
+  chown root:wheel "$plist" 2>/dev/null
+  chmod 644 "$plist" 2>/dev/null
+
+  launchctl bootout "system/${ENDOR_VSCODE_LABEL}" 2>/dev/null || true
+  if ! launchctl bootstrap system "$plist" 2>/dev/null; then
+    launchctl load -w "$plist" 2>/dev/null || {
+      echo "[endor-vscode] WARNING: could not load the update watcher ($plist)." >&2
+      echo "[endor-vscode]          The patch is in place but will be lost on the next VS Code update." >&2
+      _ENDOR_WARNED=1
+      return 1
+    }
+  fi
+  echo "[endor-vscode]       update watcher installed → $plist"
+  return 0
+}
+
+# _vscode_watcher_linux <repatch_script> <pathsfile>
+# systemd .path units track vnodes just like launchd WatchPaths, so both the file
+# and its parent directory are watched; the .timer is the backstop. Without
+# systemd, run-parts drives an hourly cron job — the filename must carry no
+# extension or run-parts skips it.
+_vscode_watcher_linux() {
+  local script="$1" pathsfile="$2" p unit
+  if command -v systemctl &>/dev/null && [[ -d "$ENDOR_VSCODE_SYSTEMD_DIR" ]]; then
+    {
+      printf '%s\n' '[Unit]'
+      printf '%s\n' 'Description=Re-apply Endor Package Firewall settings to VS Code product.json'
+      printf '%s\n' '[Service]'
+      printf '%s\n' 'Type=oneshot'
+      printf 'ExecStart=/bin/bash %s\n' "$script"
+      printf 'StandardOutput=append:%s\n' "$ENDOR_VSCODE_LOG"
+      printf 'StandardError=append:%s\n' "$ENDOR_VSCODE_LOG"
+    } > "${ENDOR_VSCODE_SYSTEMD_DIR}/endor-vscode-firewall.service"
+    {
+      printf '%s\n' '[Unit]'
+      printf '%s\n' 'Description=Watch VS Code product.json for updater overwrites'
+      printf '%s\n' '[Path]'
+      while IFS= read -r p; do
+        [[ -n "$p" ]] || continue
+        printf 'PathModified=%s\n' "$p"
+        printf 'PathModified=%s\n' "$(dirname "$p")"
+      done < "$pathsfile"
+      printf '%s\n' 'Unit=endor-vscode-firewall.service'
+      printf '%s\n' '[Install]'
+      printf '%s\n' 'WantedBy=multi-user.target'
+    } > "${ENDOR_VSCODE_SYSTEMD_DIR}/endor-vscode-firewall.path"
+    {
+      printf '%s\n' '[Unit]'
+      printf '%s\n' 'Description=Hourly backstop for the Endor VS Code product.json patch'
+      printf '%s\n' '[Timer]'
+      printf '%s\n' 'OnBootSec=1min'
+      printf '%s\n' 'OnUnitActiveSec=1h'
+      printf '%s\n' 'Unit=endor-vscode-firewall.service'
+      printf '%s\n' '[Install]'
+      printf '%s\n' 'WantedBy=timers.target'
+    } > "${ENDOR_VSCODE_SYSTEMD_DIR}/endor-vscode-firewall.timer"
+    chmod 644 "$ENDOR_VSCODE_SYSTEMD_DIR"/endor-vscode-firewall.* 2>/dev/null
+    systemctl daemon-reload 2>/dev/null
+    systemctl enable --now endor-vscode-firewall.path endor-vscode-firewall.timer 2>/dev/null || {
+      echo "[endor-vscode] WARNING: systemd units written but could not be enabled." >&2
+      _ENDOR_WARNED=1
+      return 1
+    }
+    echo "[endor-vscode]       update watcher installed → systemd endor-vscode-firewall.{path,timer}"
+    return 0
+  fi
+
+  unit="${ENDOR_VSCODE_CRON_DIR}/endor-vscode-firewall"
+  if [[ -d "$ENDOR_VSCODE_CRON_DIR" ]]; then
+    printf '#!/bin/sh\nexec /bin/bash %s >> %s 2>&1\n' "$script" "$ENDOR_VSCODE_LOG" > "$unit"
+    chmod 755 "$unit"
+    echo "[endor-vscode]       update watcher installed → $unit (no systemd; hourly cron)"
+    return 0
+  fi
+
+  echo "[endor-vscode] WARNING: no systemd and no ${ENDOR_VSCODE_CRON_DIR} — cannot install the update watcher." >&2
+  echo "[endor-vscode]          The patch will be lost on the next VS Code update. Re-push on check-in," >&2
+  echo "[endor-vscode]          or schedule $script yourself." >&2
+  _ENDOR_WARNED=1
+  return 1
+}
+
+# vscode_remove_watcher — offboarding; safe to call when nothing is installed.
+vscode_remove_watcher() {
+  local plist="${ENDOR_VSCODE_LAUNCHD_DIR}/${ENDOR_VSCODE_LABEL}.plist"
+
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "[dry-run]   action : REMOVE update watcher (launchd/systemd/cron) and sidecar state"
+    return 0
+  fi
+
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    if [[ -f "$plist" ]]; then
+      launchctl bootout "system/${ENDOR_VSCODE_LABEL}" 2>/dev/null \
+        || launchctl unload -w "$plist" 2>/dev/null || true
+      rm -f "$plist"
+      echo "[endor-remove] watcher removed     : $plist"
+    else
+      echo "[endor-remove] skip (no watcher)   : $plist"
+    fi
+  else
+    if [[ -f "${ENDOR_VSCODE_SYSTEMD_DIR}/endor-vscode-firewall.path" ]]; then
+      systemctl disable --now endor-vscode-firewall.path endor-vscode-firewall.timer 2>/dev/null || true
+      rm -f "${ENDOR_VSCODE_SYSTEMD_DIR}/endor-vscode-firewall.service" \
+            "${ENDOR_VSCODE_SYSTEMD_DIR}/endor-vscode-firewall.path" \
+            "${ENDOR_VSCODE_SYSTEMD_DIR}/endor-vscode-firewall.timer"
+      systemctl daemon-reload 2>/dev/null || true
+      echo "[endor-remove] watcher removed     : systemd endor-vscode-firewall.*"
+    fi
+    if [[ -f "${ENDOR_VSCODE_CRON_DIR}/endor-vscode-firewall" ]]; then
+      rm -f "${ENDOR_VSCODE_CRON_DIR}/endor-vscode-firewall"
+      echo "[endor-remove] watcher removed     : ${ENDOR_VSCODE_CRON_DIR}/endor-vscode-firewall"
+    fi
+  fi
+
+  local dir
+  dir=$(endor_vscode_state_dir)
+  if [[ -d "$dir" ]]; then
+    rm -rf "$dir"
+    echo "[endor-remove] sidecar removed     : $dir"
+  fi
+  return 0
+}
