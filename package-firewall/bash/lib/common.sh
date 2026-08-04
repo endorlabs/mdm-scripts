@@ -22,6 +22,17 @@
 #   warn_if_xml_key_conflict <file> <pattern> <label>
 #                                              — same, but for XML-comment-delimited blocks
 #                                                (e.g. Maven settings.xml)
+#
+# VS Code (product.json) — see the "VS Code" section at the bottom of this file:
+#   endor_b64url / endor_b64d                  — base64url encode (stdin) / decode
+#   endor_json_*                               — dependency-free depth-1 JSON editors
+#
+# NOTE for anyone adding to this file: generate.sh inlines it via
+#   grep -v '^# ' lib/common.sh | sed '/^[[:space:]]*$/d'
+# so every column-0 comment and every blank line is stripped from the generated
+# scripts. Nothing here may depend on a blank line or a '# '-prefixed line *inside*
+# a heredoc — which is why the launchd plist and systemd units below are emitted
+# with printf rather than heredocs.
 
 # Sentinel markers — identical across all config files so re-runs and remove work reliably
 ENDOR_BLOCK_START="# ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ====="
@@ -32,6 +43,12 @@ ENDOR_BLOCK_END="# ===== END ENDOR PACKAGE FIREWALL ====="
 # or re-runs and removal cannot find the managed block.
 ENDOR_XML_BLOCK_START="<!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->"
 ENDOR_XML_BLOCK_END="<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->"
+
+# JSON sentinel — product.json cannot carry '#' comments, so the managed marker is
+# a top-level JSON key instead. Part of the same SENTINEL CONTRACT as the strings
+# above: changing it orphans the marker on every already-deployed machine, and the
+# marker is the only record of the original extensionsGallery. Do not change it.
+ENDOR_JSON_MARKER_KEY="_endorPackageFirewall"
 
 # ── User attribution helpers ──────────────────────────────────────────────────
 # Encode <console-user>@<machine> into the Basic-auth username. The firewall
@@ -49,6 +66,36 @@ endor_b64() {
 # endor_urlenc_b64 <b64> — percent-encode base64 chars (+ / =) for URL userinfo.
 endor_urlenc_b64() {
   printf '%s' "$1" | sed -e 's/+/%2B/g' -e 's#/#%2F#g' -e 's/=/%3D/g'
+}
+
+# endor_b64url — base64url from stdin (matches endor_b64's stdin interface).
+# Used for the VS Code gallery URL, where the credential is a path segment rather
+# than userinfo, so '+' and '/' must be substituted rather than percent-encoded.
+# Padding is stripped; the firewall applies strings.TrimRight(token, "=") anyway.
+endor_b64url() {
+  endor_b64 | tr '+/' '-_' | tr -d '='
+}
+
+# endor_redact_ak — replace the _ak/<token> path segment on stdin.
+#
+# A deliberate deviation from the other ecosystems, which echo full credentialed
+# URLs in --dry-run: this token is a bearer credential in a URL *path*, and MDM
+# consoles retain script output for far more people than can read the target file.
+# Redacted wholesale rather than truncated to a prefix, so it is safe regardless
+# of token length.
+endor_redact_ak() {
+  sed -e 's#/_ak/[A-Za-z0-9_-]*#/_ak/<redacted>#g'
+}
+
+# endor_b64d — decode base64 from stdin. Probes for the flag rather than trying
+# and retrying, because a failed attempt would already have consumed stdin.
+# GNU and current macOS both accept --decode; older macOS base64 only had -D.
+endor_b64d() {
+  if base64 --help 2>&1 | grep -q -- '--decode'; then
+    base64 --decode
+  else
+    base64 -D
+  fi
 }
 
 # endor_host_label — a stable, human-readable machine name for attribution.
@@ -516,4 +563,251 @@ warn_if_xml_key_conflict() {
     echo "[endor]          Endor block will be inserted — verify key precedence with your tool." >&2
     _ENDOR_WARNED=1
   fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VS Code
+#
+# VS Code reads its extension gallery endpoints from product.json inside the
+# install directory. Unlike every other ecosystem here, the target file is owned
+# and rewritten by a third party (VS Code's own updater), and it is JSON, so it
+# can carry neither an Endor sentinel comment nor an env-var reference.
+#
+# Hence: a key-level merge into the depth-1 "extensionsGallery" object, and a
+# top-level JSON marker key holding the byte-exact original for restore.
+#
+# The editors below are deliberately line-oriented rather than JSON-aware. There
+# is no jq or python3 guarantee on a stock macOS or a minimal Linux image, and
+# plutil is not an option: it reorders every top-level key and minifies the file
+# (and `plutil -lint` does not even validate JSON — it accepts old-style plists).
+# Shipped product.json is pretty-printed, one entry per line, so a depth-1 line
+# range is unambiguous. Anything else makes these editors decline — they return
+# non-zero and leave the file untouched rather than guessing — so a caller can
+# fall back to a real JSON parser.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# endor_file_has_final_newline <file>
+# Command substitution strips trailing newlines, so an empty capture of the last
+# byte means that byte was a newline.
+endor_file_has_final_newline() {
+  [[ -s "$1" ]] || return 1
+  [[ -z "$(tail -c 1 "$1")" ]]
+}
+
+# endor_replace_contents_inplace <file> <tmp>
+# Overwrites <file> with <tmp> in place, preserving inode, mode and owner — we
+# must never add a new file inside a signed app bundle, because an *added*
+# unsealed resource is worse for codesign than a modified one.
+#
+# Shipped product.json has no trailing newline but awk always emits one, so the
+# newline is normalised back to whatever the target had. Without this every patch
+# would dirty the final line and a restore could never be byte-exact.
+endor_replace_contents_inplace() {
+  local file="$1" tmp="$2" size
+  if [[ -f "$file" ]] && ! endor_file_has_final_newline "$file" \
+     && endor_file_has_final_newline "$tmp"; then
+    size=$(wc -c < "$tmp")
+    head -c "$(( size - 1 ))" "$tmp" > "$file"
+  else
+    cat "$tmp" > "$file"
+  fi
+}
+
+# endor_json_top_string <file> <key>
+# Prints a depth-1 string value. Anchored to the exact indent of the first
+# top-level key (line 2), because product.json contains nested "version" keys
+# hundreds of lines before the top-level one — an indent-agnostic match returns
+# the wrong value.
+endor_json_top_string() {
+  awk -v key="$2" '
+    function indentof(l,   s) { s = l; sub(/[^ \t].*/, "", s); return s }
+    NR == 2 { tind = indentof($0) }
+    NR >= 2 && !done && indentof($0) == tind {
+      pat = "^" tind "\"" key "\"[ \t]*:[ \t]*\""
+      if ($0 ~ pat) {
+        line = $0; sub(pat, "", line); sub(/".*/, "", line)
+        print line; done = 1; exit
+      }
+    }
+    END { exit(done ? 0 : 1) }
+  ' "$1"
+}
+
+# endor_json_extract_top_object <file> <key>
+# Prints the raw lines of a depth-1 object value, opening and closing lines
+# included. Returns 1 when the key is absent or the file is not line-oriented,
+# which is the signal to fall back to the node writer.
+endor_json_extract_top_object() {
+  local file="$1" key="$2"
+  awk -v key="$key" '
+    BEGIN { pat = "^[ \t]*\"" key "\"[ \t]*:[ \t]*\\{[ \t]*$" }
+    !inblk && $0 ~ pat { ind = $0; sub(/".*/, "", ind); inblk = 1; print; next }
+    inblk {
+      print
+      if ($0 == ind "}" || $0 == ind "},") { done = 1; exit }
+    }
+    END { exit(done ? 0 : 1) }
+  ' "$file"
+}
+
+# endor_json_merge_object_keys <file> <key> <setfile> <delfile>
+# Rewrites the depth-1 object <key>, printing the whole file to stdout:
+#   - each line in <setfile> ("key": value) replaces the matching entry in place,
+#     keeping its position, or is appended when the key is absent
+#   - each key named in <delfile> has its entry removed, however many lines it
+#     spans (so deleting a multi-line value like accessSKUs works)
+#   - entry-terminating commas are recomputed from scratch, so removing or
+#     appending the last entry cannot leave a trailing comma
+# Every other byte of the file passes through untouched. Returns 1 if <key> was
+# not found as a multi-line object.
+#
+# Entries are segmented by indent: a line whose indent equals the first inner
+# line's indent and which starts with "name": opens a new entry, and everything
+# more deeply indented belongs to the entry above it. That is what makes the
+# comma rewrite safe across nested arrays and objects.
+endor_json_merge_object_keys() {
+  local file="$1" key="$2" setfile="$3" delfile="$4"
+  awk -v key="$key" -v setfile="$setfile" -v delfile="$delfile" '
+    function entrykey(line,   k) {
+      if (match(line, /^[ \t]*"[^"]+"[ \t]*:/) == 0) return ""
+      k = substr(line, RSTART, RLENGTH)
+      sub(/^[ \t]*"/, "", k); sub(/"[ \t]*:$/, "", k)
+      return k
+    }
+    function indentof(line,   s) { s = line; sub(/[^ \t].*/, "", s); return s }
+    function flush(   i, j, k, n, out, line, last) {
+      for (i = 1; i <= nset; i++) {
+        if (setkey[i] in entryidx) {
+          j = entryidx[setkey[i]]; entrylines[j] = 1; entry[j, 1] = iind setline[i]
+        } else {
+          ne++; entryidx[setkey[i]] = ne; entrylines[ne] = 1
+          entry[ne, 1] = iind setline[i]
+        }
+      }
+      n = 0
+      for (i = 1; i <= ne; i++) if (!dropped[i]) out[++n] = i
+      for (i = 1; i <= n; i++) {
+        j = out[i]
+        last = entrylines[j]
+        for (k = 1; k <= last; k++) {
+          line = entry[j, k]
+          if (k == last) { sub(/,[ \t]*$/, "", line); if (i < n) line = line "," }
+          print line
+        }
+      }
+    }
+    BEGIN {
+      pat = "^[ \t]*\"" key "\"[ \t]*:[ \t]*\\{[ \t]*$"
+      while ((getline line < setfile) > 0) {
+        if (line ~ /^[ \t]*$/) continue
+        sub(/^[ \t]+/, "", line); sub(/,[ \t]*$/, "", line)
+        setline[++nset] = line; setkey[nset] = entrykey(line)
+      }
+      close(setfile)
+      while ((getline line < delfile) > 0) {
+        if (line ~ /^[ \t]*$/) continue
+        gsub(/[ \t]/, "", line); del[line] = 1
+      }
+      close(delfile)
+    }
+    !inblk && !after && $0 ~ pat { ind = indentof($0); inblk = 1; print; next }
+    inblk {
+      if ($0 == ind "}" || $0 == ind "},") {
+        flush(); print; inblk = 0; after = 1; next
+      }
+      if (iind == "") iind = indentof($0)
+      k = (indentof($0) == iind) ? entrykey($0) : ""
+      if (k != "") {
+        ne++; entryidx[k] = ne; entrylines[ne] = 0
+        if (k in del) dropped[ne] = 1
+      }
+      if (ne == 0) { ne = 1; entrylines[1] = 0 }
+      entry[ne, ++entrylines[ne]] = $0
+      next
+    }
+    { print }
+    END { exit(after ? 0 : 1) }
+  ' "$file"
+}
+
+# endor_json_replace_top_object <file> <key> <blockfile>
+# Replaces the depth-1 object <key> with the verbatim lines of <blockfile>, which
+# must include its own opening and closing lines. This is the restore path: the
+# captured original goes back exactly as it was. The trailing comma is taken from
+# whatever is being replaced, so the enclosing object stays well-formed.
+endor_json_replace_top_object() {
+  local file="$1" key="$2" blockfile="$3"
+  awk -v key="$key" -v blockfile="$blockfile" '
+    BEGIN { pat = "^[ \t]*\"" key "\"[ \t]*:[ \t]*\\{[ \t]*$" }
+    !inblk && !after && $0 ~ pat { ind = $0; sub(/".*/, "", ind); inblk = 1; next }
+    inblk {
+      if ($0 == ind "}" || $0 == ind "},") {
+        comma = ($0 ~ /,[ \t]*$/)
+        nb = 0
+        while ((getline line < blockfile) > 0) blk[++nb] = line
+        close(blockfile)
+        for (i = 1; i <= nb; i++) {
+          if (i == nb) { sub(/,[ \t]*$/, "", blk[i]); if (comma) blk[i] = blk[i] "," }
+          print blk[i]
+        }
+        inblk = 0; after = 1
+      }
+      next
+    }
+    { print }
+    END { exit(after ? 0 : 1) }
+  ' "$file"
+}
+
+# endor_json_insert_top_line <file> <line>
+# Inserts <line> immediately after the opening brace on line 1. Inserting at the
+# top means we emit our own trailing comma and never have to append one to a line
+# that already exists.
+endor_json_insert_top_line() {
+  awk -v ins="$2" 'NR == 1 { print; print ins; next } { print }' "$1"
+}
+
+# endor_json_remove_top_key <file> <key>
+# Removes a depth-1 key whose value is a single-line scalar or object — which is
+# how the marker is always written.
+endor_json_remove_top_key() {
+  awk -v key="$2" '
+    BEGIN { pat = "^[ \t]*\"" key "\"[ \t]*:" }
+    $0 ~ pat { next }
+    { print }
+  ' "$1"
+}
+
+# endor_json_validate <file> [node_bin]
+# Cheap structural self-check, always run; plus a real JSON.parse when a node
+# binary is available. Guards against ever installing a corrupt product.json.
+#
+# The trailing-comma check is not redundant with the node parse: node is not
+# always resolvable (some Linux layouts ship no Electron next to product.json),
+# and a dangling comma before } or ] is precisely what the comma rewrite in
+# endor_json_merge_object_keys could introduce. Checked structurally — a line
+# ending in a bare comma followed by a line starting with } or ] — because a
+# string value always ends in a quote, so this cannot false-positive on content.
+endor_json_validate() {
+  local file="$1" node_bin="${2:-}"
+
+  [[ -s "$file" ]] || return 1
+  [[ "$(head -c 1 "$file")" == "{" ]] || return 1
+  [[ "$(tr -d '[:space:]' < "$file" | tail -c 1)" == "}" ]] || return 1
+  [[ "$(grep -cF "\"${ENDOR_JSON_MARKER_KEY}\"" "$file")" -le 1 ]] || return 1
+
+  awk '
+    { line = $0; gsub(/^[ \t]+|[ \t]+$/, "", line) }
+    line == "" { next }
+    prev ~ /,$/ && line ~ /^[}\]]/ { bad = 1; exit }
+    { prev = line }
+    END { exit(bad ? 1 : 0) }
+  ' "$file" || return 1
+
+  if [[ -n "$node_bin" && -x "$node_bin" ]]; then
+    ENDOR_PJ="$file" ELECTRON_RUN_AS_NODE=1 "$node_bin" \
+      -e 'JSON.parse(require("fs").readFileSync(process.env.ENDOR_PJ,"utf8"))' \
+      >/dev/null 2>&1 || return 1
+  fi
+  return 0
 }

@@ -1,0 +1,5 @@
+# Byte fidelity is the point of these fixtures. The suites assert LF line endings
+# and the *absence* of a final newline, mirroring what VS Code actually ships, and
+# byte-exact restore is the property under test. `-text` disables every form of
+# eol conversion, so a Windows checkout with core.autocrlf=true cannot rewrite them.
+*.json -text
