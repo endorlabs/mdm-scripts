@@ -87,3 +87,14 @@ in would silently widen the blast radius of every existing `endor-all` deploymen
 Each generated script is fully self-contained — no external files or dependencies at runtime.
 
 > **Security**: add `out/` to `.gitignore`. Generated scripts contain API credentials in plaintext.
+
+## Tests
+
+```sh
+cd package-firewall/tests && ./run-all.sh
+```
+
+Covers the VS Code ecosystem: the JSON editing primitives, patch/restore byte fidelity, the
+update watcher, and the generated scripts end to end. No root, no network, and nothing touches
+an installed VS Code. See [tests/README.md](tests/README.md) for what is and is not covered —
+notably, the Windows-only surfaces are reported as skipped rather than passed.
