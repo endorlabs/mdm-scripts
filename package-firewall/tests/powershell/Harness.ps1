@@ -48,3 +48,26 @@ function Get-DiffLineCount([string]$A, [string]$B) {
     $y = [System.IO.File]::ReadAllText($B) -split "`r`n|`n"
     (Compare-Object -ReferenceObject $x -DifferenceObject $y).Count
 }
+
+# Set-NameLong — copy the fixture with nameLong replaced, which is how the two
+# editions are told apart. ReadAllText/WriteAllText round-trip byte-for-byte, so the
+# fixture's absent final newline survives — every byte-exactness assertion
+# downstream depends on that.
+function Set-NameLong([string]$Src, [string]$Dst, [string]$Long) {
+    $t = [System.IO.File]::ReadAllText($Src)
+    $t = [regex]::Replace($t, '"nameLong"\s*:\s*"[^"]*"', ('"nameLong": "' + $Long + '"'))
+    [System.IO.File]::WriteAllText($Dst, $t, [System.Text.UTF8Encoding]::new($false))
+}
+
+# New-FixtureInstall — a Windows-shaped install root: <root>\resources\app\product.json.
+# The Code.exe shim stands in for the bundled Electron the fallback writer uses;
+# ELECTRON_RUN_AS_NODE is simply ignored by real node.
+function New-FixtureInstall([string]$Root, [string]$Long, [string]$NodeBin) {
+    New-Item -ItemType Directory -Path (Join-Path $Root 'resources/app') -Force | Out-Null
+    Set-NameLong $script:FIXTURE (Join-Path $Root 'resources/app/product.json') $Long
+    if ($NodeBin) {
+        $shim = Join-Path $Root 'Code.exe'
+        [System.IO.File]::WriteAllText($shim, "#!/bin/sh`nexec $NodeBin `"`$@`"`n")
+        if ($IsMacOS -or $IsLinux) { & chmod +x $shim }
+    }
+}

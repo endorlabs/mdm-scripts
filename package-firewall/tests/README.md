@@ -50,6 +50,7 @@ byte-level fidelity wrong:
 | `bash/e2e.sh` | the generated scripts, against a sandboxed install |
 | `powershell/Harness.ps1` | the PowerShell harness |
 | `powershell/json-primitives.ps1` | mirror of `bash/json-primitives.sh`, plus CRLF fidelity |
+| `powershell/lib.ps1` | mirror of `bash/lib.sh` and `bash/watcher.sh` |
 
 ## The fixture, and why not a real install
 
@@ -72,6 +73,9 @@ present, asserting nothing version-specific.
 
 ## What is not covered
 
+- **Windows.** Scheduled Task registration and `%ProgramFiles%` / AppData discovery
+  cannot run off-Windows and are reported as `skip`, never as a pass. These need a
+  Windows box.
 - **A real update.** `bash/e2e.sh` simulates one by restoring the pristine file and
   running the repatch script. Nothing substitutes for letting an Insiders box take a
   real overnight update and checking `repatch_count`.

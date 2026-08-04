@@ -23,6 +23,8 @@
 # VS Code (product.json) — see the "VS Code" section at the bottom of this file:
 #   Get-EndorB64Url / Get-EndorB64Decode         — base64url encode / decode
 #   *-Json*                                       — depth-1 JSON editors that preserve layout
+#   Get-VSCodeInstallPath / Get-VSCodeManagedState / Invoke-VSCodePatch / Invoke-VSCodeUnpatch
+#   Install-VSCodeWatcher / Uninstall-VSCodeWatcher
 
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║  SENTINEL CONTRACT — DO NOT CHANGE THESE STRINGS                    ║
@@ -48,6 +50,10 @@ $ENDOR_XML_BLOCK_END   = '<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->'
 # ║  machine unrestorable. Shared with the bash ENDOR_JSON_MARKER_KEY.    ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 $ENDOR_JSON_MARKER_KEY = '_endorPackageFirewall'
+
+# Scheduled Task identity for the product.json re-apply watcher.
+$ENDOR_VSCODE_TASK_PATH = '\Endor\'
+$ENDOR_VSCODE_TASK_NAME = 'PackageFirewall-VSCode'
 
 # ── User attribution helpers ──────────────────────────────────────────────────
 # Encode <console-user>@<machine> into the Basic-auth username. The firewall
@@ -650,9 +656,8 @@ function Test-XmlKeyConflict {
 # re-indent everything, needs -Depth raised on 5.1 (default 2 silently truncates),
 # and escapes forward slashes — turning a two-line change into a whole-file
 # rewrite that no reviewer can diff. Shipped product.json is pretty-printed one
-# entry per line, so a depth-1 line range is unambiguous. On anything else these
-# editors decline — they return $null and leave the file untouched rather than
-# guessing — so a caller can fall back to a real JSON parser.
+# entry per line, so a depth-1 line range is unambiguous. Anything else falls
+# through to Invoke-VSCodePatchViaNode.
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Get-JsonDoc <path>
@@ -890,4 +895,490 @@ function Test-JsonValid {
         }
         return $true
     } catch { return $false }
+}
+
+# ── Install discovery ─────────────────────────────────────────────────────────
+
+# Get-VSCodeInstallPath [-UserHome <path>] [-Roots <string[]>]
+# One product.json path per VS Code install found, stable and Insiders.
+#
+# NOTE the per-user candidates use $UserHome, NOT $env:LOCALAPPDATA: Intune runs
+# scripts as SYSTEM, whose LOCALAPPDATA is under C:\Windows, so relying on the
+# env var would silently miss every per-user install on the fleet.
+function Get-VSCodeInstallPath {
+    param([string]$UserHome, [string[]]$Roots)
+
+    if (-not $Roots) {
+        $bases = @()
+        foreach ($pf in @($env:ProgramW6432, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+            if ($pf) { $bases += $pf }
+        }
+        if ($UserHome) { $bases += (Join-Path $UserHome 'AppData\Local\Programs') }
+        $Roots = @()
+        foreach ($b in ($bases | Select-Object -Unique)) {
+            $Roots += (Join-Path $b 'Microsoft VS Code')
+            $Roots += (Join-Path $b 'Microsoft VS Code Insiders')
+        }
+    }
+
+    $found = @()
+    foreach ($r in $Roots) {
+        $pj = Join-Path $r 'resources\app\product.json'
+        if (Test-Path -LiteralPath $pj -PathType Leaf) { $found += $pj }
+    }
+    @($found | Select-Object -Unique)
+}
+
+# Get-VSCodeEditionLabel <product.json> — human label for logs.
+function Get-VSCodeEditionLabel {
+    param([string]$FilePath)
+    try {
+        $name = Get-JsonTopString -Lines (Get-JsonDoc $FilePath).Lines -Key 'nameLong'
+        if ($name) { return $name }
+    } catch { }
+    'VS Code'
+}
+
+# Get-VSCodeInstallRoot <product.json> — the directory containing resources\.
+function Get-VSCodeInstallRoot {
+    param([string]$FilePath)
+    Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $FilePath))
+}
+
+# Get-VSCodeNodeBin <product.json>
+# Code.exe doubles as node under ELECTRON_RUN_AS_NODE=1 — the same trick VS Code's
+# own CLI shim uses, so the fallback writer needs no extra dependency.
+function Get-VSCodeNodeBin {
+    param([string]$FilePath)
+    $root = Get-VSCodeInstallRoot $FilePath
+    foreach ($exe in @('Code.exe', 'Code - Insiders.exe')) {
+        $p = Join-Path $root $exe
+        if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
+    }
+    return $null
+}
+
+# Test-VSCodeCanWrite <product.json>
+# Opens for write and closes immediately: no content change, no mtime change, but
+# it fails exactly where a real write would (ACLs, or a file locked by a running
+# VS Code). Checked up front so a permission problem is reported as such rather
+# than surfacing as a half-applied patch.
+function Test-VSCodeCanWrite {
+    param([string]$FilePath)
+    try {
+        $fs = [System.IO.File]::Open($FilePath, [System.IO.FileMode]::Open,
+                                     [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+        $fs.Close()
+        return $true
+    } catch { return $false }
+}
+
+# ── Sidecar state ─────────────────────────────────────────────────────────────
+# Holds the rendered gallery URL for the watcher plus re-apply telemetry. Never
+# inside the install directory. Overridable so it can be exercised off-Windows.
+
+function Get-VSCodeStateDir {
+    if ($env:ENDOR_VSCODE_STATE_DIR) { return $env:ENDOR_VSCODE_STATE_DIR }
+    if ($env:ProgramData) { return (Join-Path $env:ProgramData 'Endor\PackageFirewall\vscode') }
+    'C:\ProgramData\Endor\PackageFirewall\vscode'
+}
+
+function Set-VSCodeState {
+    param([string]$Key, [string]$Value)
+    $dir = Get-VSCodeStateDir
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $f = Join-Path $dir 'state'
+    $lines = @()
+    if (Test-Path -LiteralPath $f) {
+        $lines = @(Get-Content -LiteralPath $f | Where-Object { $_ -notmatch "^$([regex]::Escape($Key))=" })
+    }
+    $lines += "$Key=$Value"
+    Write-EndorFile -FilePath $f -Lines $lines
+
+    # The state file carries the rendered gallery URL, i.e. a live credential, so
+    # lock it to the account the watcher runs as. Resolved from the well-known SID
+    # rather than the literal string 'SYSTEM', because that account name is
+    # localised on non-English Windows and would fail to resolve.
+    if ([System.Environment]::OSVersion.Platform -eq 'Win32NT') {
+        try {
+            $sysName = (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
+                       ).Translate([System.Security.Principal.NTAccount]).Value
+            Set-FileRestrictedAcl -FilePath $f -Username $sysName
+        } catch {
+            Write-Warning "[endor-vscode] could not restrict $f -- it holds a credential; check its ACL."
+        }
+    }
+}
+
+function Get-VSCodeState {
+    param([string]$Key)
+    $f = Join-Path (Get-VSCodeStateDir) 'state'
+    if (-not (Test-Path -LiteralPath $f)) { return '' }
+    $hit = @(Get-Content -LiteralPath $f | Where-Object { $_ -match "^$([regex]::Escape($Key))=" })
+    if ($hit.Count -eq 0) { return '' }
+    ($hit[-1] -replace "^$([regex]::Escape($Key))=", '')
+}
+
+# Write-VSCodeStateReport — surface watcher activity into MDM logs, so an admin can
+# see that VS Code updates really are clobbering product.json on this fleet.
+function Write-VSCodeStateReport {
+    $n = Get-VSCodeState 'repatch_count'
+    if ($n -and $n -ne '0') {
+        $last = Get-VSCodeState 'last_repatch'
+        if (-not $last) { $last = 'unknown' }
+        Write-Host "[endor-vscode]       watcher has re-applied the patch ${n}x (last: $last)"
+    }
+}
+
+# ── Marker + state machine ────────────────────────────────────────────────────
+
+# Get-VSCodeMarkerField <product.json> <field>
+# The awk/PowerShell writer emits the marker on one line; the node fallback runs it
+# through JSON.stringify and pretty-prints it. Reading only the single-line shape
+# would silently break restore for node-written files, so fall back to extracting
+# the marker as a block.
+function Get-VSCodeMarkerField {
+    param([string]$FilePath, [string]$Field)
+    $pat = '"' + [regex]::Escape($Field) + '"[ \t]*:[ \t]*"([^"]*)"'
+    $lines = (Get-JsonDoc $FilePath).Lines
+    foreach ($l in $lines) {
+        if ($l -match [regex]::Escape($ENDOR_JSON_MARKER_KEY)) {
+            $m = [regex]::Match($l, $pat)
+            if ($m.Success) { return $m.Groups[1].Value }
+        }
+    }
+    $blk = Get-JsonTopObjectBlock -Lines $lines -Key $ENDOR_JSON_MARKER_KEY
+    if ($blk) {
+        foreach ($l in $blk) {
+            $m = [regex]::Match($l, $pat)
+            if ($m.Success) { return $m.Groups[1].Value }
+        }
+    }
+    return ''
+}
+
+# Get-VSCodeManagedState <product.json> <url> <deleteKeys>
+# unmanaged | current | stale. A 'stale' file must be restored before being
+# re-patched — never patch on top of a patch, or the captured original is lost.
+function Get-VSCodeManagedState {
+    param([string]$FilePath, [string]$Url, [string[]]$DeleteKeys)
+    $raw = [System.IO.File]::ReadAllText($FilePath)
+    if (-not $raw.Contains('"' + $ENDOR_JSON_MARKER_KEY + '"')) { return 'unmanaged' }
+    if (-not $raw.Contains('"serviceUrl": "' + $Url + '"')) { return 'stale' }
+    foreach ($k in $DeleteKeys) {
+        if ($k -and $raw.Contains('"' + $k.Trim() + '"')) { return 'stale' }
+    }
+    'current'
+}
+
+# ── Patch / unpatch ───────────────────────────────────────────────────────────
+
+function Get-VSCodeMarkerBase {
+    param([string]$Namespace, [string]$Fqdn, [string[]]$Lines)
+    $ver = Get-JsonTopString -Lines $Lines -Key 'version'
+    $cmt = Get-JsonTopString -Lines $Lines -Key 'commit'
+    if (-not $ver) { $ver = 'unknown' }
+    if (-not $cmt) { $cmt = 'unknown' }
+    $ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    '{"schema":1,"namespace":"' + $Namespace + '","fqdn":"' + $Fqdn +
+      '","appVersion":"' + $ver + '","appCommit":"' + $cmt + '","patchedAt":"' + $ts + '"'
+}
+
+# Invoke-VSCodePatchViaNode — fallback for a product.json that is not
+# line-oriented (repackaged or minified). Reformats the whole file, which is
+# acceptable precisely because the layout was already non-standard. Records
+# via:"node" so unpatch restores the same way.
+function Invoke-VSCodePatchViaNode {
+    param([string]$FilePath, [string]$NodeBin, [string]$Url, [string[]]$DeleteKeys,
+          [string]$MarkerBase, [string]$OutFile)
+    $js = @'
+const fs = require("fs");
+const d = JSON.parse(fs.readFileSync(process.env.ENDOR_PJ, "utf8"));
+const orig = JSON.stringify(d.extensionsGallery || {});
+const g = Object.assign({}, d.extensionsGallery || {});
+g.serviceUrl = process.env.ENDOR_URL;
+(process.env.ENDOR_DEL || "").split(/\s+/).filter(Boolean).forEach(k => { delete g[k]; });
+const marker = Object.assign(JSON.parse(process.env.ENDOR_MARKER), {
+  via: "node",
+  originalExtensionsGalleryB64: Buffer.from(orig).toString("base64"),
+});
+const out = {};
+out[process.env.ENDOR_MARKER_KEY] = marker;
+for (const k of Object.keys(d)) out[k] = (k === "extensionsGallery") ? g : d[k];
+fs.writeFileSync(process.env.ENDOR_OUT, JSON.stringify(out, null, "\t"));
+'@
+    try {
+        $env:ENDOR_PJ = $FilePath; $env:ENDOR_URL = $Url
+        $env:ENDOR_DEL = ($DeleteKeys -join ' '); $env:ENDOR_OUT = $OutFile
+        $env:ENDOR_MARKER_KEY = $ENDOR_JSON_MARKER_KEY
+        $env:ENDOR_MARKER = ($MarkerBase + '}')
+        $env:ELECTRON_RUN_AS_NODE = '1'
+        & $NodeBin -e $js 2>$null | Out-Null
+        return (Test-Path -LiteralPath $OutFile)
+    } catch { return $false } finally {
+        foreach ($v in 'ENDOR_PJ','ENDOR_URL','ENDOR_DEL','ENDOR_OUT','ENDOR_MARKER_KEY','ENDOR_MARKER','ELECTRON_RUN_AS_NODE') {
+            Remove-Item "Env:\$v" -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Invoke-VSCodeUnpatchViaNode {
+    param([string]$FilePath, [string]$NodeBin, [string]$OutFile)
+    $js = @'
+const fs = require("fs");
+const d = JSON.parse(fs.readFileSync(process.env.ENDOR_PJ, "utf8"));
+const m = d[process.env.ENDOR_MARKER_KEY] || {};
+if (m.originalExtensionsGalleryB64) {
+  d.extensionsGallery = JSON.parse(Buffer.from(m.originalExtensionsGalleryB64, "base64").toString("utf8"));
+}
+delete d[process.env.ENDOR_MARKER_KEY];
+fs.writeFileSync(process.env.ENDOR_OUT, JSON.stringify(d, null, "\t"));
+'@
+    try {
+        $env:ENDOR_PJ = $FilePath; $env:ENDOR_OUT = $OutFile
+        $env:ENDOR_MARKER_KEY = $ENDOR_JSON_MARKER_KEY
+        $env:ELECTRON_RUN_AS_NODE = '1'
+        & $NodeBin -e $js 2>$null | Out-Null
+        return (Test-Path -LiteralPath $OutFile)
+    } catch { return $false } finally {
+        foreach ($v in 'ENDOR_PJ','ENDOR_OUT','ENDOR_MARKER_KEY','ELECTRON_RUN_AS_NODE') {
+            Remove-Item "Env:\$v" -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# Invoke-VSCodePatch
+# Returns 0 patched · 2 already current (nothing written) · 1 failed.
+function Invoke-VSCodePatch {
+    param([string]$FilePath, [string]$Url, [string[]]$SetLines, [string[]]$DeleteKeys,
+          [string]$Namespace, [string]$Fqdn, [switch]$DryRun)
+
+    $label = Get-VSCodeEditionLabel $FilePath
+    $state = Get-VSCodeManagedState -FilePath $FilePath -Url $Url -DeleteKeys $DeleteKeys
+
+    if ($state -eq 'current') {
+        Write-Host "[endor-vscode] ok    ${label}: already current -- no change"
+        return 2
+    }
+
+    if ($DryRun) {
+        Write-Host "[dry-run]   action : $state -> PATCH product.json"
+        if ($state -eq 'stale') {
+            Write-Host '[dry-run]   note   : stale -- original restored first, then re-patched'
+        }
+        Write-Host "[dry-run]   file   : $FilePath"
+        Write-Host ("[dry-run]   set    : " + (Get-EndorRedactAk ($SetLines -join '; ')))
+        Write-Host ("[dry-run]   remove : " + (($DeleteKeys -join ' ')))
+        Write-Host "[dry-run]   marker : $ENDOR_JSON_MARKER_KEY (carries the original for restore)"
+        Write-Host ''
+        return 0
+    }
+
+    if (-not (Test-VSCodeCanWrite $FilePath)) {
+        Write-Warning "[endor-vscode] ${label}: cannot write $FilePath"
+        Write-Warning '[endor-vscode]       Run as SYSTEM/Administrator. If VS Code is running, close it and re-run.'
+        return 1
+    }
+
+    if ($state -eq 'stale') {
+        Write-Host "[endor-vscode]       ${label}: managed but out of date -- restoring original first"
+        if ((Invoke-VSCodeUnpatch -FilePath $FilePath) -ne 0) { return 1 }
+    }
+
+    $nodeBin = Get-VSCodeNodeBin $FilePath
+    $doc = Get-JsonDoc $FilePath
+    $markerBase = Get-VSCodeMarkerBase -Namespace $Namespace -Fqdn $Fqdn -Lines $doc.Lines
+    $tmp = [System.IO.Path]::GetTempFileName()
+    $applied = $false
+
+    $blk = Get-JsonTopObjectBlock -Lines $doc.Lines -Key 'extensionsGallery'
+    if ($blk) {
+        $merged = Set-JsonObjectKeys -Lines $doc.Lines -Key 'extensionsGallery' `
+                    -SetLines $SetLines -DeleteKeys $DeleteKeys
+        if ($merged) {
+            $origB64 = [System.Convert]::ToBase64String(
+                [System.Text.Encoding]::UTF8.GetBytes(($blk -join $doc.NewLine) + $doc.NewLine))
+            $tind = Get-LineIndent $doc.Lines[1]
+            $markerLine = $tind + '"' + $ENDOR_JSON_MARKER_KEY + '": ' + $markerBase +
+                          ',"via":"ps","originalExtensionsGalleryB64":"' + $origB64 + '"},'
+            $doc.Lines = Add-JsonTopLine -Lines $merged -Line $markerLine
+            Set-JsonDoc -Doc $doc -FilePath $tmp
+            $applied = $true
+        }
+    }
+
+    if (-not $applied) {
+        if ($nodeBin -and (Invoke-VSCodePatchViaNode -FilePath $FilePath -NodeBin $nodeBin `
+                             -Url $Url -DeleteKeys $DeleteKeys -MarkerBase $markerBase -OutFile $tmp)) {
+            Write-Host "[endor-vscode]       ${label}: product.json is not line-oriented -- used the bundled node writer"
+            $applied = $true
+        } else {
+            Write-Warning "[endor-vscode] ${label}: unrecognised product.json layout and no usable node binary"
+            Write-Warning "[endor-vscode]       $FilePath was left untouched."
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+            return 1
+        }
+    }
+
+    if (-not (Test-JsonValid $tmp)) {
+        Write-Warning "[endor-vscode] ${label}: patched product.json failed validation -- not installing it"
+        Write-Warning "[endor-vscode]       $FilePath was left untouched."
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        return 1
+    }
+
+    # Write through the existing file so its ACL and identity survive.
+    $newDoc = Get-JsonDoc $tmp
+    $newDoc.HadFinalNewline = (Get-JsonDoc $FilePath).HadFinalNewline
+    Set-JsonDoc -Doc $newDoc -FilePath $FilePath
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+
+    Write-Host "[endor-vscode] ok    ${label}: gallery routed through the Endor firewall"
+    return 0
+}
+
+# Invoke-VSCodeUnpatch — restores the captured original and drops the marker.
+# Returns 0 on success (including "nothing to do"), 1 on failure.
+function Invoke-VSCodeUnpatch {
+    param([string]$FilePath, [switch]$DryRun)
+
+    $label = Get-VSCodeEditionLabel $FilePath
+    $raw = [System.IO.File]::ReadAllText($FilePath)
+    if (-not $raw.Contains('"' + $ENDOR_JSON_MARKER_KEY + '"')) {
+        Write-Host "[endor-remove] skip  ${label}: not managed by Endor -- $FilePath"
+        return 0
+    }
+
+    if ($DryRun) {
+        Write-Host '[dry-run]   action : RESTORE original extensionsGallery, drop marker'
+        Write-Host "[dry-run]   file   : $FilePath"
+        return 0
+    }
+
+    if (-not (Test-VSCodeCanWrite $FilePath)) {
+        Write-Warning "[endor-vscode] ${label}: cannot write $FilePath (privileges, or VS Code is running)"
+        return 1
+    }
+
+    $via     = Get-VSCodeMarkerField -FilePath $FilePath -Field 'via'
+    $origB64 = Get-VSCodeMarkerField -FilePath $FilePath -Field 'originalExtensionsGalleryB64'
+    if (-not $origB64) {
+        Write-Warning "[endor-vscode] ${label}: marker carries no original -- refusing to guess"
+        Write-Warning "[endor-vscode]       Reinstall ${label} to restore a pristine product.json."
+        return 1
+    }
+
+    $tmp = [System.IO.Path]::GetTempFileName()
+    $okDone = $false
+
+    if ($via -eq 'node') {
+        $nodeBin = Get-VSCodeNodeBin $FilePath
+        if ($nodeBin -and (Invoke-VSCodeUnpatchViaNode -FilePath $FilePath -NodeBin $nodeBin -OutFile $tmp)) {
+            $okDone = $true
+        }
+    } else {
+        $doc = Get-JsonDoc $FilePath
+        $blockText = Get-EndorB64Decode $origB64
+        $blockLines = @([System.Text.RegularExpressions.Regex]::Split($blockText.TrimEnd("`r", "`n"), "`r`n|`n"))
+        $restored = Set-JsonTopObjectBlock -Lines $doc.Lines -Key 'extensionsGallery' -BlockLines $blockLines
+        if ($restored) {
+            $doc.Lines = Remove-JsonTopKey -Lines $restored -Key $ENDOR_JSON_MARKER_KEY
+            Set-JsonDoc -Doc $doc -FilePath $tmp
+            $okDone = $true
+        }
+    }
+
+    if ((-not $okDone) -or (-not (Test-JsonValid $tmp))) {
+        Write-Warning "[endor-vscode] ${label}: restore failed validation -- $FilePath left as-is"
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        return 1
+    }
+
+    $newDoc = Get-JsonDoc $tmp
+    $newDoc.HadFinalNewline = (Get-JsonDoc $FilePath).HadFinalNewline
+    Set-JsonDoc -Doc $newDoc -FilePath $FilePath
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+
+    Write-Host "[endor-remove] ok    ${label}: original gallery restored"
+    return 0
+}
+
+# ── product.json re-apply watcher (Scheduled Task) ────────────────────────────
+# VS Code replaces product.json on every update -- monthly for stable, nightly for
+# Insiders -- on a schedule unrelated to MDM check-in. Task Scheduler has no
+# file-watch trigger, so -AtLogOn stands in for "the user updated, then relaunched"
+# and the hourly repetition is the real backstop.
+
+function Install-VSCodeWatcher {
+    param([string]$ScriptPath, [switch]$DryRun)
+
+    if ($DryRun) {
+        Write-Host "[dry-run]   watcher: Scheduled Task ${ENDOR_VSCODE_TASK_PATH}${ENDOR_VSCODE_TASK_NAME} (startup + logon + hourly)"
+        Write-Host "[dry-run]   repatch: $ScriptPath"
+        return $true
+    }
+
+    if (-not (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)) {
+        Write-Warning '[endor-vscode] Scheduled Task cmdlets unavailable -- cannot install the update watcher.'
+        Write-Warning '[endor-vscode]          The patch will be lost on the next VS Code update.'
+        return $false
+    }
+
+    try {
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+                    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
+        $triggers = @(
+            (New-ScheduledTaskTrigger -AtStartup),
+            (New-ScheduledTaskTrigger -AtLogOn)
+        )
+        try {
+            $triggers += (New-ScheduledTaskTrigger -Once -At (Get-Date) `
+                            -RepetitionInterval (New-TimeSpan -Hours 1) `
+                            -RepetitionDuration ([TimeSpan]::MaxValue))
+        } catch {
+            # Older Task Scheduler rejects TimeSpan.MaxValue; an indefinite
+            # repetition with no duration is the documented equivalent.
+            $triggers += (New-ScheduledTaskTrigger -Once -At (Get-Date) `
+                            -RepetitionInterval (New-TimeSpan -Hours 1))
+        }
+        $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' `
+                        -LogonType ServiceAccount -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+                        -DontStopIfGoingOnBatteries -StartWhenAvailable
+        Register-ScheduledTask -TaskName $ENDOR_VSCODE_TASK_NAME -TaskPath $ENDOR_VSCODE_TASK_PATH `
+            -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Force | Out-Null
+        Write-Host "[endor-vscode]       update watcher installed -> ${ENDOR_VSCODE_TASK_PATH}${ENDOR_VSCODE_TASK_NAME}"
+        return $true
+    } catch {
+        Write-Warning "[endor-vscode] could not register the update watcher: $($_.Exception.Message)"
+        Write-Warning '[endor-vscode]          The patch will be lost on the next VS Code update.'
+        return $false
+    }
+}
+
+function Uninstall-VSCodeWatcher {
+    param([switch]$DryRun)
+
+    if ($DryRun) {
+        Write-Host '[dry-run]   action : REMOVE update watcher (Scheduled Task) and sidecar state'
+        return
+    }
+
+    if (Get-Command Unregister-ScheduledTask -ErrorAction SilentlyContinue) {
+        $existing = Get-ScheduledTask -TaskName $ENDOR_VSCODE_TASK_NAME `
+                      -TaskPath $ENDOR_VSCODE_TASK_PATH -ErrorAction SilentlyContinue
+        if ($existing) {
+            Unregister-ScheduledTask -TaskName $ENDOR_VSCODE_TASK_NAME `
+                -TaskPath $ENDOR_VSCODE_TASK_PATH -Confirm:$false -ErrorAction SilentlyContinue
+            Write-Host "[endor-remove] watcher removed     : ${ENDOR_VSCODE_TASK_PATH}${ENDOR_VSCODE_TASK_NAME}"
+        } else {
+            Write-Host "[endor-remove] skip (no watcher)   : ${ENDOR_VSCODE_TASK_PATH}${ENDOR_VSCODE_TASK_NAME}"
+        }
+    }
+
+    $dir = Get-VSCodeStateDir
+    if (Test-Path -LiteralPath $dir) {
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "[endor-remove] sidecar removed     : $dir"
+    }
 }
