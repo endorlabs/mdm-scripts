@@ -4,14 +4,18 @@ Tests for the VS Code ecosystem.
 
 ```sh
 cd package-firewall/tests
-./run-all.sh                 # every suite
+./run-all.sh                 # every suite (adds the PowerShell suites when pwsh is present)
 ./run-all.sh --bash          # bash suites only
 ./run-all.sh json            # suites matching a name
+./run-all.ps1                # PowerShell suites, from Windows without bash or WSL
 ```
 
 Suites are discovered by glob (`bash/*.sh`, `powershell/*.ps1`, minus the harness), so
 adding one needs no edit to the runner. Individual suites run standalone too:
-`bash bash/json-primitives.sh`.
+`bash bash/json-primitives.sh`, `pwsh -NoProfile -File powershell/json-primitives.ps1`.
+
+The two `json-primitives` suites mirror each other assertion for assertion. That
+duplication is deliberate — see reason 3 below.
 
 ## Why VS Code has tests when the other ecosystems don't
 
@@ -37,13 +41,15 @@ byte-level fidelity wrong:
 
 | Path | |
 |---|---|
-| `run-all.sh` | runner; aggregates tallies, non-zero on any failure |
+| `run-all.sh`, `run-all.ps1` | runners; aggregate tallies, non-zero on any failure |
 | `fixtures/product.json` | synthetic `product.json` — the target for almost everything |
 | `bash/harness.sh` | paths, assertion helpers, the stripped-lib loader, fixture installs |
 | `bash/json-primitives.sh` | the awk JSON editing primitives in isolation |
 | `bash/lib.sh` | `vscode_*` lifecycle: discovery, state machine, both writers, failure modes |
 | `bash/watcher.sh` | launchd plist, systemd units, cron fallback, sidecar telemetry |
 | `bash/e2e.sh` | the generated scripts, against a sandboxed install |
+| `powershell/Harness.ps1` | the PowerShell harness |
+| `powershell/json-primitives.ps1` | mirror of `bash/json-primitives.sh`, plus CRLF fidelity |
 
 ## The fixture, and why not a real install
 

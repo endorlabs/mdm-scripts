@@ -19,6 +19,10 @@
 #   Remove-XmlBlock       <path> ...             — strips Endor XML block from settings.xml
 #   Test-KeyConflict      <path> <pattern> <label> — warns when a key exists outside an Endor block
 #   Test-XmlKeyConflict   <path> <pattern> <label> — same, but for XML-comment-delimited blocks
+#
+# VS Code (product.json) — see the "VS Code" section at the bottom of this file:
+#   Get-EndorB64Url / Get-EndorB64Decode         — base64url encode / decode
+#   *-Json*                                       — depth-1 JSON editors that preserve layout
 
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║  SENTINEL CONTRACT — DO NOT CHANGE THESE STRINGS                    ║
@@ -36,6 +40,15 @@ $ENDOR_BLOCK_END   = '# ===== END ENDOR PACKAGE FIREWALL ====='
 $ENDOR_XML_BLOCK_START = '<!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->'
 $ENDOR_XML_BLOCK_END   = '<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->'
 
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║  SENTINEL CONTRACT (continued) — the JSON marker key                 ║
+# ║  product.json cannot carry a '#' comment, so the managed marker is a  ║
+# ║  top-level JSON key. It is also the ONLY record of the original       ║
+# ║  extensionsGallery, so changing this string makes every deployed      ║
+# ║  machine unrestorable. Shared with the bash ENDOR_JSON_MARKER_KEY.    ║
+# ╚══════════════════════════════════════════════════════════════════════╝
+$ENDOR_JSON_MARKER_KEY = '_endorPackageFirewall'
+
 # ── User attribution helpers ──────────────────────────────────────────────────
 # Encode <console-user>@<machine> into the Basic-auth username. The firewall
 # decodes the label, auths with the real API key, and logs it as "User".
@@ -48,6 +61,39 @@ function Get-EndorAttrUsername {
     param([string]$Label, [string]$ApiKeyId)
     $inner = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("userattr:$Label"))
     [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("${inner}:${ApiKeyId}"))
+}
+
+# Get-EndorB64Url <text> — base64url. Used for the VS Code gallery URL, where the
+# credential is a path segment rather than userinfo, so '+' and '/' must be
+# substituted rather than percent-encoded. Padding is stripped; the firewall
+# applies strings.TrimRight(token, "=") anyway.
+function Get-EndorB64Url {
+    param([string]$Text)
+    $b64 = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Text))
+    $b64.Replace('+', '-').Replace('/', '_').TrimEnd('=')
+}
+
+# Get-EndorB64Decode <b64> — decode to a UTF-8 string.
+function Get-EndorB64Decode {
+    param([string]$B64)
+    [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($B64))
+}
+
+# Get-EndorVSCodeToken <attrUser> <secret>
+# Same attributed username as every other ecosystem; the firewall runs
+# applyUserAttribution after resolving the _ak path token.
+function Get-EndorVSCodeToken {
+    param([string]$AttrUser, [string]$Secret)
+    Get-EndorB64Url "${AttrUser}:${Secret}"
+}
+
+# Get-EndorRedactAk <text> — replace the _ak/<token> path segment.
+# A deliberate deviation from the other ecosystems, which echo full credentialed
+# URLs in -DryRun: this token is a bearer credential in a URL *path*, and MDM
+# consoles retain script output for far more people than can read the target file.
+function Get-EndorRedactAk {
+    param([string]$Text)
+    [System.Text.RegularExpressions.Regex]::Replace($Text, '/_ak/[A-Za-z0-9_-]*', '/_ak/<redacted>')
 }
 
 # Get-EndorUrlEncB64 <b64> — percent-encode base64 chars (+ / =) for URL userinfo.
@@ -584,4 +630,264 @@ function Test-XmlKeyConflict {
         Write-Warning "[endor]          Endor block will be inserted -- verify key precedence with your tool."
         $script:EndorWarned = $true
     }
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VS Code
+#
+# VS Code reads its extension gallery endpoints from product.json in the install
+# directory. Unlike every other ecosystem here the target file is owned and
+# rewritten by a third party (VS Code's own updater), and it is JSON, so it can
+# carry neither an Endor sentinel comment nor an %ENDOR_*% reference.
+#
+# Hence: a key-level merge into the depth-1 "extensionsGallery" object, a
+# top-level JSON marker key holding the byte-exact original for restore, and a
+# Scheduled Task to re-apply after updates.
+#
+# The editors below are line-oriented rather than using ConvertTo-Json on
+# purpose. ConvertTo-Json would reformat all 2962 lines, reorder nothing but
+# re-indent everything, needs -Depth raised on 5.1 (default 2 silently truncates),
+# and escapes forward slashes — turning a two-line change into a whole-file
+# rewrite that no reviewer can diff. Shipped product.json is pretty-printed one
+# entry per line, so a depth-1 line range is unambiguous. On anything else these
+# editors decline — they return $null and leave the file untouched rather than
+# guessing — so a caller can fall back to a real JSON parser.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Get-JsonDoc <path>
+# Reads a JSON file preserving the two things line editing would otherwise lose:
+# the newline flavour and whether a final newline was present. Shipped
+# product.json has NO trailing newline, so without this every patch would dirty
+# the last line and a restore could never be byte-exact.
+function Get-JsonDoc {
+    param([string]$FilePath)
+    $raw = [System.IO.File]::ReadAllText($FilePath)
+    if ($raw.Contains("`r`n")) { $nl = "`r`n" } else { $nl = "`n" }
+    $hadFinal = $raw.EndsWith("`n")
+    $lines = [System.Text.RegularExpressions.Regex]::Split($raw, "`r`n|`n")
+    if ($hadFinal -and $lines.Count -gt 0 -and $lines[$lines.Count - 1] -eq '') {
+        $lines = $lines[0..($lines.Count - 2)]
+    }
+    [PSCustomObject]@{ Lines = @($lines); NewLine = $nl; HadFinalNewline = $hadFinal }
+}
+
+# Set-JsonDoc <doc> <path>
+# Writes in place — FileMode.Create truncates the existing file rather than
+# replacing it, so the ACL and file identity survive. UTF-8 without BOM, for the
+# same reason Write-EndorFile does it.
+function Set-JsonDoc {
+    param([PSObject]$Doc, [string]$FilePath)
+    $text = ($Doc.Lines -join $Doc.NewLine)
+    if ($Doc.HadFinalNewline) { $text += $Doc.NewLine }
+    [System.IO.File]::WriteAllText($FilePath, $text, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Get-LineIndent {
+    param([string]$Line)
+    [System.Text.RegularExpressions.Regex]::Match($Line, '^[ \t]*').Value
+}
+
+function Get-LineEntryKey {
+    param([string]$Line)
+    $m = [System.Text.RegularExpressions.Regex]::Match($Line, '^[ \t]*"([^"]+)"[ \t]*:')
+    if ($m.Success) { $m.Groups[1].Value } else { '' }
+}
+
+# Get-JsonTopObjectRange <lines> <key>
+# Locates a depth-1 object value. Returns $null when the key is absent or the
+# file is not line-oriented — the signal to fall back to the node writer.
+function Get-JsonTopObjectRange {
+    param([string[]]$Lines, [string]$Key)
+    $open = '^[ \t]*"' + [System.Text.RegularExpressions.Regex]::Escape($Key) + '"[ \t]*:[ \t]*\{[ \t]*$'
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i] -match $open) {
+            $indent = Get-LineIndent $Lines[$i]
+            for ($j = $i + 1; $j -lt $Lines.Count; $j++) {
+                if ($Lines[$j] -eq ($indent + '}') -or $Lines[$j] -eq ($indent + '},')) {
+                    return [PSCustomObject]@{ Start = $i; End = $j; Indent = $indent }
+                }
+            }
+            return $null
+        }
+    }
+    return $null
+}
+
+# Get-JsonTopObjectBlock <lines> <key> — the raw lines of the object, inclusive.
+function Get-JsonTopObjectBlock {
+    param([string[]]$Lines, [string]$Key)
+    $r = Get-JsonTopObjectRange -Lines $Lines -Key $Key
+    if (-not $r) { return $null }
+    @($Lines[$r.Start..$r.End])
+}
+
+# Set-JsonObjectKeys <lines> <key> <setLines> <deleteKeys>
+# Key-level merge into a depth-1 object:
+#   - each entry in <setLines> ('"key": value') replaces the matching entry in
+#     place, keeping its position, or is appended when the key is absent
+#   - each key in <deleteKeys> has its entry removed, however many lines it spans
+#   - entry-terminating commas are recomputed from scratch, so removing or
+#     appending the last entry cannot leave a trailing comma
+# Every other line passes through untouched. Returns $null if <key> was not found.
+#
+# Entries are segmented by indent: a line whose indent equals the first inner
+# line's indent and which starts with "name": opens a new entry, and anything more
+# deeply indented belongs to the entry above. That is what makes the comma rewrite
+# safe across nested arrays such as accessSKUs.
+function Set-JsonObjectKeys {
+    param([string[]]$Lines, [string]$Key, [string[]]$SetLines, [string[]]$DeleteKeys)
+
+    $r = Get-JsonTopObjectRange -Lines $Lines -Key $Key
+    if (-not $r) { return $null }
+
+    $del = @{}
+    foreach ($k in $DeleteKeys) { if ($k) { $del[$k.Trim()] = $true } }
+
+    $entries    = New-Object System.Collections.ArrayList
+    $entryIndex = @{}
+    $innerIndent = $null
+
+    for ($i = $r.Start + 1; $i -lt $r.End; $i++) {
+        $line = $Lines[$i]
+        if ($null -eq $innerIndent) { $innerIndent = Get-LineIndent $line }
+        $key = ''
+        if ((Get-LineIndent $line) -eq $innerIndent) { $key = Get-LineEntryKey $line }
+        if ($key -ne '') {
+            $e = [PSCustomObject]@{ Key = $key; Lines = (New-Object System.Collections.ArrayList); Dropped = $del.ContainsKey($key) }
+            [void]$entries.Add($e)
+            $entryIndex[$key] = $entries.Count - 1
+        }
+        if ($entries.Count -eq 0) {
+            $e = [PSCustomObject]@{ Key = ''; Lines = (New-Object System.Collections.ArrayList); Dropped = $false }
+            [void]$entries.Add($e)
+        }
+        [void]$entries[$entries.Count - 1].Lines.Add($line)
+    }
+    if ($null -eq $innerIndent) { $innerIndent = $r.Indent + "`t" }
+
+    foreach ($sl in $SetLines) {
+        if (-not $sl) { continue }
+        $clean = $sl.Trim()
+        if ($clean -match ',$') { $clean = $clean.Substring(0, $clean.Length - 1) }
+        $k = Get-LineEntryKey $clean
+        if ($entryIndex.ContainsKey($k)) {
+            $e = $entries[$entryIndex[$k]]
+            $e.Lines.Clear(); [void]$e.Lines.Add($innerIndent + $clean); $e.Dropped = $false
+        } else {
+            $e = [PSCustomObject]@{ Key = $k; Lines = (New-Object System.Collections.ArrayList); Dropped = $false }
+            [void]$e.Lines.Add($innerIndent + $clean)
+            [void]$entries.Add($e)
+            $entryIndex[$k] = $entries.Count - 1
+        }
+    }
+
+    $kept = @($entries | Where-Object { -not $_.Dropped })
+    $out  = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $r.Start; $i++) { [void]$out.Add($Lines[$i]) }
+    [void]$out.Add($Lines[$r.Start])
+    for ($n = 0; $n -lt $kept.Count; $n++) {
+        $eLines = @($kept[$n].Lines)
+        for ($m = 0; $m -lt $eLines.Count; $m++) {
+            $line = $eLines[$m]
+            if ($m -eq $eLines.Count - 1) {
+                $line = [System.Text.RegularExpressions.Regex]::Replace($line, ',[ \t]*$', '')
+                if ($n -lt $kept.Count - 1) { $line = $line + ',' }
+            }
+            [void]$out.Add($line)
+        }
+    }
+    for ($i = $r.End; $i -lt $Lines.Count; $i++) { [void]$out.Add($Lines[$i]) }
+    @($out.ToArray())
+}
+
+# Set-JsonTopObjectBlock <lines> <key> <blockLines>
+# Restore path: puts the captured original back verbatim. The trailing comma is
+# taken from whatever is being replaced, so the enclosing object stays valid.
+function Set-JsonTopObjectBlock {
+    param([string[]]$Lines, [string]$Key, [string[]]$BlockLines)
+    $r = Get-JsonTopObjectRange -Lines $Lines -Key $Key
+    if (-not $r) { return $null }
+    $comma = $Lines[$r.End] -match ',[ \t]*$'
+    $blk = @($BlockLines)
+    $last = $blk[$blk.Count - 1]
+    $last = [System.Text.RegularExpressions.Regex]::Replace($last, ',[ \t]*$', '')
+    if ($comma) { $last = $last + ',' }
+    $blk[$blk.Count - 1] = $last
+
+    $out = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $r.Start; $i++) { [void]$out.Add($Lines[$i]) }
+    foreach ($l in $blk) { [void]$out.Add($l) }
+    for ($i = $r.End + 1; $i -lt $Lines.Count; $i++) { [void]$out.Add($Lines[$i]) }
+    @($out.ToArray())
+}
+
+# Add-JsonTopLine <lines> <line>
+# Inserts immediately after the opening brace on line 1, so we emit our own
+# trailing comma and never have to append one to an existing line.
+function Add-JsonTopLine {
+    param([string[]]$Lines, [string]$Line)
+    $out = New-Object System.Collections.ArrayList
+    [void]$out.Add($Lines[0])
+    [void]$out.Add($Line)
+    for ($i = 1; $i -lt $Lines.Count; $i++) { [void]$out.Add($Lines[$i]) }
+    @($out.ToArray())
+}
+
+# Remove-JsonTopKey <lines> <key> — removes a depth-1 single-line key.
+function Remove-JsonTopKey {
+    param([string[]]$Lines, [string]$Key)
+    $pat = '^[ \t]*"' + [System.Text.RegularExpressions.Regex]::Escape($Key) + '"[ \t]*:'
+    @($Lines | Where-Object { $_ -notmatch $pat })
+}
+
+# Get-JsonTopString <lines> <key>
+# Depth-1 string value, anchored to the indent of the first top-level key.
+# product.json contains nested "version" keys hundreds of lines before the
+# top-level one, so an indent-agnostic match returns the wrong value.
+function Get-JsonTopString {
+    param([string[]]$Lines, [string]$Key)
+    if ($Lines.Count -lt 2) { return '' }
+    $tind = Get-LineIndent $Lines[1]
+    $pat = '^' + $tind + '"' + [System.Text.RegularExpressions.Regex]::Escape($Key) + '"[ \t]*:[ \t]*"([^"]*)"'
+    foreach ($l in $Lines) {
+        if ((Get-LineIndent $l) -ne $tind) { continue }
+        $m = [System.Text.RegularExpressions.Regex]::Match($l, $pat)
+        if ($m.Success) { return $m.Groups[1].Value }
+    }
+    return ''
+}
+
+# Test-JsonValid <path>
+# ConvertFrom-Json is native and free, so it always runs — but it is NOT strict:
+# both the 5.1 (Newtonsoft) and 7.x (System.Text.Json) implementations happily
+# accept a trailing comma before } or ]. That is exactly the malformation the
+# comma rewrite in Set-JsonObjectKeys could introduce, so it has to be checked
+# explicitly, or a corrupt product.json would pass validation on Windows while
+# failing in VS Code's own strict JSON.parse.
+#
+# The check is structural rather than a regex over the whole text: a line whose
+# last character is a comma, followed by a line starting with } or ]. A string
+# value can never end in a bare comma (it ends in a quote), so this cannot
+# false-positive on content — which matters, because a false positive here means
+# refusing to apply an otherwise-good patch.
+function Test-JsonValid {
+    param([string]$FilePath)
+    if (-not (Test-Path -LiteralPath $FilePath)) { return $false }
+    try {
+        $raw = [System.IO.File]::ReadAllText($FilePath)
+        if (-not $raw.TrimStart().StartsWith('{')) { return $false }
+        if (-not $raw.TrimEnd().EndsWith('}')) { return $false }
+        $null = $raw | ConvertFrom-Json
+
+        $lines = [System.Text.RegularExpressions.Regex]::Split($raw, "`r`n|`n")
+        $prev = ''
+        foreach ($l in $lines) {
+            $t = $l.Trim()
+            if ($t -eq '') { continue }
+            if ($prev.EndsWith(',') -and ($t.StartsWith('}') -or $t.StartsWith(']'))) { return $false }
+            $prev = $t
+        }
+        return $true
+    } catch { return $false }
 }
