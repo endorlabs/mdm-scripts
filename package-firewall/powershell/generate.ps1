@@ -78,6 +78,10 @@ $NPM_REGISTRY_URL  = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/npm/"
 $NPM_REGISTRY_HOST = "$FQDN_HOST/v1/namespaces/$ENDOR_NAMESPACE/firewall/npm/"
 $PYPI_URL          = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/pypi/simple/"
 $MAVEN_REGISTRY_URL = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/maven/"
+# VS Code carries its credential as a URL path segment (_ak/<token>) rather than in
+# userinfo, so only the base is known here; the token is appended at install time
+# once the attribution label exists.
+$VSCODE_GALLERY_BASE = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/vscode"
 
 # -- Output directory ----------------------------------------------------------
 $OutDir = Join-Path $ScriptDir "out\$ENDOR_NAMESPACE"
@@ -101,6 +105,7 @@ function Invoke-Substitute {
     $r = $r.Replace('{{PYPI_URL}}',           $PYPI_URL)
     $r = $r.Replace('{{TRUSTED_HOST}}',       $TRUSTED_HOST)
     $r = $r.Replace('{{MAVEN_REGISTRY_URL}}', $MAVEN_REGISTRY_URL)
+    $r = $r.Replace('{{VSCODE_GALLERY_BASE}}', $VSCODE_GALLERY_BASE)
     $r
 }
 
@@ -126,6 +131,7 @@ function Get-AllBlocks {
         (Get-BlockAssignment 'UV_BLOCK'             (Join-Path $SharedBlocksDir 'uvtoml.txt')),
         (Get-BlockAssignment 'GO_BLOCK'             (Join-Path $SharedBlocksDir 'goenv.txt')),
         (Get-BlockAssignment 'MAVEN_BLOCK'          (Join-Path $SharedBlocksDir 'mavensettings.txt')),
+        (Get-BlockAssignment 'VSCODE_GALLERY_BLOCK' (Join-Path $SharedBlocksDir 'vscodegallery.txt')),
         '# --',
         ''
     ) -join "`n"
@@ -156,20 +162,94 @@ if ($EndorWarned) {
 }
 '@
 
-# Build-Script <template> <outputpath> <description>
+# Build-Script <template> <outputpath> <description> [-ExtraPart <string>] [-NoEnvVars]
+# -ExtraPart is emitted after the block assignments and before the ecosystem
+#   template — used to inject the VS Code watcher payload.
+# -NoEnvVars skips the env vars / HKCU setup. VS Code reads no ENDOR_* env vars
+#   (its credential is baked into product.json), so writing them would be a side
+#   effect with no purpose.
 function Build-Script {
-    param([string]$Template, [string]$OutputPath, [string]$Description)
+    param([string]$Template, [string]$OutputPath, [string]$Description,
+          [string]$ExtraPart, [switch]$NoEnvVars)
     $name   = Split-Path $OutputPath -Leaf
-    $parts  = @(
-        (Get-ScriptHeader -ScriptName $name -Description $Description),
-        (Get-AllBlocks),
-        '# == Env vars setup =====================================================',
-        (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'envvars.ps1') -Raw -Encoding UTF8)),
+    $parts  = @((Get-ScriptHeader -ScriptName $name -Description $Description), (Get-AllBlocks))
+    if ($ExtraPart) { $parts += $ExtraPart }
+    if (-not $NoEnvVars) {
+        $parts += '# == Env vars setup ====================================================='
+        $parts += (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'envvars.ps1') -Raw -Encoding UTF8))
+        $parts += ''
+    }
+    $parts += (Invoke-Substitute (Get-Content $Template -Raw -Encoding UTF8))
+    $parts += $ScriptFooter
+    Set-Content -Path $OutputPath -Value ($parts -join "`n") -Encoding UTF8
+}
+
+# ── VS Code re-apply watcher payload ──────────────────────────────────────────
+# VS Code replaces product.json on every update, so a Scheduled Task re-applies the
+# patch. The task needs a script at a stable path; copying the installer is not an
+# option because MDM tools routinely run scripts from a temp file that is gone by
+# the time the task fires. So the repatch script is generated here, then base64'd
+# into the installer, which decodes it next to the sidecar state.
+#
+# It deliberately reuses neither script-header.ps1 nor envvars.ps1: the task can
+# fire at startup with nobody logged in, and Get-ConsoleUser cannot resolve a user
+# then. The already-rendered URL and home are read back from the sidecar state.
+$RepatchPrelude = @'
+[CmdletBinding()]
+param()
+$ErrorActionPreference = 'Stop'
+{{COMMON_CONTENT}}
+$DryRun = $false
+$NoVSCodeWatcher = $true
+$EndorWarned = $false
+$_EndorVSCodeMode = 'repatch'
+
+$ENDOR_VSCODE_GALLERY_URL = Get-VSCodeState 'gallery_url'
+$UserHome    = Get-VSCodeState 'user_home'
+$ConsoleUser = ''
+
+if (-not $ENDOR_VSCODE_GALLERY_URL) {
+    Write-Warning '[endor-vscode] no gallery_url in sidecar state -- cannot re-apply.'
+    Write-Warning '[endor-vscode]        Re-run endor-vscode.ps1 to reinitialise.'
+    exit 1
+}
+'@
+
+# Build-RepatchScript <outputpath>
+function Build-RepatchScript {
+    param([string]$OutputPath)
+    $common = Get-Content (Join-Path $LibDir 'common.ps1') -Raw -Encoding UTF8
+    $header = @(
+        '#!/usr/bin/env pwsh',
+        '# MDM-deployable: re-applies the Endor VS Code gallery patch to product.json.',
+        '# Installed by endor-vscode.ps1 and run by the Scheduled Task after VS Code',
+        '# updates replace product.json. Not intended to be run by hand.',
+        "# Generated for namespace=$ENDOR_NAMESPACE fqdn=$FQDN.",
+        '# Do not edit -- regenerate with generate.ps1.',
+        ''
+    ) -join "`n"
+    $parts = @(
+        $header,
+        $RepatchPrelude.Replace('{{COMMON_CONTENT}}', $common),
         '',
-        (Invoke-Substitute (Get-Content $Template -Raw -Encoding UTF8)),
+        (Get-BlockAssignment 'VSCODE_GALLERY_BLOCK' (Join-Path $SharedBlocksDir 'vscodegallery.txt')),
+        '',
+        (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'vscode.ps1') -Raw -Encoding UTF8)),
         $ScriptFooter
     )
     Set-Content -Path $OutputPath -Value ($parts -join "`n") -Encoding UTF8
+}
+
+# Get-RepatchPayload <path> — base64 assignment the installer decodes.
+function Get-RepatchPayload {
+    param([string]$ScriptPath)
+    $b64 = [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($ScriptPath))
+    @(
+        '# -- VS Code update-watcher payload (endor-vscode-repatch.ps1) --',
+        ("`$_EndorVSCodeRepatchB64 = '" + $b64 + "'"),
+        '# --',
+        ''
+    ) -join "`n"
 }
 
 # Build-RemoveScript <outputpath>
@@ -205,10 +285,25 @@ Build-Script `
     (Join-Path $OutDir  'endor-maven.ps1') `
     'Configures Maven (~\.m2\settings.xml) for Endor Package Firewall.'
 
+# The repatch script must exist before anything that embeds it.
+Build-RepatchScript (Join-Path $OutDir 'endor-vscode-repatch.ps1')
+
+Build-Script `
+    (Join-Path $TmplDir 'vscode.ps1') `
+    (Join-Path $OutDir  'endor-vscode.ps1') `
+    'Configures VS Code (product.json extension gallery) for Endor Package Firewall.' `
+    -ExtraPart (Get-RepatchPayload (Join-Path $OutDir 'endor-vscode-repatch.ps1')) `
+    -NoEnvVars
+
 # -- Generate remove script ----------------------------------------------------
 Build-RemoveScript (Join-Path $OutDir 'endor-remove.ps1')
 
 # -- Generate combined all.ps1 -------------------------------------------------
+# VS Code is deliberately NOT part of endor-all.ps1. It is the only ecosystem that
+# writes inside an application install directory and the only one that registers a
+# persistent Scheduled Task, so folding it in would silently widen the blast radius
+# of every existing endor-all deployment on the next regeneration.
+# Deploy endor-vscode.ps1 alongside endor-all.ps1 instead -- see the READMEs.
 $_allName  = 'endor-all.ps1'
 $_allParts = @(
     (Get-ScriptHeader -ScriptName $_allName -Description 'Configures all package managers for Endor Package Firewall. Covers: npm . pnpm . yarn classic . yarn 2+ . bun . pip . uv . poetry . go . maven'),
@@ -244,10 +339,21 @@ Write-Host ('   {0,-24}  {1}' -f 'endor-python.ps1', 'pip . uv . poetry')
 Write-Host ('   {0,-24}  {1}' -f 'endor-go.ps1',     'go modules (GOPROXY)')
 Write-Host ('   {0,-24}  {1}' -f 'endor-maven.ps1',  'maven (~\.m2\settings.xml)')
 Write-Host ('   {0,-24}  {1}' -f 'endor-all.ps1',    'all of the above (single-script deploy)')
+Write-Host ('   {0,-24}  {1}' -f 'endor-vscode.ps1', 'VS Code + Insiders extension gallery (deploy alongside endor-all.ps1)')
 Write-Host ('   {0,-24}  {1}' -f 'endor-remove.ps1', 'offboarding -- strips all Endor config + registry env vars')
 Write-Host ''
+Write-Host ('   {0,-24}  {1}' -f 'endor-vscode-repatch.ps1', 'installed by endor-vscode.ps1; shown so you can read it')
+Write-Host ''
 Write-Host '   All scripts accept -DryRun to preview changes without writing anything.'
+Write-Host '   endor-vscode.ps1 also accepts -NoVSCodeWatcher (not recommended -- see below).'
 Write-Host '   Upload to your MDM tool (Intune). Each script is self-contained and idempotent.'
+Write-Host ''
+Write-Host '   !  VS Code notes -- endor-vscode.ps1 is NOT included in endor-all.ps1:'
+Write-Host '      . Run as SYSTEM/Administrator; a running VS Code can lock product.json.'
+Write-Host '      . The gallery token lands in product.json, which every user can read --'
+Write-Host '        VS Code offers no indirection. Use a dedicated, revocable API key.'
+Write-Host '      . Keep *.vsassets.io / *.vscode-unpkg.net reachable: extension downloads'
+Write-Host '        still come from Microsoft''s CDN by design.'
 Write-Host ''
 Write-Host '   To customise: edit shared/blocks/*.txt (shared config content)'
 Write-Host '                 or templates/*.ps1 (orchestration logic)'

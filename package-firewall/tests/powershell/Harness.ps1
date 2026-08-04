@@ -71,3 +71,15 @@ function New-FixtureInstall([string]$Root, [string]$Long, [string]$NodeBin) {
         if ($IsMacOS -or $IsLinux) { & chmod +x $shim }
     }
 }
+
+# Copy-PackageFirewall — the generators write to <generator dir>/out/<namespace> with
+# no override, so the e2e suite copies the working tree and generates there. That
+# keeps the checkout clean and keeps this branch additive: no product code changes to
+# accommodate the tests.
+function Copy-PackageFirewall([string]$Dest) {
+    New-Item -ItemType Directory -Path $Dest -Force | Out-Null
+    Copy-Item -Path (Join-Path $script:PF_DIR '*') -Destination $Dest -Recurse -Force
+    Get-ChildItem -LiteralPath $Dest -Recurse -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq 'out' } |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}

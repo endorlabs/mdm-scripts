@@ -19,6 +19,10 @@
 #   Java / Maven:
 #     %USERPROFILE%\.m2\settings.xml
 #
+#   VS Code (stable + Insiders, all discovered install paths):
+#     <install>\resources\app\product.json
+#     plus the update Scheduled Task and the sidecar state directory
+#
 # Registry env vars removed:
 #   ENDOR_API_KEY_ID, ENDOR_API_SECRET, ENDOR_AUTH_B64
 #   ENDOR_NPM_REGISTRY_URL, ENDOR_PYPI_URL, ENDOR_GO_PROXY_URL
@@ -136,10 +140,31 @@ Write-Host '[endor-remove] -- Maven --------------------------------------------
 Remove-XmlBlock -FilePath (Join-Path $UserHome '.m2\settings.xml') -DryRun:$DryRun
 Write-Host ''
 
+# -- VS Code product.json --
+# Not a sentinel block: the original extensionsGallery is restored byte-for-byte
+# from the base64 copy in the product.json marker, then the marker is dropped.
+# The watcher goes first, so it cannot re-patch a file we are about to restore.
+Write-Host '[endor-remove] -- VS Code ------------------------------------------------'
+
+Uninstall-VSCodeWatcher -DryRun:$DryRun
+
+$_vscRemoved = $false
+foreach ($_pj in @(Get-VSCodeInstallPath -UserHome $UserHome)) {
+    $_vscRemoved = $true
+    if ((Invoke-VSCodeUnpatch -FilePath $_pj -DryRun:$DryRun) -ne 0) { $EndorWarned = $true }
+}
+if (-not $_vscRemoved) {
+    Write-Host '[endor-remove] skip (no VS Code)   : no installation found'
+}
+Write-Host ''
+
 if ($DryRun) {
     Write-Host '[endor-remove] [done] Dry run complete -- no files modified, no registry keys removed.'
 } else {
     Write-Host '[endor-remove] [done] Removal complete.'
     Write-Host '[endor-remove]   Package managers will fall back to their default registries.'
     Write-Host '[endor-remove]   Open a new terminal for env var changes to take effect.'
+    if ($_vscRemoved) {
+        Write-Host '[endor-remove]   Restart VS Code -- product.json is only read at startup.'
+    }
 }

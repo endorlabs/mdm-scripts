@@ -51,6 +51,7 @@ byte-level fidelity wrong:
 | `powershell/Harness.ps1` | the PowerShell harness |
 | `powershell/json-primitives.ps1` | mirror of `bash/json-primitives.sh`, plus CRLF fidelity |
 | `powershell/lib.ps1` | mirror of `bash/lib.sh` and `bash/watcher.sh` |
+| `powershell/e2e.ps1` | the generated PowerShell script bodies |
 
 ## The fixture, and why not a real install
 
@@ -74,8 +75,9 @@ present, asserting nothing version-specific.
 ## What is not covered
 
 - **Windows.** Scheduled Task registration and `%ProgramFiles%` / AppData discovery
-  cannot run off-Windows and are reported as `skip`, never as a pass. These need a
-  Windows box.
+  cannot run off-Windows and are reported as `skip`, never as a pass. The PowerShell
+  header — console-user detection and the HKCU environment writes — is stubbed in
+  `powershell/e2e.ps1` for the same reason. These need a Windows box.
 - **A real update.** `bash/e2e.sh` simulates one by restoring the pristine file and
   running the repatch script. Nothing substitutes for letting an Insiders box take a
   real overnight update and checking `repatch_count`.
@@ -88,12 +90,12 @@ present, asserting nothing version-specific.
 
 ## Conventions
 
-- No root, no network, no writes outside a `mktemp` directory. `bash/e2e.sh` verifies
-  its install-discovery redirect **before** executing anything, because without it the
-  suite would patch the real VS Code on the machine running it.
+- No root, no network, no writes outside a `mktemp` directory. Both e2e suites verify
+  their install-discovery redirect **before** executing anything, because without it
+  they would patch the real VS Code on the machine running them.
 - The generators write to `<generator dir>/out/<namespace>` with no override, so the
-  e2e suite copies the working tree to a temp directory and generates there. The
-  checkout stays clean, and no product code exists to accommodate the tests.
+  e2e suites copy the working tree to a temp directory and generate there. The checkout
+  stays clean, and no product code exists to accommodate the tests.
 - Suites source the lib in its **inlined** form (`grep -v '^# ' | sed '/^ *$/d'`), which
   is what `generate.sh` actually embeds. Testing the pristine file would not prove that
   nothing in the lib depends on a comment or a blank line surviving — and a heredoc body
