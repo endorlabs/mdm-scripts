@@ -26,13 +26,13 @@
 # VS Code (product.json) — see the "VS Code" section at the bottom of this file:
 #   endor_b64url / endor_b64d                  — base64url encode (stdin) / decode
 #   endor_json_*                               — dependency-free depth-1 JSON editors
+#   vscode_install_paths / vscode_managed_state / vscode_patch / vscode_unpatch
 #
 # NOTE for anyone adding to this file: generate.sh inlines it via
 #   grep -v '^# ' lib/common.sh | sed '/^[[:space:]]*$/d'
 # so every column-0 comment and every blank line is stripped from the generated
 # scripts. Nothing here may depend on a blank line or a '# '-prefixed line *inside*
-# a heredoc — which is why the launchd plist and systemd units below are emitted
-# with printf rather than heredocs.
+# a heredoc — use printf for any block whose content matters.
 
 # Sentinel markers — identical across all config files so re-runs and remove work reliably
 ENDOR_BLOCK_START="# ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ====="
@@ -573,17 +573,16 @@ warn_if_xml_key_conflict() {
 # and rewritten by a third party (VS Code's own updater), and it is JSON, so it
 # can carry neither an Endor sentinel comment nor an env-var reference.
 #
-# Hence: a key-level merge into the depth-1 "extensionsGallery" object, and a
-# top-level JSON marker key holding the byte-exact original for restore.
+# Hence: a key-level merge into the depth-1 "extensionsGallery" object, a
+# top-level JSON marker key holding the byte-exact original for restore, and a
+# watcher to re-apply after updates.
 #
 # The editors below are deliberately line-oriented rather than JSON-aware. There
 # is no jq or python3 guarantee on a stock macOS or a minimal Linux image, and
 # plutil is not an option: it reorders every top-level key and minifies the file
 # (and `plutil -lint` does not even validate JSON — it accepts old-style plists).
 # Shipped product.json is pretty-printed, one entry per line, so a depth-1 line
-# range is unambiguous. Anything else makes these editors decline — they return
-# non-zero and leave the file untouched rather than guessing — so a caller can
-# fall back to a real JSON parser.
+# range is unambiguous. Anything else falls through to vscode_patch_via_node.
 # ══════════════════════════════════════════════════════════════════════════════
 
 # endor_file_has_final_newline <file>
@@ -811,3 +810,363 @@ endor_json_validate() {
   fi
   return 0
 }
+
+# vscode_install_paths [user_home]
+# Prints one product.json path per line for every VS Code install found, stable
+# and Insiders. On Windows the equivalent must resolve the console user's
+# AppData rather than the SYSTEM account's; here the analogue is <user_home>.
+vscode_install_paths() {
+  local home="${1:-}" p
+  local -a candidates=()
+
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    candidates+=(
+      "/Applications/Visual Studio Code.app/Contents/Resources/app/product.json"
+      "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/product.json"
+    )
+    if [[ -n "$home" ]]; then
+      candidates+=(
+        "$home/Applications/Visual Studio Code.app/Contents/Resources/app/product.json"
+        "$home/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/product.json"
+      )
+    fi
+  else
+    candidates+=(
+      "/usr/share/code/resources/app/product.json"
+      "/usr/share/code-insiders/resources/app/product.json"
+      "/opt/visual-studio-code/resources/app/product.json"
+      "/opt/visual-studio-code-insiders/resources/app/product.json"
+      "/usr/lib/code/product.json"
+      "/snap/code/current/usr/share/code/resources/app/product.json"
+    )
+  fi
+
+  for p in "${candidates[@]}"; do
+    [[ -f "$p" ]] && printf '%s\n' "$p"
+  done
+  return 0
+}
+
+# vscode_edition_label <product.json> — human label for logs.
+vscode_edition_label() {
+  local name
+  name=$(endor_json_top_string "$1" nameLong 2>/dev/null) || name=""
+  [[ -n "$name" ]] || name="VS Code"
+  printf '%s' "$name"
+}
+
+# vscode_is_readonly_install <product.json>
+# snap and flatpak mount their payload read-only, so these installs are
+# structurally unpatchable. Tested by path prefix rather than by [[ -w ]],
+# because under root [[ -w ]] reports true even on a read-only mount.
+vscode_is_readonly_install() {
+  case "$1" in
+    /snap/*|/var/lib/snapd/*|/var/lib/flatpak/*|/app/*|*/.local/share/flatpak/*) return 0 ;;
+  esac
+  return 1
+}
+
+# vscode_can_write <product.json>
+# Opens the file for append without writing anything: no content change, no mtime
+# change, but it fails with EPERM exactly where a real write would. On macOS
+# Ventura+ that is the App Management (TCC) check, which root is NOT exempt from.
+vscode_can_write() {
+  ( : >> "$1" ) 2>/dev/null
+}
+
+# vscode_node_bin <product.json>
+# Path to the bundled Electron, usable as node via ELECTRON_RUN_AS_NODE=1 — the
+# same trick VS Code's own bin/code shim uses, so it needs no extra dependency.
+# The macOS executable name comes from CFBundleExecutable ("Code" on stable,
+# different on Insiders); it must never be hardcoded to "Electron".
+vscode_node_bin() {
+  local pj="$1" root exe c
+  root=$(cd "$(dirname "$pj")/../.." 2>/dev/null && pwd) || return 1
+
+  if [[ -f "$root/Info.plist" && -x /usr/bin/plutil ]]; then
+    exe=$(/usr/bin/plutil -extract CFBundleExecutable raw -o - "$root/Info.plist" 2>/dev/null)
+    if [[ -n "$exe" && -x "$root/MacOS/$exe" ]]; then
+      printf '%s' "$root/MacOS/$exe"; return 0
+    fi
+  fi
+  # Linux .deb/.rpm/tarball: the Electron binary sits at the install root next to
+  # resources/. Deliberately NOT $root/bin/code or /usr/bin/code — those are the
+  # `code` CLI wrapper, which would interpret -e as a CLI flag rather than as node.
+  for c in "$root/code" "$root/code-insiders"; do
+    [[ -x "$c" ]] && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+
+# vscode_marker_field <product.json> <field>
+# Reads one field out of the marker. The marker holds only base64, an integer and
+# URL-safe text, so sed is enough — the removal path must not need a JSON parser.
+#
+# Two shapes have to be handled: the awk writer emits the whole marker on one
+# line, while the node writer runs it through JSON.stringify and pretty-prints it
+# across many. Reading only the single-line shape silently breaks restore for
+# node-written files, so fall back to extracting the marker object as a block.
+vscode_marker_field() {
+  local file="$1" field="$2" v pat
+  pat="s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+
+  v=$(grep -F "\"${ENDOR_JSON_MARKER_KEY}\"" "$file" 2>/dev/null | sed -n "$pat" | head -1)
+  if [[ -z "$v" ]]; then
+    v=$(endor_json_extract_top_object "$file" "$ENDOR_JSON_MARKER_KEY" 2>/dev/null \
+        | sed -n "$pat" | head -1)
+  fi
+  printf '%s' "$v"
+}
+
+# vscode_managed_state <product.json> <expected_service_url> <delete_keys>
+# Prints unmanaged | current | stale.
+#   unmanaged — no marker; capture the original, then patch
+#   current   — marker present, expected serviceUrl in place, deleted keys gone;
+#               nothing to do, so no write happens at all
+#   stale     — marker present but the content no longer matches (credential
+#               rotation, namespace change, edited block, or a VS Code update
+#               that restored a key). Must be unpatched before re-patching:
+#               never patch on top of a patch, or the original is lost forever.
+vscode_managed_state() {
+  local file="$1" url="$2" delete_keys="$3" k
+
+  grep -qF "\"${ENDOR_JSON_MARKER_KEY}\"" "$file" 2>/dev/null || {
+    printf 'unmanaged'; return 0
+  }
+  if ! grep -qF "\"serviceUrl\": \"${url}\"" "$file" 2>/dev/null; then
+    printf 'stale'; return 0
+  fi
+  for k in $delete_keys; do
+    if grep -qF "\"${k}\"" "$file" 2>/dev/null; then printf 'stale'; return 0; fi
+  done
+  printf 'current'
+}
+
+# vscode_top_indent <product.json> — the file's own top-level indent unit.
+vscode_top_indent() {
+  local t
+  t=$(awk 'NR == 2 { s = $0; sub(/[^ \t].*/, "", s); print s; exit }' "$1")
+  [[ -n "$t" ]] && printf '%s' "$t" || printf '\t'
+}
+
+# vscode_marker_base <namespace> <fqdn> <product.json>
+# The marker fields that both writers share. Values are base64, integers and
+# URL-safe text only, so no JSON escaper is needed here.
+vscode_marker_base() {
+  local ns="$1" fqdn="$2" pj="$3" ver commit
+  ver=$(endor_json_top_string "$pj" version 2>/dev/null) || ver="unknown"
+  commit=$(endor_json_top_string "$pj" commit 2>/dev/null) || commit="unknown"
+  printf '{"schema":1,"namespace":"%s","fqdn":"%s","appVersion":"%s","appCommit":"%s","patchedAt":"%s"' \
+    "$ns" "$fqdn" "$ver" "$commit" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
+# vscode_patch_via_node <product.json> <node_bin> <url> <delete_keys> <marker_base> <out>
+# Fallback for a product.json that is not line-oriented (repackaged or minified).
+# Reformats the whole file, which is acceptable precisely because the layout was
+# already non-standard. Records via:"node" so unpatch restores the same way.
+vscode_patch_via_node() {
+  local pj="$1" node_bin="$2" url="$3" delete_keys="$4" marker_base="$5" out="$6"
+  ENDOR_PJ="$pj" ENDOR_URL="$url" ENDOR_DEL="$delete_keys" ENDOR_OUT="$out" \
+  ENDOR_MARKER_KEY="$ENDOR_JSON_MARKER_KEY" ENDOR_MARKER="${marker_base}}" \
+  ELECTRON_RUN_AS_NODE=1 "$node_bin" -e '
+    const fs = require("fs");
+    const d = JSON.parse(fs.readFileSync(process.env.ENDOR_PJ, "utf8"));
+    const orig = JSON.stringify(d.extensionsGallery || {});
+    const g = Object.assign({}, d.extensionsGallery || {});
+    g.serviceUrl = process.env.ENDOR_URL;
+    (process.env.ENDOR_DEL || "").split(/\s+/).filter(Boolean).forEach(k => { delete g[k]; });
+    const marker = Object.assign(JSON.parse(process.env.ENDOR_MARKER), {
+      via: "node",
+      originalExtensionsGalleryB64: Buffer.from(orig).toString("base64"),
+    });
+    const out = {};
+    out[process.env.ENDOR_MARKER_KEY] = marker;
+    for (const k of Object.keys(d)) out[k] = (k === "extensionsGallery") ? g : d[k];
+    fs.writeFileSync(process.env.ENDOR_OUT, JSON.stringify(out, null, "\t"));
+  ' >/dev/null 2>&1
+}
+
+# vscode_unpatch_via_node <product.json> <node_bin> <out>
+vscode_unpatch_via_node() {
+  ENDOR_PJ="$1" ENDOR_OUT="$3" ENDOR_MARKER_KEY="$ENDOR_JSON_MARKER_KEY" \
+  ELECTRON_RUN_AS_NODE=1 "$2" -e '
+    const fs = require("fs");
+    const d = JSON.parse(fs.readFileSync(process.env.ENDOR_PJ, "utf8"));
+    const m = d[process.env.ENDOR_MARKER_KEY] || {};
+    if (m.originalExtensionsGalleryB64) {
+      d.extensionsGallery = JSON.parse(
+        Buffer.from(m.originalExtensionsGalleryB64, "base64").toString("utf8"));
+    }
+    delete d[process.env.ENDOR_MARKER_KEY];
+    fs.writeFileSync(process.env.ENDOR_OUT, JSON.stringify(d, null, "\t"));
+  ' >/dev/null 2>&1
+}
+
+# vscode_patch <product.json> <service_url> <set_lines> <delete_keys> <namespace> <fqdn>
+# Returns 0 patched · 2 already current (nothing written) · 1 failed (caller warns).
+#
+# <set_lines> is the rendered gallery block, one '"key": value' per line.
+# <delete_keys> is a space-separated list of keys to drop from extensionsGallery.
+vscode_patch() {
+  local pj="$1" url="$2" set_lines="$3" delete_keys="$4" ns="$5" fqdn="$6"
+  local label state node_bin tind marker_base origb64 rc
+  local setf delf blockf tmp tmp2
+
+  label=$(vscode_edition_label "$pj")
+
+  if vscode_is_readonly_install "$pj"; then
+    echo "[endor-vscode] SKIP  ${label}: read-only install (snap/flatpak) — $pj" >&2
+    echo "[endor-vscode]       product.json cannot be patched there. Install the .deb/.tar.gz build" >&2
+    echo "[endor-vscode]       instead, or enforce via the AllowedExtensions policy." >&2
+    return 1
+  fi
+
+  state=$(vscode_managed_state "$pj" "$url" "$delete_keys")
+  if [[ "$state" == "current" ]]; then
+    echo "[endor-vscode] ok    ${label}: already current — no change"
+    return 2
+  fi
+
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "[dry-run]   action : ${state} -> PATCH product.json"
+    [[ "$state" == "stale" ]] && echo "[dry-run]   note   : stale — original restored first, then re-patched"
+    echo "[dry-run]   file   : $pj"
+    echo "[dry-run]   set    : $(printf '%s' "$set_lines" | endor_redact_ak)"
+    echo "[dry-run]   remove : ${delete_keys:-<none>}"
+    echo "[dry-run]   marker : ${ENDOR_JSON_MARKER_KEY} (carries the original for restore)"
+    echo ""
+    return 0
+  fi
+
+  if ! vscode_can_write "$pj"; then
+    echo "[endor-vscode] ERROR ${label}: cannot write $pj" >&2
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      echo "[endor-vscode]       On macOS Ventura and later, writing inside another developer's" >&2
+      echo "[endor-vscode]       .app bundle requires the App Management (SystemPolicyAppBundles)" >&2
+      echo "[endor-vscode]       TCC grant — root is NOT exempt. Grant your MDM agent App" >&2
+      echo "[endor-vscode]       Management (or Full Disk Access) via a PPPC profile and re-run." >&2
+    else
+      echo "[endor-vscode]       Re-run with sufficient privileges (root) for this install path." >&2
+    fi
+    return 1
+  fi
+
+  if [[ "$state" == "stale" ]]; then
+    echo "[endor-vscode]       ${label}: managed but out of date — restoring original first"
+    vscode_unpatch "$pj" || return 1
+  fi
+
+  node_bin=$(vscode_node_bin "$pj" 2>/dev/null || true)
+  tind=$(vscode_top_indent "$pj")
+  marker_base=$(vscode_marker_base "$ns" "$fqdn" "$pj")
+
+  setf=$(mktemp); delf=$(mktemp); blockf=$(mktemp); tmp=$(mktemp); tmp2=$(mktemp)
+  printf '%s\n' "$set_lines" > "$setf"
+  printf '%s\n' $delete_keys > "$delf"
+
+  rc=1
+  if endor_json_extract_top_object "$pj" extensionsGallery > "$blockf" 2>/dev/null; then
+    origb64=$(endor_b64 < "$blockf")
+    if endor_json_merge_object_keys "$pj" extensionsGallery "$setf" "$delf" > "$tmp" 2>/dev/null; then
+      endor_json_insert_top_line "$tmp" \
+        "${tind}\"${ENDOR_JSON_MARKER_KEY}\": ${marker_base},\"via\":\"awk\",\"originalExtensionsGalleryB64\":\"${origb64}\"}," \
+        > "$tmp2" && rc=0
+    fi
+  fi
+
+  if [[ "$rc" -ne 0 ]]; then
+    if [[ -n "$node_bin" ]] && vscode_patch_via_node \
+         "$pj" "$node_bin" "$url" "$delete_keys" "$marker_base" "$tmp2"; then
+      echo "[endor-vscode]       ${label}: product.json is not line-oriented — used the bundled node writer"
+      rc=0
+    else
+      echo "[endor-vscode] ERROR ${label}: unrecognised product.json layout and no usable node binary" >&2
+      echo "[endor-vscode]       $pj was left untouched." >&2
+      rm -f "$setf" "$delf" "$blockf" "$tmp" "$tmp2"
+      return 1
+    fi
+  fi
+
+  if ! endor_json_validate "$tmp2" "$node_bin"; then
+    echo "[endor-vscode] ERROR ${label}: patched product.json failed validation — not installing it" >&2
+    echo "[endor-vscode]       $pj was left untouched." >&2
+    rm -f "$setf" "$delf" "$blockf" "$tmp" "$tmp2"
+    return 1
+  fi
+
+  endor_replace_contents_inplace "$pj" "$tmp2"
+  rc=$?
+  rm -f "$setf" "$delf" "$blockf" "$tmp" "$tmp2"
+
+  if [[ "$rc" -ne 0 ]]; then
+    echo "[endor-vscode] ERROR ${label}: write failed for $pj" >&2
+    return 1
+  fi
+  echo "[endor-vscode] ok    ${label}: gallery routed through the Endor firewall"
+  return 0
+}
+
+# vscode_unpatch <product.json>
+# Restores the captured original extensionsGallery and drops the marker. Returns
+# 0 on success (including "nothing to do"), 1 on failure.
+vscode_unpatch() {
+  local pj="$1" label via origb64 blockf tmp tmp2 node_bin rc
+
+  label=$(vscode_edition_label "$pj")
+
+  if ! grep -qF "\"${ENDOR_JSON_MARKER_KEY}\"" "$pj" 2>/dev/null; then
+    echo "[endor-vscode] skip  ${label}: not managed by Endor — $pj"
+    return 0
+  fi
+
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "[dry-run]   action : RESTORE original extensionsGallery, drop marker"
+    echo "[dry-run]   file   : $pj"
+    return 0
+  fi
+
+  if ! vscode_can_write "$pj"; then
+    echo "[endor-vscode] ERROR ${label}: cannot write $pj (App Management/TCC or privileges)" >&2
+    return 1
+  fi
+
+  via=$(vscode_marker_field "$pj" via)
+  origb64=$(vscode_marker_field "$pj" originalExtensionsGalleryB64)
+  node_bin=$(vscode_node_bin "$pj" 2>/dev/null || true)
+
+  if [[ -z "$origb64" ]]; then
+    echo "[endor-vscode] ERROR ${label}: marker carries no original — refusing to guess" >&2
+    echo "[endor-vscode]       Reinstall ${label} to restore a pristine product.json." >&2
+    return 1
+  fi
+
+  tmp=$(mktemp); tmp2=$(mktemp); blockf=$(mktemp)
+  rc=1
+
+  if [[ "$via" == "node" ]]; then
+    if [[ -n "$node_bin" ]] && vscode_unpatch_via_node "$pj" "$node_bin" "$tmp2"; then rc=0; fi
+  else
+    printf '%s' "$origb64" | endor_b64d > "$blockf" 2>/dev/null
+    if [[ -s "$blockf" ]] \
+       && endor_json_replace_top_object "$pj" extensionsGallery "$blockf" > "$tmp" 2>/dev/null \
+       && endor_json_remove_top_key "$tmp" "$ENDOR_JSON_MARKER_KEY" > "$tmp2"; then rc=0; fi
+  fi
+
+  if [[ "$rc" -ne 0 ]] || ! endor_json_validate "$tmp2" "$node_bin"; then
+    echo "[endor-vscode] ERROR ${label}: restore failed validation — $pj left as-is" >&2
+    rm -f "$tmp" "$tmp2" "$blockf"
+    return 1
+  fi
+
+  endor_replace_contents_inplace "$pj" "$tmp2"
+  rc=$?
+  rm -f "$tmp" "$tmp2" "$blockf"
+
+  if [[ "$rc" -ne 0 ]]; then
+    echo "[endor-vscode] ERROR ${label}: write failed for $pj" >&2
+    return 1
+  fi
+  echo "[endor-vscode] ok    ${label}: original gallery restored"
+  return 0
+}
+

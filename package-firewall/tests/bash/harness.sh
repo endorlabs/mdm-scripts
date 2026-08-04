@@ -86,3 +86,40 @@ source_stripped_lib() {
   DRY_RUN=0
   _ENDOR_WARNED=0
 }
+
+# ─── Fixture installs ─────────────────────────────────────────────────────────
+# make_macos_app <parent> <bundle name> <nameLong> [node bin]
+# Builds a macOS-shaped bundle around a copy of the fixture. The Info.plist and
+# the CFBundleExecutable shim exist so vscode_node_bin has something real to
+# resolve — the fallback writer's whole point is using VS Code's own Electron as
+# node, and hardcoding "Electron" there would be wrong (stable ships "Code").
+make_macos_app() {
+  local parent="$1" bundle="$2" long="$3" node="${4:-}" d
+  d="$parent/$bundle/Contents"
+  mkdir -p "$d/Resources/app" "$d/MacOS"
+  set_name_long "$FIXTURE" "$d/Resources/app/product.json" "$long"
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>Code</string></dict></plist>\n' \
+    > "$d/Info.plist"
+  if [ -n "$node" ]; then
+    # ELECTRON_RUN_AS_NODE is simply ignored by real node, so a shim is enough.
+    printf '#!/bin/sh\nexec %s "$@"\n' "$node" > "$d/MacOS/Code"
+    chmod +x "$d/MacOS/Code"
+  fi
+}
+
+# set_name_long <src> <dst> <nameLong> — copy <src> to <dst> with nameLong
+# replaced, which is how the two editions are told apart. GNU sed preserves a
+# missing final newline and BSD sed adds one, so the source's final-newline state
+# is restored explicitly: the fixture deliberately has none, and every
+# byte-exactness assertion downstream depends on that surviving.
+set_name_long() {
+  local src="$1" dst="$2" long="$3" tmp="$2.tmp$$"
+  sed "s#\"nameLong\"[[:space:]]*:[[:space:]]*\"[^\"]*\"#\"nameLong\": \"$long\"#" "$src" > "$tmp"
+  # A capture of the last byte is empty exactly when that byte is a newline.
+  if [ -n "$(tail -c 1 "$src")" ] && [ -z "$(tail -c 1 "$tmp")" ]; then
+    head -c "$(( $(wc -c < "$tmp") - 1 ))" "$tmp" > "$dst"
+    rm -f "$tmp"
+  else
+    mv "$tmp" "$dst"
+  fi
+}
