@@ -123,3 +123,15 @@ set_name_long() {
     mv "$tmp" "$dst"
   fi
 }
+
+# ─── Working-tree copy, for the end-to-end suite ──────────────────────────────
+# The generators write to <generator dir>/out/<namespace>, with no override. The
+# e2e suite needs to generate with throwaway credentials — and to regenerate with
+# rotated ones — so it copies the working tree into a sandbox and runs the
+# generator there. That keeps the checkout clean, and means no product code has to
+# change to accommodate the tests.
+copy_package_firewall() {
+  local dest="$1"
+  mkdir -p "$dest"
+  ( cd "$PF_DIR" && tar -cf - --exclude out . ) | ( cd "$dest" && tar -xf - )
+}

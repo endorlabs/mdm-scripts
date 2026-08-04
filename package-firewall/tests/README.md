@@ -43,6 +43,7 @@ byte-level fidelity wrong:
 | `bash/json-primitives.sh` | the awk JSON editing primitives in isolation |
 | `bash/lib.sh` | `vscode_*` lifecycle: discovery, state machine, both writers, failure modes |
 | `bash/watcher.sh` | launchd plist, systemd units, cron fallback, sidecar telemetry |
+| `bash/e2e.sh` | the generated scripts, against a sandboxed install |
 
 ## The fixture, and why not a real install
 
@@ -63,9 +64,26 @@ newline is intentional — git will say `\ No newline at end of file`, which is 
 Individual suites may additionally exercise a real installed `product.json` when one is
 present, asserting nothing version-specific.
 
+## What is not covered
+
+- **A real update.** `bash/e2e.sh` simulates one by restoring the pristine file and
+  running the repatch script. Nothing substitutes for letting an Insiders box take a
+  real overnight update and checking `repatch_count`.
+- **The firewall itself.** No network calls. Whether a blocked extension is actually
+  absent from the gallery response is a factory-side question; see the verification
+  steps in `../docs/vscode-enterprise-policy.md`.
+- **App Management / TCC.** `bash/lib.sh` proves the EPERM path fails loudly with
+  actionable text, using a read-only file. It cannot reproduce the macOS TCC denial
+  itself, which needs a machine without the grant.
+
 ## Conventions
 
-- No root, no network, no writes outside a `mktemp` directory.
+- No root, no network, no writes outside a `mktemp` directory. `bash/e2e.sh` verifies
+  its install-discovery redirect **before** executing anything, because without it the
+  suite would patch the real VS Code on the machine running it.
+- The generators write to `<generator dir>/out/<namespace>` with no override, so the
+  e2e suite copies the working tree to a temp directory and generates there. The
+  checkout stays clean, and no product code exists to accommodate the tests.
 - Suites source the lib in its **inlined** form (`grep -v '^# ' | sed '/^ *$/d'`), which
   is what `generate.sh` actually embeds. Testing the pristine file would not prove that
   nothing in the lib depends on a comment or a blank line surviving — and a heredoc body

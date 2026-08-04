@@ -1,0 +1,50 @@
+# VS Code — product.json "extensionsGallery" overrides.
+#
+# Unlike the other blocks in this directory, this one is not written verbatim into
+# a config file. It is applied as a key-level merge into the extensionsGallery
+# object inside VS Code's product.json, so every key NOT mentioned here is left
+# exactly as VS Code shipped it (including keys added by future VS Code versions).
+#
+# Syntax:
+#   "key": value    set this key
+#   -key            delete this key
+#   # ...           comment, ignored
+#
+# {{VSCODE_GALLERY_URL}} is filled in at install time, not generation time,
+# because the token embeds the <console-user>@<machine> attribution label.
+
+# Route extension search and install/update resolution through the firewall.
+# VS Code derives both endpoints from this one value:
+#   ${serviceUrl}/extensionquery                        — search / browse
+#   ${serviceUrl}/vscode/{publisher}/{name}/latest      — install / update by id
+# Blocked versions are filtered out of those responses, so they are neither
+# listable nor installable. Downloads themselves still go to Microsoft's CDN:
+# the asset URLs come from the query response, and the firewall filters rather
+# than rewrites them.
+"serviceUrl": "{{VSCODE_GALLERY_URL}}"
+
+# Delete the unpkg fallback. This is a security decision, not a cleanup.
+#
+# For install-by-identifier, VS Code tries the resource API first and, on failure,
+# falls back to whatever product.json's extensionUrlTemplate points at — by
+# default https://www.vscode-unpkg.net/_gallery/{publisher}/{name}/latest, i.e.
+# straight to Microsoft. A 400 (the firewall's "a version here is blocked")
+# classifies as ClientError and is re-thrown before that fallback is consulted,
+# so blocked extensions are safe. But a 5xx or an unclassified failure — an
+# outage, a deploy, a rate limit — does reach it, which would bypass the firewall
+# at exactly the wrong moment.
+#
+# With the key absent, that failure path instead retries the firewall's own
+# extensionquery, and fails the install if that fails too. Fail-closed.
+-extensionUrlTemplate
+
+# Deliberately left alone:
+#   controlUrl           Microsoft's malicious-extension revocation list. Keeping
+#                        it is free defense in depth alongside Endor; blanking it
+#                        would be a net security regression.
+#   resourceUrlTemplate  Feeds README/changelog/NLS rendering only — not a
+#                        version-resolution or download path.
+#   itemUrl,
+#   publisherUrl         Marketplace web views; keeps "View in Marketplace" working.
+#   nlsBaseUrl, mcpUrl,
+#   accessSKUs           Untouched by the key-level merge.
