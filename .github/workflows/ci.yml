@@ -200,10 +200,11 @@ jobs:
       - name: Generate PowerShell scripts and parse-check output
         shell: pwsh
         run: |
+          # Runs in-process; generate.ps1 sets ErrorActionPreference=Stop and
+          # exits non-zero on validation failure, either of which fails the step.
           & ./package-firewall/powershell/generate.ps1
-          if ($LASTEXITCODE -ne 0) { Write-Error "generate.ps1 exited with $LASTEXITCODE" }
-          # On non-Windows the generator writes to a directory literally named
-          # 'out\ci-smoke', so match on the namespace rather than the path.
+          # Match on the namespace rather than a fixed path in case path
+          # separators differ across platforms.
           $files = @(Get-ChildItem -Path package-firewall/powershell -Recurse -Filter *.ps1 |
             Where-Object { $_.FullName -like '*ci-smoke*' })
           if ($files.Count -lt 6) { Write-Error "expected at least 6 generated scripts, got $($files.Count)" }
