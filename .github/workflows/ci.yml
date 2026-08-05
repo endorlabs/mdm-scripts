@@ -21,7 +21,7 @@ jobs:
     name: Lint bash
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Hand-written scripts get full shellcheck. Generated examples under out/
       # are excluded: they intentionally define config blocks that not every
@@ -61,7 +61,7 @@ jobs:
     name: Lint PowerShell
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Parse-check all PowerShell files
         shell: pwsh
@@ -113,7 +113,7 @@ jobs:
     name: Validate JSON / TOML / mobileconfig
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Validate JSON
         run: |
@@ -165,7 +165,7 @@ jobs:
     name: Lint workflows
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Run actionlint
         run: |
@@ -180,7 +180,7 @@ jobs:
       ENDOR_API_KEY_ID: ci-smoke-key-id
       ENDOR_API_SECRET: ci-smoke-secret
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Generate bash scripts and syntax-check output
         run: |
@@ -231,7 +231,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Run package-firewall test suites
         run: |
@@ -247,7 +247,7 @@ jobs:
     name: Tests (windows-latest)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Run package-firewall PowerShell test suites
         shell: pwsh
