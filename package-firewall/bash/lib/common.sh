@@ -5,6 +5,9 @@
 # Functions:
 #   detect_console_user                        — finds the logged-in user when running as root
 #   resolve_user_home       <user>             — resolves home via dscl / getent / POSIX
+#   _endor_mkdir_owned      <dir> <owner> <group>
+#                                              — mkdir -p that chowns newly created
+#                                                directory segments to the console user
 #   upsert_block            <file> <content> <owner> <group>
 #                                              — non-destructive, idempotent sentinel-block writer
 #                                                delegates to upsert_block_pip when <content> has
@@ -122,6 +125,23 @@ resolve_user_home() {
   echo "$home"
 }
 
+# _endor_mkdir_owned <dir> <owner> <group>
+#
+# mkdir -p that hands any directories it CREATES to the console user. MDM runs
+# as root, so a bare mkdir -p leaves new dirs root-owned (755) — the user can
+# read through them but cannot write inside (e.g. Maven failing to create
+# ~/.m2/repository, XDG tools failing to create ~/.config/<app>). Only the
+# topmost segment that did not previously exist is chown'd (recursively), so
+# pre-existing directories and their contents are never touched. No-op when
+# the chain already exists.
+_endor_mkdir_owned() {
+  local dir="$1" owner="$2" group="$3" d="$1" topnew=""
+  while [[ -n "$d" && ! -d "$d" ]]; do topnew="$d"; d=$(dirname "$d"); done
+  mkdir -p "$dir"
+  [[ -n "$topnew" ]] && chown -R "$owner:$group" "$topnew"
+  return 0
+}
+
 # upsert_block <file> <content> <owner> <group>
 #
 # Non-destructive, idempotent config writer using sentinel blocks.
@@ -157,7 +177,7 @@ upsert_block() {
     return 0
   fi
 
-  mkdir -p "$(dirname "$file")"
+  _endor_mkdir_owned "$(dirname "$file")" "$owner" "$group"
 
   # Strip any existing Endor block, preserving everything else
   if [[ -f "$file" ]] && grep -qF "$ENDOR_BLOCK_START" "$file" 2>/dev/null; then
@@ -169,6 +189,13 @@ upsert_block() {
       !skip             { print }
     ' "$file" > "$tmp"
     mv "$tmp" "$file"
+  fi
+
+  # A file without a trailing newline would glue our start marker onto its last
+  # line, and the substring-based strip on re-run/remove would then delete that
+  # user line. Terminate it first so the marker always gets its own line.
+  if [[ -s "$file" && -n "$(tail -c 1 "$file")" ]]; then
+    echo >> "$file"
   fi
 
   printf '%s\n%s\n%s\n' \
@@ -228,7 +255,7 @@ upsert_block_pip() {
     return 0
   fi
 
-  mkdir -p "$(dirname "$file")"
+  _endor_mkdir_owned "$(dirname "$file")" "$owner" "$group"
 
   if [[ "$merge" == "1" ]]; then
     key_pattern=$(printf '%s\n' "$content" | awk '
@@ -398,7 +425,8 @@ _endor_xml_insert_ordered() {
 # <server> and a <mirror>. Maven's schema forbids a second <servers>/<mirrors>, so
 # each entry is merged into whichever container already exists; a container is
 # created only when it is absent.
-#   - File absent              → create a minimal settings.xml with both containers
+#   - File absent or empty     → create a minimal settings.xml with both containers
+#   - File has no </settings>  → ERROR (rc 1): corrupt file, cannot merge safely
 #   - <servers> present        → insert our <server> as its first child
 #   - <servers> absent         → create <servers> (in schema order) wrapping our entry
 #   - <mirrors> present/absent → same treatment for our <mirror>
@@ -413,8 +441,31 @@ upsert_xml_block() {
   printf '%s\n' "$fragment" | _endor_xml_extract "$ENDOR_XML_SERVER_START" "$ENDOR_XML_SERVER_END" > "$sf_server"
   printf '%s\n' "$fragment" | _endor_xml_extract "$ENDOR_XML_MIRROR_START" "$ENDOR_XML_MIRROR_END" > "$sf_mirror"
 
+  # The merge path needs an anchor line (existing container, later sibling, or
+  # </settings>) and would otherwise emit nothing — silently leaving the
+  # firewall unconfigured. So: a file that exists but is empty/whitespace-only
+  # is treated as absent (create from scratch); a non-empty file with no
+  # </settings> cannot be merged into safely and must fail loudly instead of
+  # reporting success.
+  local create=0
+  if [[ ! -f "$file" ]] || ! grep -q '[^[:space:]]' "$file" 2>/dev/null; then
+    create=1
+  elif ! grep -qF '</settings>' "$file" 2>/dev/null; then
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+      echo "[dry-run]   action : FAIL — malformed settings.xml (no </settings>); fix or delete it, then re-run"
+      echo "[dry-run]   file    : $file"
+      echo ""
+      rm -f "$sf_server" "$sf_mirror"
+      return 0
+    fi
+    echo "[endor] ERROR: $file exists but contains no </settings> — cannot merge safely." >&2
+    echo "[endor]        Maven firewall NOT configured. Fix or delete the file, then re-run." >&2
+    rm -f "$sf_server" "$sf_mirror"
+    return 1
+  fi
+
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    if [[ ! -f "$file" ]]; then
+    if [[ "$create" == "1" ]]; then
       echo "[dry-run]   action : CREATE settings.xml with <servers> + <mirrors>"
     else
       if grep -qF "<servers>" "$file" 2>/dev/null; then
@@ -435,10 +486,11 @@ upsert_xml_block() {
     return 0
   fi
 
-  mkdir -p "$(dirname "$file")"
+  _endor_mkdir_owned "$(dirname "$file")" "$owner" "$group"
 
-  # Case 1: file absent -> minimal settings.xml with both containers, in order.
-  if [[ ! -f "$file" ]]; then
+  # Case 1: file absent (or empty/whitespace-only) -> minimal settings.xml
+  # with both containers, in order.
+  if [[ "$create" == "1" ]]; then
     {
       echo '<?xml version="1.0" encoding="UTF-8"?>'
       echo '<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"'
@@ -550,10 +602,11 @@ remove_block() {
 
 # remove_xml_block <file> <owner> <group>
 # Strips the Endor managed entries (new per-entry server/mirror sub-blocks AND the
-# legacy combined block) from settings.xml. Any pre-existing <server>/<mirror> the
-# user had is preserved. If nothing but empty scaffolding remains, the file is
-# deleted. An emptied <servers></servers>/<mirrors></mirrors> we may have created
-# is harmless (valid, no-op) and is left in place when other content survives.
+# legacy combined block) from settings.xml. Everything else — pre-existing
+# <server>/<mirror> entries, any other user settings, and the containers/skeleton
+# themselves — is always preserved; the file is never deleted. Content outside our
+# sentinels may be the user's, and an emptied <servers></servers>/<mirrors></mirrors>
+# left behind is harmless, valid XML.
 remove_xml_block() {
   local file="$1" owner="$2" group="$3" tmp
 
@@ -573,16 +626,12 @@ remove_xml_block() {
   tmp=$(mktemp)
   _endor_xml_strip_managed "$file" > "$tmp"
 
-  # Delete only if no real child entry survives. The regex matches the SINGULAR
-  # child tags (a following '>' or space) but not the plural containers, so an
-  # emptied <servers></servers> does not count as content.
-  if ! grep -qE '<(server|mirror|profile|proxy|pluginGroup|repository|activeProfile|localRepository)[ >]' "$tmp"; then
-    rm -f "$file" "$tmp"
-    echo "[endor-remove] deleted (was empty) : $file"
-  else
-    mv "$tmp" "$file"; chown "$owner:$group" "$file"; chmod 600 "$file"
-    echo "[endor-remove] block removed       : $file"
-  fi
+  # Never delete the file: anything outside our sentinels is (or may be) the
+  # user's own configuration, and guessing "is this only our skeleton?" risks
+  # destroying it. The emptied containers we may leave behind are valid XML
+  # and a no-op for Maven.
+  mv "$tmp" "$file"; chown "$owner:$group" "$file"; chmod 600 "$file"
+  echo "[endor-remove] block removed       : $file"
 }
 
 # warn_if_key_conflict <file> <awk-pattern> <label>
