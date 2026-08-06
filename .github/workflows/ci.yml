@@ -1,0 +1,262 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint-bash:
+    name: Lint bash
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Hand-written scripts get full shellcheck. Generated examples under out/
+      # are excluded: they intentionally define config blocks that not every
+      # script consumes (SC2034 by design) and are covered by bash -n below.
+      - name: shellcheck (hand-written scripts)
+        run: |
+          set -uo pipefail
+          fail=0
+          while IFS= read -r -d '' f; do
+            args=(--severity=warning)
+            # Library/template fragments have no shebang; tell shellcheck the dialect.
+            if ! head -n1 "$f" | grep -q '^#!'; then
+              args+=(--shell=bash)
+            fi
+            if shellcheck "${args[@]}" "$f"; then
+              echo "ok: $f"
+            else
+              fail=1
+            fi
+          done < <(find . -name '*.sh' -not -path './.git/*' -not -path '*/out/*' -print0)
+          exit "$fail"
+
+      - name: bash -n (all shell files, incl. generated examples)
+        run: |
+          set -uo pipefail
+          fail=0
+          while IFS= read -r -d '' f; do
+            if bash -n "$f"; then
+              echo "ok: $f"
+            else
+              fail=1
+            fi
+          done < <(find . -name '*.sh' -not -path './.git/*' -print0)
+          exit "$fail"
+
+  lint-powershell:
+    name: Lint PowerShell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Parse-check all PowerShell files
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $bad++
+              foreach ($e in $errors) { Write-Host "PARSE ERROR: $($_.FullName): $($e.Message)" }
+            } else {
+              Write-Host "ok: $($_.FullName)"
+            }
+          }
+          if ($bad -gt 0) { Write-Error "$bad file(s) with parse errors" }
+
+      # Gate on Error severity only; warnings are printed but non-blocking
+      # (generated-script templates trip stylistic rules by design).
+      - name: PSScriptAnalyzer (hand-written scripts)
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+            Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          }
+          $paths = @(
+            'package-firewall/powershell/generate.ps1',
+            'package-firewall/powershell/lib',
+            'package-firewall/powershell/templates',
+            'agent-governance/scripts'
+          )
+          $results = @()
+          foreach ($p in $paths) {
+            $results += Invoke-ScriptAnalyzer -Path $p -Recurse -Severity @('Error', 'Warning')
+          }
+          $warnings = @($results | Where-Object Severity -eq 'Warning')
+          $errors   = @($results | Where-Object Severity -eq 'Error')
+          if ($warnings.Count -gt 0) {
+            Write-Host "PSScriptAnalyzer warnings ($($warnings.Count), non-blocking):"
+            $warnings | Format-Table RuleName, ScriptName, Line, Message -AutoSize | Out-String -Width 200 | Write-Host
+          }
+          if ($errors.Count -gt 0) {
+            $errors | Format-Table RuleName, ScriptName, Line, Message -AutoSize | Out-String -Width 200 | Write-Host
+            Write-Error "PSScriptAnalyzer found $($errors.Count) error(s)"
+          }
+          Write-Host 'PSScriptAnalyzer: no errors.'
+
+  validate-data:
+    name: Validate JSON / TOML / mobileconfig
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Validate JSON
+        run: |
+          set -uo pipefail
+          fail=0
+          while IFS= read -r -d '' f; do
+            if jq empty "$f"; then
+              echo "ok: $f"
+            else
+              echo "INVALID JSON: $f"
+              fail=1
+            fi
+          done < <(find . -name '*.json' -not -path './.git/*' -print0)
+          exit "$fail"
+
+      - name: Validate TOML
+        run: |
+          set -uo pipefail
+          fail=0
+          while IFS= read -r -d '' f; do
+            if python3 -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "$f"; then
+              echo "ok: $f"
+            else
+              echo "INVALID TOML: $f"
+              fail=1
+            fi
+          done < <(find . -name '*.toml' -not -path './.git/*' -print0)
+          exit "$fail"
+
+      - name: Validate mobileconfig (XML plists)
+        run: |
+          set -uo pipefail
+          if ! command -v xmllint >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq libxml2-utils
+          fi
+          fail=0
+          while IFS= read -r -d '' f; do
+            if xmllint --noout "$f"; then
+              echo "ok: $f"
+            else
+              echo "INVALID XML: $f"
+              fail=1
+            fi
+          done < <(find . -name '*.mobileconfig' -not -path './.git/*' -print0)
+          exit "$fail"
+
+  lint-workflows:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Run actionlint
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color
+
+  generator-smoke:
+    name: Generator smoke test
+    runs-on: ubuntu-latest
+    env:
+      ENDOR_NAMESPACE: ci-smoke
+      ENDOR_API_KEY_ID: ci-smoke-key-id
+      ENDOR_API_SECRET: ci-smoke-secret
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Generate bash scripts and syntax-check output
+        run: |
+          set -uo pipefail
+          bash package-firewall/bash/generate.sh
+          shopt -s nullglob
+          files=(package-firewall/bash/out/ci-smoke/*.sh)
+          if [ "${#files[@]}" -lt 6 ]; then
+            echo "expected at least 6 generated scripts, got ${#files[@]}"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            bash -n "$f"
+            echo "ok: $f"
+          done
+
+      - name: Generate PowerShell scripts and parse-check output
+        shell: pwsh
+        run: |
+          # Runs in-process; generate.ps1 sets ErrorActionPreference=Stop and
+          # exits non-zero on validation failure, either of which fails the step.
+          & ./package-firewall/powershell/generate.ps1
+          # Match on the namespace rather than a fixed path in case path
+          # separators differ across platforms.
+          $files = @(Get-ChildItem -Path package-firewall/powershell -Recurse -Filter *.ps1 |
+            Where-Object { $_.FullName -like '*ci-smoke*' })
+          if ($files.Count -lt 6) { Write-Error "expected at least 6 generated scripts, got $($files.Count)" }
+          $bad = 0
+          foreach ($f in $files) {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $bad++
+              Write-Host "PARSE ERROR: $($f.FullName): $($errors[0].Message)"
+            } else {
+              Write-Host "ok: $($f.FullName)"
+            }
+          }
+          if ($bad -gt 0) { Write-Error "$bad generated file(s) with parse errors" }
+
+  # The package-firewall test suites live in package-firewall/tests/ (currently
+  # on an unmerged branch). These jobs run them once the directory exists and
+  # log a skip notice until then.
+  tests:
+    name: Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Run package-firewall test suites
+        run: |
+          set -uo pipefail
+          if [ -d package-firewall/tests ]; then
+            cd package-firewall/tests || exit 1
+            bash ./run-all.sh
+          else
+            echo "No package-firewall/tests directory on this branch yet - skipping."
+          fi
+
+  tests-windows:
+    name: Tests (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Run package-firewall PowerShell test suites
+        shell: pwsh
+        run: |
+          if (Test-Path 'package-firewall/tests/run-all.ps1') {
+            Set-Location package-firewall/tests
+            ./run-all.ps1
+            exit $LASTEXITCODE
+          } else {
+            Write-Host 'No package-firewall/tests directory on this branch yet - skipping.'
+          }

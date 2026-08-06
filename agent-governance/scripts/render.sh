@@ -37,7 +37,7 @@
 #   render.sh --agent claude --target-os windows --api-key K --api-secret S --namespace NS
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 DEFAULT_API_URL="https://api.endorlabs.com"
 
 die() { echo "render.sh: error: $*" >&2; exit 1; }
