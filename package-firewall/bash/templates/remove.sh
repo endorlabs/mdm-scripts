@@ -18,6 +18,14 @@
 #   Go:
 #     ~/.config/go/env
 #
+#   Maven:
+#     ~/.m2/settings.xml
+#
+#   VS Code (stable + Insiders, all discovered install paths):
+#     .../Contents/Resources/app/product.json      (macOS)
+#     /usr/share/code*/resources/app/product.json  (Linux)
+#     plus the update watcher (launchd/systemd/cron) and the sidecar state dir
+#
 #   Shell profiles (env.sh source line):
 #     ~/.zshrc
 #     ~/.bash_profile
@@ -27,6 +35,8 @@
 #   - Files with no Endor block are skipped (nothing modified)
 #   - Files where Endor block is the only content are deleted
 #   - Files with other content have only the block stripped
+#   - product.json is restored from the original captured in its marker, not by
+#     stripping a block — JSON cannot carry a sentinel comment
 #   - --dry-run: prints what would happen, writes nothing
 #   - Safe to run multiple times (idempotent)
 
@@ -144,6 +154,28 @@ echo "[endor-remove] ── Maven ───────────────�
 
 remove_xml_block "$USER_HOME/.m2/settings.xml" "$CONSOLE_USER" "$USER_GROUP"
 
+# ── VS Code product.json ─────────────────────────────────────────────────────────
+# Not a sentinel block: the original extensionsGallery is restored byte-for-byte
+# from the base64 copy stored in the product.json marker, then the marker itself is
+# dropped. Removing the update watcher first means it cannot re-patch a file we are
+# about to restore.
+echo ""
+echo "[endor-remove] ── VS Code ──────────────────────────────────────────────────────────"
+
+vscode_remove_watcher
+
+_VSCODE_REMOVED=0
+while IFS= read -r _vsc_pj; do
+  [[ -n "$_vsc_pj" ]] || continue
+  _VSCODE_REMOVED=1
+  vscode_unpatch "$_vsc_pj" || _ENDOR_WARNED=1
+done < <(vscode_install_paths "$USER_HOME")
+unset _vsc_pj
+
+if [[ "$_VSCODE_REMOVED" == "0" ]]; then
+  echo "[endor-remove] skip (no VS Code)   : no installation found"
+fi
+
 echo ""
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
   echo "[endor-remove] ✓ Dry run complete — no files modified."
@@ -151,4 +183,7 @@ else
   echo "[endor-remove] ✓ Removal complete."
   echo "[endor-remove]   Package managers will fall back to their default registries."
   echo "[endor-remove]   Open a new terminal for shell profile changes to take effect."
+  if [[ "$_VSCODE_REMOVED" == "1" ]]; then
+    echo "[endor-remove]   Restart VS Code — product.json is only read at startup."
+  fi
 fi
