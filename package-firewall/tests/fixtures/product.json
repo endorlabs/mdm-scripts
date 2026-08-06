@@ -1,0 +1,74 @@
+{
+	"nameShort": "Code",
+	"nameLong": "Visual Studio Code",
+	"applicationName": "code",
+	"dataFolderName": ".vscode",
+	"win32MutexName": "vscode",
+	"quality": "stable",
+	"commit": "0123456789abcdef0123456789abcdef01234567",
+	"date": "2026-01-15T09:00:00.000Z",
+	"version": "1.999.0",
+	"webviewContentExternalBaseUrlTemplate": "https://{{uuid}}.vscode-cdn.net/{{quality}}/{{commit}}/out/vs/workbench/contrib/webview/browser/pre/",
+	"extensionsGallery": {
+		"nlsBaseUrl": "https://www.vscode-unpkg.net/_lp/",
+		"serviceUrl": "https://marketplace.visualstudio.com/_apis/public/gallery",
+		"itemUrl": "https://marketplace.visualstudio.com/items",
+		"publisherUrl": "https://marketplace.visualstudio.com/publishers",
+		"resourceUrlTemplate": "https://{publisher}.vscode-unpkg.net/{publisher}/{name}/{version}/{path}",
+		"extensionUrlTemplate": "https://www.vscode-unpkg.net/_gallery/{publisher}/{name}/latest",
+		"controlUrl": "https://main.vscode-cdn.net/extensions/marketplace.json",
+		"mcpUrl": "https://main.vscode-cdn.net/mcp/servers.json",
+		"accessSKUs": [
+			"copilot_enterprise_seat",
+			"copilot_enterprise_seat_quota",
+			"copilot_enterprise_seat_multi_quota",
+			"copilot_enterprise_seat_assignment",
+			"copilot_enterprise_seat_assignment_quota",
+			"copilot_enterprise_seat_assignment_multi_quota",
+			"copilot_enterprise_trial_seat",
+			"copilot_enterprise_trial_seat_quota",
+			"copilot_for_business_seat",
+			"copilot_for_business_seat_quota",
+			"copilot_for_business_seat_multi_quota",
+			"copilot_for_business_seat_assignment",
+			"copilot_for_business_seat_assignment_quota",
+			"copilot_for_business_seat_assignment_multi_quota",
+			"copilot_for_business_trial_seat",
+			"copilot_for_business_trial_seat_quota"
+		]
+	},
+	"linkProtectionTrustedDomains": [
+		"https://open-vsx.org",
+		"https://github.com"
+	],
+	"extensionEnabledApiProposals": {
+		"ms-vscode.vscode-selfhost-test-provider": [
+			"testObserver"
+		]
+	},
+	"builtInExtensions": [
+		{
+			"name": "ms-vscode.js-debug",
+			"version": "9.9.9",
+			"repo": "https://github.com/microsoft/vscode-js-debug",
+			"metadata": {
+				"id": "00000000-0000-0000-0000-000000000001",
+				"publisherId": {
+					"publisherId": "00000000-0000-0000-0000-000000000002",
+					"publisherName": "ms-vscode",
+					"displayName": "Microsoft",
+					"flags": "verified"
+				},
+				"publisherDisplayName": "Microsoft"
+			}
+		}
+	],
+	"tasConfig": {
+		"endpoint": "https://example.invalid/vscode/ab",
+		"telemetryEventName": "query-expfeature"
+	},
+	"win32TunnelServiceMutex": "vscode-tunnelservice",
+	"aiConfig": {
+		"ariaKey": "0000000000000000000000000000000000000000000000000000000000000000"
+	}
+}

@@ -2,14 +2,19 @@
 # MDM-deployable: {{DESCRIPTION}}
 # Generated for namespace={{NAMESPACE}} fqdn={{FQDN}}.
 # Do not edit — regenerate with generate.ps1.
-# Usage: .\{{SCRIPTNAME}} [-DryRun]
+# Usage: .\{{SCRIPTNAME}} [-DryRun] [-NoVSCodeWatcher]
 #
 # Requirements : PowerShell 5.1+ or PowerShell Core 7+
 # MDM context  : Run as SYSTEM (Intune default) or as the logged-in user
 # Execution policy: set to Bypass or RemoteSigned in your MDM policy
 
 [CmdletBinding()]
-param([switch]$DryRun)
+param(
+    [switch]$DryRun,
+    # Only meaningful for endor-vscode.ps1 / endor-all.ps1: skips the Scheduled
+    # Task that re-applies the product.json patch after a VS Code update.
+    [switch]$NoVSCodeWatcher
+)
 
 $ErrorActionPreference = 'Stop'
 
