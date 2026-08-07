@@ -4,20 +4,22 @@
 # No `set` options here on purpose: each suite sets its own, and the assertion
 # helpers deliberately keep going after a failure so one run reports every
 # problem rather than the first.
+#
+# Every name defined below is read by the suites that source this file, never
+# within the file itself, which shellcheck has no way to see from here.
+# shellcheck disable=SC2034
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 # Everything is derived from this file's location, so the suites run from any cwd
 # and from a checkout at any path.
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PF_DIR="$(cd "$TESTS_DIR/.." && pwd)"
-REPO_DIR="$(cd "$PF_DIR/.." && pwd)"
 BASH_DIR="$PF_DIR/bash"
 LIB="$BASH_DIR/lib/common.sh"
 FIXTURE="$TESTS_DIR/fixtures/product.json"
 
 # Facts about the fixture that several suites assert against. Kept here so a
 # deliberate fixture edit is a one-line update instead of a scavenger hunt.
-FIXTURE_LINES=74           # real lines; `wc -l` reports 73 as the last has no newline
 FIXTURE_GALLERY_LINES=28   # extensionsGallery incl. its opening and closing lines
 FIXTURE_GALLERY_KEYS=9     # keys inside extensionsGallery
 FIXTURE_SKUS=16

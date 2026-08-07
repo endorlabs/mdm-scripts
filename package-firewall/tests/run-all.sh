@@ -12,7 +12,7 @@
 # Nothing here needs root, and nothing touches an installed VS Code: the suites work
 # on copies of tests/fixtures/product.json inside a temp directory.
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 
 want_bash=1; want_ps=1
 filters=()
