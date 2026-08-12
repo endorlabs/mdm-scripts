@@ -222,9 +222,9 @@ case "$agent:$target_os" in
     # As with Cursor on Windows, the EncodedCommand does not inherit the event
     # pipe, so each hook reads stdin and pipes it into endorctl; creds/envs are
     # inlined since Codex has no managed env block.
-    cmd_audit=$(psenc "$(printf '$ProgressPreference = "SilentlyContinue"\n$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = if ([Console]::IsInputRedirected) { [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd() } else { "" }\n%s$in | %s --api %s --namespace %s --api-key %s --api-secret %s ai-audit codex; exit $LASTEXITCODE' \
+    cmd_audit=$(psenc "$(printf '$ProgressPreference = "SilentlyContinue"\n$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = if ([Console]::IsInputRedirected) { [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd() } else { "" }\n%s\n$in | %s --api %s --namespace %s --api-key %s --api-secret %s ai-audit codex; exit $LASTEXITCODE' \
       "$ps_env_sets" "$ps_bin" "$(psq "$api_url")" "$(psq "$namespace")" "$(psq "$api_key")" "$(psq "$api_secret")")")
-    cmd_session=$(psenc "$(printf '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd()\n%s\n%s$in | %s --api %s --namespace %s --api-key %s --api-secret %s ai-audit codex; exit $LASTEXITCODE' \
+    cmd_session=$(psenc "$(printf '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd()\n%s\n%s\n$in | %s --api %s --namespace %s --api-key %s --api-secret %s ai-audit codex; exit $LASTEXITCODE' \
       "$boot" "$ps_env_sets" "$ps_bin" "$(psq "$api_url")" "$(psq "$namespace")" "$(psq "$api_key")" "$(psq "$api_secret")")") ;;
 esac
 
