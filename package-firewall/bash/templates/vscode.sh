@@ -4,7 +4,7 @@
 echo ""
 echo "[endor] ── VS Code extension firewall ───────────────────────────────────────"
 
-_VSCODE_WORKER_CONTENT=$(cat <<'ENDOR_VSCODE_WORKER'
+IFS= read -r -d '' _VSCODE_WORKER_CONTENT <<'ENDOR_VSCODE_WORKER' || true
 #!/usr/bin/env bash
 set -uo pipefail
 
@@ -361,7 +361,6 @@ case "$MODE" in
   restore) restore_all ;;
 esac
 ENDOR_VSCODE_WORKER
-)
 
 _vscode_os=$(uname -s)
 case "$_vscode_os" in
