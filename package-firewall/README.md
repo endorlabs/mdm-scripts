@@ -1,6 +1,6 @@
 # Endor Package Firewall — MDM Script Generator
 
-Generates self-contained scripts for IT admins to push via MDM. Once deployed, scripts configure developer machines to route package-manager and Microsoft VS Code extension traffic through the [Endor Package Firewall](https://docs.endorlabs.com/integrations/package-firewall) — without overwriting unrelated configuration.
+Generates self-contained scripts for IT admins to push via MDM. Once deployed, scripts configure developer machines to route package-manager traffic through the [Endor Package Firewall](https://docs.endorlabs.com/integrations/package-firewall) — without overwriting unrelated configuration.
 
 Scripts are **idempotent** and safe to re-push on MDM check-in cycles.
 
