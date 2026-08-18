@@ -8,7 +8,7 @@ Scripts and generators for deploying Endor Labs configuration via MDM.
 
 ### [`package-firewall/`](package-firewall/README.md)
 
-Generates self-contained MDM scripts that route package-manager and Microsoft VS Code extension traffic through the [Endor Package Firewall](https://docs.endorlabs.com/integrations/package-firewall).
+Generates self-contained MDM scripts that route package-manager extension traffic through the [Endor Package Firewall](https://docs.endorlabs.com/integrations/package-firewall).
 
 ### [`agent-governance/`](agent-governance/README.md)
 
