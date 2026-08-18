@@ -60,8 +60,8 @@ Running either generator produces these scripts in `out/<namespace>/`:
 | `endor-go.*` | Configure Go modules only |
 | `endor-maven.*` | Configure Maven only |
 | `endor-vscode.*` | Patch VS Code `product.json` and install update remediation |
-| `endor-all.*` | Configure all supported package managers and VS Code |
-| `endor-remove.*` | Strip Endor configuration and restore VS Code gallery defaults |
+| `endor-all.*` | Configure all package managers (single-script deploy) |
+| `endor-remove.*` | Strip all Endor configuration from a machine |
 
 Each generated script carries all Endor configuration it needs; VS Code's Linux remediation also uses systemd and Python 3 as noted below.
 
