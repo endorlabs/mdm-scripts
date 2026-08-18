@@ -314,7 +314,7 @@ build_remove_script "$OUT_DIR/endor-remove.sh"
 # ─── Generate combined all.sh ─────────────────────────────────────────────────
 {
   script_header "$OUT_DIR/endor-all.sh" \
-    "Configures all package managers and Microsoft VS Code Stable for Endor Package Firewall."
+    "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry · go · maven · vscode"
   credentials_block
   echo ""
   emit_all_blocks
