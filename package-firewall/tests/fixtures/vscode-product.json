@@ -1,0 +1,19 @@
+{
+  "nameShort": "Code",
+  "nameLong": "Visual Studio Code",
+  "commit": "fixture-v1",
+  "extensionsGallery": {
+    "serviceUrl": "https://marketplace.visualstudio.com/_apis/public/gallery",
+    "itemUrl": "https://marketplace.visualstudio.com/items",
+    "controlUrl": "https://main.vscode-cdn.net/extensions/marketplace.json",
+    "extensionUrlTemplate": "https://www.vscode-unpkg.net/_gallery/{publisher}/{name}/latest"
+  },
+  "unknownFixtureData": {
+    "preserve": true,
+    "nested": [
+      1,
+      2,
+      3
+    ]
+  }
+}

@@ -1,6 +1,6 @@
 # Endor Package Firewall — MDM Script Generator
 
-Generates self-contained scripts for IT admins to push via MDM. Once deployed, scripts configure developer machines to route package installations through the [Endor Package Firewall](https://docs.endorlabs.com/integrations/package-firewall) — without overwriting existing custom configuration.
+Generates self-contained scripts for IT admins to push via MDM. Once deployed, scripts configure developer machines to route package-manager and Microsoft VS Code extension traffic through the [Endor Package Firewall](https://docs.endorlabs.com/integrations/package-firewall) — without overwriting unrelated configuration.
 
 Scripts are **idempotent** and safe to re-push on MDM check-in cycles.
 
@@ -17,7 +17,7 @@ See each directory's README for generation and deployment instructions.
 
 ---
 
-## Package managers covered
+## Ecosystems covered
 
 | Ecosystem | Tools |
 |---|---|
@@ -25,6 +25,7 @@ See each directory's README for generation and deployment instructions.
 | Python | pip, uv, poetry |
 | Go | go modules (via GOPROXY) |
 | Java | Maven (via `~/.m2/settings.xml` mirror); Gradle when it reads `~/.m2` |
+| VS Code | Microsoft VS Code Stable extension gallery |
 
 ---
 
@@ -58,9 +59,36 @@ Running either generator produces these scripts in `out/<namespace>/`:
 | `endor-python.*` | Configure Python package managers only |
 | `endor-go.*` | Configure Go modules only |
 | `endor-maven.*` | Configure Maven only |
-| `endor-all.*` | Configure all package managers (single-script deploy) |
-| `endor-remove.*` | Strip all Endor configuration from a machine |
+| `endor-vscode.*` | Patch VS Code `product.json` and install update remediation |
+| `endor-all.*` | Configure all supported package managers and VS Code |
+| `endor-remove.*` | Strip all Endor configuration and restore VS Code's upstream file |
 
-Each generated script is fully self-contained — no external files or dependencies at runtime.
+Each generated script carries all Endor configuration it needs; VS Code's Linux remediation also uses systemd and Python 3 as noted below.
 
 > **Security**: add `out/` to `.gitignore`. Generated scripts contain API credentials in plaintext.
+
+## VS Code update remediation
+
+`endor-vscode.*` sets `extensionsGallery.serviceUrl` to the authenticated
+`/firewall/vscode/_ak/<token>` endpoint and removes `extensionUrlTemplate`, so
+VS Code cannot fall back to the upstream extension download template. It saves
+the current upstream `product.json` before patching and reapplies the patch
+after VS Code updates:
+
+- macOS: root launchd daemon watching `/Applications`
+- Linux: systemd path/service units watching native `code` package locations
+- Windows: SYSTEM scheduled task using `FileSystemWatcher`, with a periodic rescan
+
+Run the script as root/SYSTEM. Restart VS Code after the first deployment if it
+was already open. `endor-remove.*` stops remediation and restores the latest
+clean upstream backup.
+
+Supported scope is Microsoft VS Code Stable installed natively in its standard
+system locations (including Windows User Installer paths). Insiders, VSCodium,
+Code OSS, Snap, Flatpak, and arbitrary portable/tarball locations are not
+managed. Linux requires systemd and Python 3.
+
+The authenticated gallery URL is stored in `product.json` and must be readable
+by local users so VS Code can consume it. On macOS, changing a resource inside
+the application bundle invalidates the original code-signature seal; the script
+does not ad-hoc re-sign the application.

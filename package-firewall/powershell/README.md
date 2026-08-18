@@ -18,6 +18,7 @@ powershell/
 │   ├── python.ps1           ← orchestration: pip / uv config file writes
 │   ├── go.ps1               ← orchestration: go env file write
 │   ├── maven.ps1            ← orchestration: .m2\settings.xml write (XML-aware)
+│   ├── vscode.ps1           ← VS Code product.json patch + scheduled remediation
 │   └── remove.ps1           ← orchestration: sentinel block + registry env var removal
 └── out/                     ← generated scripts (gitignore this)
     └── <namespace>/
@@ -25,6 +26,7 @@ powershell/
         ├── endor-python.ps1
         ├── endor-go.ps1
         ├── endor-maven.ps1
+        ├── endor-vscode.ps1
         ├── endor-all.ps1
         └── endor-remove.ps1
 
@@ -96,6 +98,7 @@ Each script in `out/<namespace>/` is **fully self-contained** — no external fi
 | `endor-python.ps1` | Team uses Python (pip, uv, poetry) only |
 | `endor-go.ps1` | Team uses Go only |
 | `endor-maven.ps1` | Team uses Java / Maven only |
+| `endor-vscode.ps1` | Team uses Microsoft VS Code Stable extensions |
 | `endor-all.ps1` | Team uses multiple ecosystems — single-script deploy |
 
 
@@ -196,6 +199,40 @@ Key behaviour:
 
 ---
 
+### `endor-vscode.ps1`
+
+Patches Microsoft VS Code Stable's installation-level `product.json`. It sets
+`extensionsGallery.serviceUrl` to:
+
+```
+https://factory.endorlabs.com/v1/namespaces/<namespace>/firewall/vscode/_ak/<base64url-token>
+```
+
+The token is the unpadded Base64 URL encoding of
+`ENDOR_API_KEY_ID:ENDOR_API_SECRET`. The structural JSON edit preserves
+unrelated product and gallery fields and removes
+`extensionsGallery.extensionUrlTemplate` entirely to disable VS Code's direct
+upstream fallback.
+
+The script:
+
+- Finds system installs in Program Files, User Installer copies under
+  `C:\Users\<user>\AppData\Local\Programs\Microsoft VS Code`, and current
+  ten-character versioned resource directories.
+- Saves a SYSTEM-owned clean backup before each upstream version is patched.
+- Installs the **Endor VS Code Extension Firewall** scheduled task as SYSTEM.
+  Its `FileSystemWatcher` responds to updater replacements and rescans every
+  minute to recover missed events and discover later installs.
+- Updates the managed URL without replacing the clean backup during credential
+  rotation.
+
+Run through Intune as SYSTEM. Restart VS Code after initial deployment if it is
+open. Supported scope is Microsoft VS Code Stable native installs only;
+Insiders, VSCodium/Code OSS, Store/packaged variants, and arbitrary portable
+locations are excluded.
+
+---
+
 ## Customising
 
 To change what gets written to a config file on target machines, edit the relevant file in `../shared/blocks/` directly:
@@ -219,7 +256,7 @@ Both support the same placeholder syntax as the macOS version:
 | `{{PLACEHOLDER}}` | Generation time by `generate.ps1` | Values baked into the config file (e.g. registry host) |
 | `${ENDOR_VAR}` | Runtime by the tool reading the config file | Credential values — resolved from registry env vars |
 
-Available placeholders: `{{API_KEY_ID}}`, `{{API_SECRET}}`, `{{NPM_REGISTRY_URL}}`, `{{NPM_REGISTRY_HOST}}`, `{{NPM_AUTH_B64}}`, `{{PYPI_URL}}`, `{{PIP_INDEX_URL}}`, `{{TRUSTED_HOST}}`, `{{GO_PROXY_URL}}`, `{{MAVEN_REGISTRY_URL}}`, `{{NAMESPACE}}`, `{{FQDN}}`
+Available placeholders: `{{API_KEY_ID}}`, `{{API_SECRET}}`, `{{NPM_REGISTRY_URL}}`, `{{NPM_REGISTRY_HOST}}`, `{{NPM_AUTH_B64}}`, `{{PYPI_URL}}`, `{{PIP_INDEX_URL}}`, `{{TRUSTED_HOST}}`, `{{GO_PROXY_URL}}`, `{{MAVEN_REGISTRY_URL}}`, `{{VSCODE_SERVICE_URL}}`, `{{NAMESPACE}}`, `{{FQDN}}`
 
 ---
 
@@ -267,6 +304,7 @@ Deploy `endor-remove.ps1` to strip all Endor configuration from a machine. It:
 
 - Removes the sentinel block from `.npmrc`, `.yarnrc.yml`, `pip.ini`, `uv.toml`, the go env file, and `.m2\settings.xml`
 - Deletes all `ENDOR_*` and `POETRY_HTTP_BASIC_ENDOR_FIREWALL_*` keys from `HKCU:\Environment`
+- Stops and removes the VS Code scheduled task, then restores the latest clean `product.json` backup
 - Deletes config files that are empty after block removal
 
 ```powershell
@@ -284,5 +322,7 @@ Deploy `endor-remove.ps1` to strip all Endor configuration from a machine. It:
 | `pip.ini` | Contains credentials in the `index-url`. File is ACL-restricted to owner. Credentials may appear in pip debug logs (`pip install -v`). pip cannot use env var references. |
 | `.npmrc`, `.yarnrc.yml`, `uv.toml` | Contain `${VAR}` references only — no credentials baked in. |
 | `.m2\settings.xml` | Contains `${env.*}` references only — no credentials baked in. ACL-restricted to owner. |
+| VS Code `product.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users because VS Code must consume it. |
+| `%ProgramData%\Endor Labs\vscode-firewall` | ACL-restricted to SYSTEM and Administrators; contains the worker and clean upstream backups. |
 | API secret in MDM | Generated scripts contain the API key and secret in plaintext (used to write registry env vars). Restrict access to the Intune policy and the generated `out/` directory. |
 | `out/` directory | Add to `.gitignore`. Do not commit generated scripts to source control. |

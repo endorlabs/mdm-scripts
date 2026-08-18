@@ -17,6 +17,7 @@ bash/
 │   ├── python.sh            ← orchestration: pip / uv config file writes
 │   ├── go.sh                ← orchestration: go env file write
 │   ├── maven.sh             ← orchestration: ~/.m2/settings.xml write (XML-aware)
+│   ├── vscode.sh            ← VS Code product.json patch + launchd/systemd remediation
 │   └── remove.sh            ← orchestration: sentinel block removal
 └── out/                     ← generated scripts (gitignore this)
     └── <namespace>/
@@ -24,6 +25,7 @@ bash/
         ├── endor-python.sh
         ├── endor-go.sh
         ├── endor-maven.sh
+        ├── endor-vscode.sh
         ├── endor-all.sh
         └── endor-remove.sh
 
@@ -81,7 +83,7 @@ Re-running `generate.sh` overwrites the same `out/<namespace>/` directory — no
 
 ## Step 2 — Upload to your MDM tool
 
-Each script in `out/<env>-<namespace>/` is **fully self-contained** — no external files or dependencies needed at runtime.
+Each script in `out/<namespace>/` carries all Endor configuration it needs. The Linux VS Code worker requires Python 3 and systemd.
 
 ### Which script to upload
 
@@ -91,6 +93,7 @@ Each script in `out/<env>-<namespace>/` is **fully self-contained** — no exter
 | `endor-python.sh` | Team uses Python (pip, uv, poetry) only |
 | `endor-go.sh` | Team uses Go only |
 | `endor-maven.sh` | Team uses Java / Maven only |
+| `endor-vscode.sh` | Team uses Microsoft VS Code Stable extensions |
 | `endor-all.sh` | Team uses multiple ecosystems — single-script deploy |
 
 
@@ -197,6 +200,48 @@ Key behaviour:
 
 ---
 
+### `endor-vscode.sh`
+
+Patches Microsoft VS Code Stable's installation-level `product.json`:
+
+```json
+{
+  "extensionsGallery": {
+    "serviceUrl": "https://factory.endorlabs.com/v1/namespaces/my-team/firewall/vscode/_ak/<base64url-token>"
+  }
+}
+```
+
+The token is the unpadded Base64 URL encoding of
+`ENDOR_API_KEY_ID:ENDOR_API_SECRET`. The patch preserves every unrelated field
+and removes `extensionsGallery.extensionUrlTemplate` entirely, which disables
+VS Code's direct upstream fallback.
+
+The script applies immediately, keeps a root-owned clean backup outside the
+application directory, and installs drift remediation:
+
+- **macOS**: `/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist` watches
+  `/Applications` and invokes a worker after VS Code updater replacements.
+- **Linux**: `endor-vscode-firewall.path` watches `/usr/share/code` and
+  `/usr/lib/code`; its oneshot systemd service reapplies the patch.
+
+Re-running is idempotent. Credential rotation updates only the managed URL and
+keeps the clean backup. When an updater writes a new upstream version, that new
+file becomes the restorable backup before it is patched.
+
+Run as root. Restart VS Code after initial deployment if it is open.
+
+Supported scope: Microsoft VS Code Stable at
+`/Applications/Visual Studio Code.app`,
+`/usr/share/code/resources/app/product.json`, or
+`/usr/lib/code/resources/app/product.json`. Insiders, VSCodium, Code OSS,
+Snap, Flatpak, and arbitrary portable/tarball installs are excluded.
+
+> On macOS, changing a bundled resource invalidates the app's original
+> code-signature seal. The script does not ad-hoc re-sign VS Code.
+
+---
+
 ## Customising
 
 To change what gets written to a config file on target machines, edit the relevant file in `../shared/blocks/` directly:
@@ -221,7 +266,7 @@ Both support `{{PLACEHOLDER}}` substitution at generation time and `${ENDOR_VAR}
 | `{{PLACEHOLDER}}` | Generation time by `generate.sh` | Values baked into the config file (e.g. registry host in a key position) |
 | `${ENDOR_VAR}` | Runtime by the tool reading the config file | Credential values — kept out of config files, resolved from `env.sh` |
 
-Available placeholders: `{{API_KEY_ID}}`, `{{API_SECRET}}`, `{{NPM_REGISTRY_URL}}`, `{{NPM_REGISTRY_HOST}}`, `{{NPM_AUTH_B64}}`, `{{PYPI_URL}}`, `{{PIP_INDEX_URL}}`, `{{TRUSTED_HOST}}`, `{{GO_PROXY_URL}}`, `{{MAVEN_REGISTRY_URL}}`, `{{NAMESPACE}}`, `{{FQDN}}`
+Available placeholders: `{{API_KEY_ID}}`, `{{API_SECRET}}`, `{{NPM_REGISTRY_URL}}`, `{{NPM_REGISTRY_HOST}}`, `{{NPM_AUTH_B64}}`, `{{PYPI_URL}}`, `{{PIP_INDEX_URL}}`, `{{TRUSTED_HOST}}`, `{{GO_PROXY_URL}}`, `{{MAVEN_REGISTRY_URL}}`, `{{VSCODE_SERVICE_URL}}`, `{{NAMESPACE}}`, `{{FQDN}}`
 
 ---
 
@@ -254,7 +299,11 @@ always-auth=true
 
 ## Removing the configuration
 
-To remove the Endor firewall configuration from a machine, delete the sentinel block from each file — everything between and including the `BEGIN` and `END` marker lines.
+To remove the Endor firewall configuration from a machine, deploy
+`endor-remove.sh`. It removes package-manager sentinel blocks, unloads the VS
+Code launchd/systemd watcher, and restores the latest clean `product.json`
+backup. If VS Code changed outside Endor after the last patch, restoration
+stops and preserves the backup for manual recovery.
 
 You can deploy a removal script that does this automatically:
 
@@ -287,6 +336,8 @@ remove_block() {
 | `pip.conf` | Contains credentials in the index-url. File is `chmod 600`. Credentials may appear in pip debug logs (`pip install -v`). pip cannot use env var references. |
 | `.npmrc`, `.yarnrc.yml`, `uv.toml` | Contain `${VAR}` references only — no credentials baked in. |
 | `~/.m2/settings.xml` | Contains `${env.*}` references only — no credentials baked in. File is `chmod 600`. |
+| VS Code `product.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users because VS Code must consume it. |
+| VS Code worker state | Root-owned (`0700`) and contains the generated worker plus clean upstream backups. |
 | Shell profiles | Contain a single `source ~/.config/endor/env.sh` line. No credentials. |
 | API secret in MDM | The generated scripts contain the API key and secret in plaintext (used to write `env.sh`). Restrict access to the MDM policy and the generated `out/` directory. |
 | `out/` directory | Add to `.gitignore`. Do not commit generated scripts to source control. |

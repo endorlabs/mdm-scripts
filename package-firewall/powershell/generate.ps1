@@ -31,6 +31,7 @@
 #   endor-python.ps1   — Python:     pip . uv . poetry
 #   endor-go.ps1       — Go:         go modules (GOPROXY -> %APPDATA%\go\env)
 #   endor-maven.ps1    — Maven:      Maven (settings.xml -> %USERPROFILE%\.m2\settings.xml)
+#   endor-vscode.ps1   — VS Code:    extension gallery firewall + update watcher
 #   endor-all.ps1      — All of the above (single-script MDM deploy)
 #   endor-remove.ps1   — Offboarding: strips Endor config + registry env vars
 #
@@ -67,10 +68,9 @@ if ("${ENDOR_API_KEY_ID}${ENDOR_API_SECRET}" -match '[^A-Za-z0-9+/=_.-]') {
 }
 
 # -- Compute derived values ----------------------------------------------------
-# Credentials are NOT precomputed here. The per-machine attributed username
-# (<console-user>@<machine>) only exists on the developer's machine, so all
-# auth values are computed at install time by templates/envvars.ps1. Only
-# machine-independent values are derived here.
+# Package-manager attribution credentials are computed at install time because
+# <console-user>@<machine> exists only on the endpoint. Machine-independent
+# values, including the VS Code path token, are derived here.
 $FQDN_HOST        = $FQDN -replace '^https?://', ''
 $TRUSTED_HOST     = $FQDN_HOST -replace ':.*', ''
 
@@ -78,6 +78,10 @@ $NPM_REGISTRY_URL  = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/npm/"
 $NPM_REGISTRY_HOST = "$FQDN_HOST/v1/namespaces/$ENDOR_NAMESPACE/firewall/npm/"
 $PYPI_URL          = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/pypi/simple/"
 $MAVEN_REGISTRY_URL = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/maven/"
+$VSCODE_TOKEN = [System.Convert]::ToBase64String(
+    [System.Text.Encoding]::UTF8.GetBytes("${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}")
+).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+$VSCODE_SERVICE_URL = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/vscode/_ak/$VSCODE_TOKEN"
 
 # -- Output directory ----------------------------------------------------------
 $OutDir = Join-Path $ScriptDir "out\$ENDOR_NAMESPACE"
@@ -101,6 +105,7 @@ function Invoke-Substitute {
     $r = $r.Replace('{{PYPI_URL}}',           $PYPI_URL)
     $r = $r.Replace('{{TRUSTED_HOST}}',       $TRUSTED_HOST)
     $r = $r.Replace('{{MAVEN_REGISTRY_URL}}', $MAVEN_REGISTRY_URL)
+    $r = $r.Replace('{{VSCODE_SERVICE_URL}}',  $VSCODE_SERVICE_URL)
     $r
 }
 
@@ -145,6 +150,32 @@ function Get-ScriptHeader {
     $r
 }
 
+# Get-SystemScriptHeader <scriptname> <description>
+# Machine-level integrations must run even when no interactive user is logged in.
+function Get-SystemScriptHeader {
+    param([string]$ScriptName, [string]$Description)
+    @"
+#!/usr/bin/env pwsh
+# MDM-deployable: $Description
+# Generated for namespace=$ENDOR_NAMESPACE fqdn=$FQDN.
+# Do not edit -- regenerate with generate.ps1.
+# Usage: .\$ScriptName [-DryRun]
+#
+# Requirements : Windows PowerShell 5.1+ or PowerShell Core 7+
+# MDM context  : Run as SYSTEM (Intune default) or Administrator
+
+[CmdletBinding()]
+param([switch]`$DryRun)
+
+`$ErrorActionPreference = 'Stop'
+`$EndorWarned = `$false
+
+if (`$DryRun) {
+    Write-Host '[endor] DRY RUN -- no files, services, or scheduled tasks will be modified.'
+}
+"@
+}
+
 # Warning footer appended to install scripts (MDM alert hook, mirrors bash).
 $ScriptFooter = @'
 
@@ -166,6 +197,18 @@ function Build-Script {
         '# == Env vars setup =====================================================',
         (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'envvars.ps1') -Raw -Encoding UTF8)),
         '',
+        (Invoke-Substitute (Get-Content $Template -Raw -Encoding UTF8)),
+        $ScriptFooter
+    )
+    Set-Content -Path $OutputPath -Value ($parts -join "`n") -Encoding UTF8
+}
+
+# Build-SystemScript <template> <outputpath> <description>
+function Build-SystemScript {
+    param([string]$Template, [string]$OutputPath, [string]$Description)
+    $name  = Split-Path $OutputPath -Leaf
+    $parts = @(
+        (Get-SystemScriptHeader -ScriptName $name -Description $Description),
         (Invoke-Substitute (Get-Content $Template -Raw -Encoding UTF8)),
         $ScriptFooter
     )
@@ -205,13 +248,18 @@ Build-Script `
     (Join-Path $OutDir  'endor-maven.ps1') `
     'Configures Maven (~\.m2\settings.xml) for Endor Package Firewall.'
 
+Build-SystemScript `
+    (Join-Path $TmplDir 'vscode.ps1') `
+    (Join-Path $OutDir  'endor-vscode.ps1') `
+    'Configures Microsoft VS Code Stable extensions for Endor Package Firewall and installs update remediation.'
+
 # -- Generate remove script ----------------------------------------------------
 Build-RemoveScript (Join-Path $OutDir 'endor-remove.ps1')
 
 # -- Generate combined all.ps1 -------------------------------------------------
 $_allName  = 'endor-all.ps1'
 $_allParts = @(
-    (Get-ScriptHeader -ScriptName $_allName -Description 'Configures all package managers for Endor Package Firewall. Covers: npm . pnpm . yarn classic . yarn 2+ . bun . pip . uv . poetry . go . maven'),
+    (Get-ScriptHeader -ScriptName $_allName -Description 'Configures all package managers and Microsoft VS Code Stable for Endor Package Firewall.'),
     (Get-AllBlocks),
     '# == Env vars setup =====================================================',
     (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'envvars.ps1') -Raw -Encoding UTF8)),
@@ -228,8 +276,11 @@ $_allParts = @(
     '# == Maven ==============================================================',
     (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'maven.ps1') -Raw -Encoding UTF8)),
     '',
+    '# == VS Code extensions ==================================================',
+    (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'vscode.ps1') -Raw -Encoding UTF8)),
+    '',
     "Write-Host ''",
-    "Write-Host '[endor] [done] All package managers configured for $ENDOR_NAMESPACE (js + python + go + maven).'",
+    "Write-Host '[endor] [done] All package managers and VS Code configured for $ENDOR_NAMESPACE.'",
     $ScriptFooter
 )
 Set-Content -Path (Join-Path $OutDir $_allName) -Value ($_allParts -join "`n") -Encoding UTF8
@@ -243,6 +294,7 @@ Write-Host ('   {0,-24}  {1}' -f 'endor-js.ps1',     'npm . pnpm . yarn classic 
 Write-Host ('   {0,-24}  {1}' -f 'endor-python.ps1', 'pip . uv . poetry')
 Write-Host ('   {0,-24}  {1}' -f 'endor-go.ps1',     'go modules (GOPROXY)')
 Write-Host ('   {0,-24}  {1}' -f 'endor-maven.ps1',  'maven (~\.m2\settings.xml)')
+Write-Host ('   {0,-24}  {1}' -f 'endor-vscode.ps1', 'VS Code extension gallery + update remediation')
 Write-Host ('   {0,-24}  {1}' -f 'endor-all.ps1',    'all of the above (single-script deploy)')
 Write-Host ('   {0,-24}  {1}' -f 'endor-remove.ps1', 'offboarding -- strips all Endor config + registry env vars')
 Write-Host ''
