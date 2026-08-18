@@ -19,7 +19,7 @@
 #     ~/.config/go/env
 #
 #   VS Code:
-#     Restores product.json backup and removes update remediation
+#     Restores default gallery properties and removes update remediation
 #
 #   Shell profiles (env.sh source line):
 #     ~/.zshrc

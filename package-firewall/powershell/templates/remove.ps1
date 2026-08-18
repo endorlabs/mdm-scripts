@@ -20,7 +20,7 @@
 #     %USERPROFILE%\.m2\settings.xml
 #
 #   VS Code:
-#     Restores product.json backup and removes update remediation
+#     Restores default gallery properties and removes update remediation
 #
 # Registry env vars removed:
 #   ENDOR_API_KEY_ID, ENDOR_API_SECRET, ENDOR_AUTH_B64

@@ -13,19 +13,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $FirewallUrl = '{{VSCODE_SERVICE_URL}}'
-$DefaultStateRoot = Join-Path $env:ProgramData 'Endor Labs\vscode-firewall'
-$StateRoot = if ($env:ENDOR_VSCODE_STATE_DIR) { $env:ENDOR_VSCODE_STATE_DIR } else { $DefaultStateRoot }
-
-function Get-StringSha256 {
-    param([string]$Value)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        ($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Value)) |
-            ForEach-Object { $_.ToString('x2') }) -join ''
-    } finally {
-        $sha.Dispose()
-    }
-}
+$DefaultServiceUrl = 'https://marketplace.visualstudio.com/_apis/public/gallery'
+$DefaultExtensionUrlTemplate = 'https://www.vscode-unpkg.net/_gallery/{publisher}/{name}/latest'
 
 function Get-InstallRoots {
     $roots = [System.Collections.Generic.List[string]]::new()
@@ -96,6 +85,12 @@ function Test-ProductManaged {
     (Get-ServiceUrl $Product) -like '*/firewall/vscode/_ak/*'
 }
 
+function Test-ProductRestored {
+    param([object]$Product)
+    (Get-ServiceUrl $Product) -eq $DefaultServiceUrl -and
+        [string]$Product.extensionsGallery.extensionUrlTemplate -eq $DefaultExtensionUrlTemplate
+}
+
 function ConvertTo-PatchedJson {
     param([object]$Product)
     if (-not $Product.extensionsGallery) {
@@ -112,14 +107,28 @@ function ConvertTo-PatchedJson {
     ($Product | ConvertTo-Json -Depth 100) + [System.Environment]::NewLine
 }
 
+function ConvertTo-RestoredJson {
+    param([object]$Product)
+    if (-not $Product.extensionsGallery) {
+        $Product | Add-Member -NotePropertyName extensionsGallery -NotePropertyValue ([PSCustomObject]@{})
+    }
+    if ($Product.extensionsGallery.PSObject.Properties['serviceUrl']) {
+        $Product.extensionsGallery.serviceUrl = $DefaultServiceUrl
+    } else {
+        $Product.extensionsGallery | Add-Member -NotePropertyName serviceUrl -NotePropertyValue $DefaultServiceUrl
+    }
+    if ($Product.extensionsGallery.PSObject.Properties['extensionUrlTemplate']) {
+        $Product.extensionsGallery.extensionUrlTemplate = $DefaultExtensionUrlTemplate
+    } else {
+        $Product.extensionsGallery |
+            Add-Member -NotePropertyName extensionUrlTemplate -NotePropertyValue $DefaultExtensionUrlTemplate
+    }
+    ($Product | ConvertTo-Json -Depth 100) + [System.Environment]::NewLine
+}
+
 function Write-Utf8NoBom {
     param([string]$FilePath, [string]$Content)
     [System.IO.File]::WriteAllText($FilePath, $Content, [System.Text.UTF8Encoding]::new($false))
-}
-
-function Get-StateEntry {
-    param([string]$FilePath)
-    Join-Path $StateRoot (Get-StringSha256 $FilePath.ToLowerInvariant())
 }
 
 function Invoke-PatchOne {
@@ -140,26 +149,6 @@ function Invoke-PatchOne {
         Write-Host "[dry-run]   file   : $FilePath"
         Write-Host "[dry-run]   URL    : $FirewallUrl"
         return $true
-    }
-
-    $entry = Get-StateEntry $FilePath
-    New-Item -ItemType Directory -Path $entry -Force | Out-Null
-    Write-Utf8NoBom -FilePath (Join-Path $entry 'path.txt') -Content ($FilePath + [Environment]::NewLine)
-
-    $currentHash = (Get-FileHash -LiteralPath $FilePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    $managedHashPath = Join-Path $entry 'managed.sha256'
-    $previousHash = if (Test-Path -LiteralPath $managedHashPath) {
-        (Get-Content -LiteralPath $managedHashPath -Raw).Trim()
-    } else { '' }
-    $backupPath = Join-Path $entry 'upstream-product.json'
-
-    if ($currentHash -ne $previousHash) {
-        if ((Test-ProductManaged $product) -and -not (Test-Path -LiteralPath $backupPath)) {
-            Write-Warning "[endor-vscode] existing managed product.json has no clean backup; removal cannot restore this version"
-        } else {
-            Copy-Item -LiteralPath $FilePath -Destination $backupPath -Force
-            Write-Host "[endor-vscode] saved upstream backup: $backupPath"
-        }
     }
 
     $tempPath = "$FilePath.endor.$([Guid]::NewGuid().ToString('N')).tmp"
@@ -183,8 +172,6 @@ function Invoke-PatchOne {
         return $false
     }
 
-    $newHash = (Get-FileHash -LiteralPath $FilePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    Write-Utf8NoBom -FilePath $managedHashPath -Content ($newHash + [Environment]::NewLine)
     Write-Host "[endor-vscode] configured: $FilePath"
     $true
 }
@@ -202,66 +189,58 @@ function Invoke-PatchAll {
     $ok
 }
 
+function Invoke-RestoreOne {
+    param([string]$FilePath)
+    try {
+        $product = Read-ProductJson $FilePath
+    } catch {
+        Write-Error "[endor-vscode] refusing to modify invalid JSON: $FilePath : $_"
+        return $false
+    }
+
+    if (-not (Test-ProductManaged $product)) {
+        Write-Host "[endor-vscode] skip restore (gallery is not Endor-managed): $FilePath"
+        return $true
+    }
+    if ($DryRun) {
+        Write-Host '[dry-run]   action : RESTORE default VS Code gallery settings'
+        Write-Host "[dry-run]   file   : $FilePath"
+        return $true
+    }
+
+    $tempPath = "$FilePath.endor-restore.$([Guid]::NewGuid().ToString('N')).tmp"
+    $replaceBackup = "$FilePath.endor-restore-replace.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        Write-Utf8NoBom -FilePath $tempPath -Content (ConvertTo-RestoredJson $product)
+        $validated = Read-ProductJson $tempPath
+        if (-not (Test-ProductRestored $validated)) {
+            throw 'restored JSON did not contain the default gallery settings'
+        }
+        $acl = if (Get-Command Get-Acl -ErrorAction SilentlyContinue) {
+            Get-Acl -LiteralPath $FilePath
+        } else { $null }
+        [System.IO.File]::Replace($tempPath, $FilePath, $replaceBackup, $true)
+        if ($acl) { Set-Acl -LiteralPath $FilePath -AclObject $acl }
+        Remove-Item -LiteralPath $replaceBackup -Force -ErrorAction SilentlyContinue
+        Write-Host "[endor-vscode] restored default gallery settings: $FilePath"
+        return $true
+    } catch {
+        Remove-Item -LiteralPath $tempPath, $replaceBackup -Force -ErrorAction SilentlyContinue
+        Write-Error "[endor-vscode] failed to restore $FilePath : $_"
+        return $false
+    }
+}
+
 function Invoke-RestoreAll {
-    if (-not (Test-Path -LiteralPath $StateRoot)) {
-        Write-Host '[endor-vscode] no managed VS Code backups found'
+    $files = @(Get-ProductFiles)
+    if ($files.Count -eq 0) {
+        Write-Host '[endor-vscode] Microsoft VS Code Stable not found; nothing to restore.'
         return $true
     }
     $ok = $true
-    $found = $false
-    foreach ($pathRecord in @(Get-ChildItem -LiteralPath $StateRoot -Filter path.txt -File -Recurse -ErrorAction SilentlyContinue)) {
-        $found = $true
-        $entry = $pathRecord.DirectoryName
-        $file = (Get-Content -LiteralPath $pathRecord.FullName -Raw).Trim()
-        $backupPath = Join-Path $entry 'upstream-product.json'
-        $managedHashPath = Join-Path $entry 'managed.sha256'
-        if (-not (Test-Path -LiteralPath $file)) {
-            if ($DryRun) {
-                Write-Host "[dry-run]   action : REMOVE stale state for missing install: $file"
-            } else {
-                Remove-Item -LiteralPath $entry -Recurse -Force
-                Write-Host "[endor-vscode] removed stale state for missing install: $file"
-            }
-            continue
-        }
-        if (-not (Test-Path -LiteralPath $backupPath) -or
-            -not (Test-Path -LiteralPath $managedHashPath)) {
-            Write-Host "[endor-vscode] skip restore (incomplete state): $file"
-            $ok = $false
-            continue
-        }
-        $expected = (Get-Content -LiteralPath $managedHashPath -Raw).Trim()
-        $current = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($current -ne $expected) {
-            Write-Host "[endor-vscode] skip restore (product.json changed outside Endor): $file"
-            $ok = $false
-            continue
-        }
-        if ($DryRun) {
-            Write-Host '[dry-run]   action : RESTORE upstream product.json'
-            Write-Host "[dry-run]   file   : $file"
-            continue
-        }
-        try {
-            $null = Read-ProductJson $backupPath
-            $tempPath = "$file.endor-restore.$([Guid]::NewGuid().ToString('N')).tmp"
-            $replaceBackup = "$file.endor-restore-replace.$([Guid]::NewGuid().ToString('N')).tmp"
-            Copy-Item -LiteralPath $backupPath -Destination $tempPath -Force
-            $acl = if (Get-Command Get-Acl -ErrorAction SilentlyContinue) {
-                Get-Acl -LiteralPath $file
-            } else { $null }
-            [System.IO.File]::Replace($tempPath, $file, $replaceBackup, $true)
-            if ($acl) { Set-Acl -LiteralPath $file -AclObject $acl }
-            Remove-Item -LiteralPath $replaceBackup -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $entry -Recurse -Force
-            Write-Host "[endor-vscode] restored upstream product.json: $file"
-        } catch {
-            Remove-Item -LiteralPath $tempPath, $replaceBackup -Force -ErrorAction SilentlyContinue
-            Write-Error "[endor-vscode] failed to restore $file : $_"
-            $ok = $false
-        }
+    foreach ($file in $files) {
+        if (-not (Invoke-RestoreOne $file)) { $ok = $false }
     }
-    if (-not $found) { Write-Host '[endor-vscode] no managed VS Code backups found' }
     $ok
 }
 

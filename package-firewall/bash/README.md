@@ -217,17 +217,16 @@ The token is the unpadded Base64 URL encoding of
 and removes `extensionsGallery.extensionUrlTemplate` entirely, which disables
 VS Code's direct upstream fallback.
 
-The script applies immediately, keeps a root-owned clean backup outside the
-application directory, and installs drift remediation:
+The script applies immediately and installs drift remediation:
 
 - **macOS**: `/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist` watches
   `/Applications` and invokes a worker after VS Code updater replacements.
 - **Linux**: `endor-vscode-firewall.path` watches `/usr/share/code` and
   `/usr/lib/code`; its oneshot systemd service reapplies the patch.
 
-Re-running is idempotent. Credential rotation updates only the managed URL and
-keeps the clean backup. When an updater writes a new upstream version, that new
-file becomes the restorable backup before it is patched.
+Re-running is idempotent. Credential rotation and updater remediation modify
+only `serviceUrl` and `extensionUrlTemplate`; every other current
+`product.json` value is preserved.
 
 Run as root. Restart VS Code after initial deployment if it is open.
 
@@ -301,9 +300,9 @@ always-auth=true
 
 To remove the Endor firewall configuration from a machine, deploy
 `endor-remove.sh`. It removes package-manager sentinel blocks, unloads the VS
-Code launchd/systemd watcher, and restores the latest clean `product.json`
-backup. If VS Code changed outside Endor after the last patch, restoration
-stops and preserves the backup for manual recovery.
+Code launchd/systemd watcher, and restores the stable default values for
+`serviceUrl` and `extensionUrlTemplate`. Other `product.json` modifications are
+left intact.
 
 You can deploy a removal script that does this automatically:
 
@@ -337,7 +336,7 @@ remove_block() {
 | `.npmrc`, `.yarnrc.yml`, `uv.toml` | Contain `${VAR}` references only — no credentials baked in. |
 | `~/.m2/settings.xml` | Contains `${env.*}` references only — no credentials baked in. File is `chmod 600`. |
 | VS Code `product.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users because VS Code must consume it. |
-| VS Code worker state | Root-owned (`0700`) and contains the generated worker plus clean upstream backups. |
+| VS Code worker state | Root-owned (`0700`) and contains the generated remediation worker. |
 | Shell profiles | Contain a single `source ~/.config/endor/env.sh` line. No credentials. |
 | API secret in MDM | The generated scripts contain the API key and secret in plaintext (used to write `env.sh`). Restrict access to the MDM policy and the generated `out/` directory. |
 | `out/` directory | Add to `.gitignore`. Do not commit generated scripts to source control. |

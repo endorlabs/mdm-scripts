@@ -9,6 +9,8 @@ IFS= read -r -d '' _VSCODE_WORKER_CONTENT <<'ENDOR_VSCODE_WORKER' || true
 set -uo pipefail
 
 FIREWALL_URL='{{VSCODE_SERVICE_URL}}'
+DEFAULT_SERVICE_URL='https://marketplace.visualstudio.com/_apis/public/gallery'
+DEFAULT_EXTENSION_URL_TEMPLATE='https://www.vscode-unpkg.net/_gallery/{publisher}/{name}/latest'
 MODE="once"
 DRY_RUN=0
 
@@ -20,43 +22,6 @@ for arg in "$@"; do
     *) echo "[endor-vscode] ERROR: unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
-
-case "$(uname -s)" in
-  Darwin)
-    DEFAULT_STATE_DIR="/Library/Application Support/Endor Labs/vscode-firewall"
-    ;;
-  Linux)
-    DEFAULT_STATE_DIR="/var/lib/endor/vscode-firewall"
-    ;;
-  *)
-    echo "[endor-vscode] ERROR: unsupported operating system" >&2
-    exit 1
-    ;;
-esac
-
-STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-$DEFAULT_STATE_DIR}"
-
-hash_stream() {
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum | awk '{print $1}'
-  else
-    echo "[endor-vscode] ERROR: SHA-256 utility not found" >&2
-    return 1
-  fi
-}
-
-hash_file() {
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
-  else
-    echo "[endor-vscode] ERROR: SHA-256 utility not found" >&2
-    return 1
-  fi
-}
 
 list_product_files() {
   if [[ -n "${ENDOR_VSCODE_PRODUCT_JSON:-}" ]]; then
@@ -122,6 +87,11 @@ function run(argv) {
   if (action === 'service') {
     return gallery && typeof gallery.serviceUrl === 'string' ? gallery.serviceUrl : '';
   }
+  if (action === 'template') {
+    return gallery && typeof gallery.extensionUrlTemplate === 'string'
+      ? gallery.extensionUrlTemplate
+      : '';
+  }
   if (action === 'has-template') {
     return gallery && Object.prototype.hasOwnProperty.call(gallery, 'extensionUrlTemplate')
       ? 'true'
@@ -133,6 +103,15 @@ function run(argv) {
     }
     product.extensionsGallery.serviceUrl = argv[2];
     delete product.extensionsGallery.extensionUrlTemplate;
+    writeUtf8(path, JSON.stringify(product, null, 2) + '\n');
+    return 'ok';
+  }
+  if (action === 'restore') {
+    if (!gallery || typeof gallery !== 'object' || Array.isArray(gallery)) {
+      product.extensionsGallery = {};
+    }
+    product.extensionsGallery.serviceUrl = argv[2];
+    product.extensionsGallery.extensionUrlTemplate = argv[3];
     writeUtf8(path, JSON.stringify(product, null, 2) + '\n');
     return 'ok';
   }
@@ -191,6 +170,22 @@ PY
   fi
 }
 
+json_extension_template() {
+  local file="$1"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    jxa_json template "$file" 2>/dev/null
+  else
+    python3 - "$file" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    value = json.load(handle).get("extensionsGallery", {}).get("extensionUrlTemplate", "")
+if isinstance(value, str):
+    print(value)
+PY
+  fi
+}
+
 json_is_desired() {
   local file="$1" current
   current=$(json_service_url "$file" 2>/dev/null || true)
@@ -201,6 +196,14 @@ json_is_managed() {
   local file="$1" current
   current=$(json_service_url "$file" 2>/dev/null || true)
   [[ "$current" == *"/firewall/vscode/_ak/"* ]]
+}
+
+json_is_restored() {
+  local file="$1" service template
+  service=$(json_service_url "$file" 2>/dev/null || true)
+  template=$(json_extension_template "$file" 2>/dev/null || true)
+  [[ "$service" == "$DEFAULT_SERVICE_URL" \
+    && "$template" == "$DEFAULT_EXTENSION_URL_TEMPLATE" ]]
 }
 
 write_patched_json() {
@@ -229,14 +232,33 @@ PY
   fi
 }
 
-state_entry_for() {
-  local file="$1" path_hash
-  path_hash=$(printf '%s' "$file" | hash_stream) || return 1
-  printf '%s/%s\n' "$STATE_DIR" "$path_hash"
+write_restored_json() {
+  local file="$1"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    jxa_json restore "$file" "$DEFAULT_SERVICE_URL" "$DEFAULT_EXTENSION_URL_TEMPLATE" >/dev/null
+  else
+    python3 - "$file" "$DEFAULT_SERVICE_URL" "$DEFAULT_EXTENSION_URL_TEMPLATE" <<'PY'
+import json
+import sys
+
+path, service_url, extension_url_template = sys.argv[1:4]
+with open(path, encoding="utf-8") as handle:
+    product = json.load(handle)
+gallery = product.get("extensionsGallery")
+if not isinstance(gallery, dict):
+    gallery = {}
+    product["extensionsGallery"] = gallery
+gallery["serviceUrl"] = service_url
+gallery["extensionUrlTemplate"] = extension_url_template
+with open(path, "w", encoding="utf-8", newline="\n") as handle:
+    json.dump(product, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PY
+  fi
 }
 
 patch_one() {
-  local file="$1" entry current_hash previous_hash="" tmp
+  local file="$1" tmp
 
   if ! json_validate "$file"; then
     echo "[endor-vscode] ERROR: refusing to modify invalid JSON: $file" >&2
@@ -253,25 +275,6 @@ patch_one() {
     return 0
   fi
 
-  entry=$(state_entry_for "$file") || return 1
-  mkdir -p "$entry"
-  chmod 700 "$STATE_DIR" "$entry"
-  printf '%s\n' "$file" > "$entry/path"
-  chmod 600 "$entry/path"
-
-  current_hash=$(hash_file "$file") || return 1
-  [[ -f "$entry/managed.sha256" ]] && previous_hash=$(<"$entry/managed.sha256")
-
-  if [[ "$current_hash" != "$previous_hash" ]]; then
-    if json_is_managed "$file" && [[ ! -f "$entry/upstream-product.json" ]]; then
-      echo "[endor-vscode] WARNING: existing managed product.json has no clean backup; removal cannot restore this version" >&2
-    else
-      cp -p "$file" "$entry/upstream-product.json"
-      chmod 600 "$entry/upstream-product.json"
-      echo "[endor-vscode] saved upstream backup: $entry/upstream-product.json"
-    fi
-  fi
-
   tmp=$(mktemp "${file}.endor.XXXXXX")
   if ! cp -p "$file" "$tmp" \
       || ! write_patched_json "$tmp" \
@@ -283,8 +286,6 @@ patch_one() {
   fi
 
   mv -f "$tmp" "$file"
-  hash_file "$file" > "$entry/managed.sha256"
-  chmod 600 "$entry/managed.sha256"
   echo "[endor-vscode] configured: $file"
 }
 
@@ -305,54 +306,51 @@ patch_all() {
   return "$status"
 }
 
+restore_one() {
+  local file="$1" tmp
+
+  if ! json_validate "$file"; then
+    echo "[endor-vscode] ERROR: refusing to modify invalid JSON: $file" >&2
+    return 1
+  fi
+  if ! json_is_managed "$file"; then
+    echo "[endor-vscode] skip restore (gallery is not Endor-managed): $file"
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "[dry-run]   action : RESTORE default VS Code gallery settings"
+    echo "[dry-run]   file   : $file"
+    return 0
+  fi
+
+  tmp=$(mktemp "${file}.endor-restore.XXXXXX")
+  if ! cp -p "$file" "$tmp" \
+      || ! write_restored_json "$tmp" \
+      || ! json_validate "$tmp" \
+      || ! json_is_restored "$tmp"; then
+    rm -f "$tmp"
+    echo "[endor-vscode] ERROR: failed to restore default gallery settings in $file" >&2
+    return 1
+  fi
+
+  mv -f "$tmp" "$file"
+  echo "[endor-vscode] restored default gallery settings: $file"
+}
+
 restore_all() {
-  local path_record entry file expected current tmp status=0 found=0
-  for path_record in "$STATE_DIR"/*/path; do
-    [[ -f "$path_record" ]] || continue
-    found=1
-    entry=$(dirname "$path_record")
-    file=$(<"$path_record")
-    if [[ ! -f "$file" ]]; then
-      if [[ "$DRY_RUN" == "1" ]]; then
-        echo "[dry-run]   action : REMOVE stale state for missing install: $file"
-      else
-        rm -rf "$entry"
-        echo "[endor-vscode] removed stale state for missing install: $file"
-      fi
-      continue
-    fi
-    if [[ ! -f "$entry/upstream-product.json" || ! -f "$entry/managed.sha256" ]]; then
-      echo "[endor-vscode] skip restore (incomplete state): $file"
-      status=1
-      continue
-    fi
-    expected=$(<"$entry/managed.sha256")
-    current=$(hash_file "$file") || { status=1; continue; }
-    if [[ "$current" != "$expected" ]]; then
-      echo "[endor-vscode] skip restore (product.json changed outside Endor): $file"
-      status=1
-      continue
-    fi
-    if [[ "$DRY_RUN" == "1" ]]; then
-      echo "[dry-run]   action : RESTORE upstream product.json"
-      echo "[dry-run]   file   : $file"
-      continue
-    fi
-    if ! json_validate "$entry/upstream-product.json"; then
-      echo "[endor-vscode] ERROR: backup is invalid JSON: $entry/upstream-product.json" >&2
-      status=1
-      continue
-    fi
-    tmp=$(mktemp "${file}.endor-restore.XXXXXX")
-    if cp -p "$entry/upstream-product.json" "$tmp" && mv -f "$tmp" "$file"; then
-      rm -rf "$entry"
-      echo "[endor-vscode] restored upstream product.json: $file"
-    else
-      rm -f "$tmp"
-      status=1
-    fi
+  local files=() file status=0
+  while IFS= read -r file; do
+    [[ -n "$file" ]] && files+=("$file")
+  done < <(list_product_files)
+
+  if [[ "${#files[@]}" -eq 0 ]]; then
+    echo "[endor-vscode] Microsoft VS Code Stable not found; nothing to restore."
+    return 0
+  fi
+
+  for file in "${files[@]}"; do
+    restore_one "$file" || status=1
   done
-  [[ "$found" == "1" ]] || echo "[endor-vscode] no managed VS Code backups found"
   return "$status"
 }
 

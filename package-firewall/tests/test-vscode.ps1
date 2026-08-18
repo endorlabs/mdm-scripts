@@ -8,6 +8,8 @@ $Namespace = 'ci-smoke'
 $KeyId = 'ci-smoke-key-id'
 $Secret = 'ci-smoke-secret'
 $ExpectedUrl = 'https://factory.endorlabs.com/v1/namespaces/ci-smoke/firewall/vscode/_ak/Y2ktc21va2Uta2V5LWlkOmNpLXNtb2tlLXNlY3JldA'
+$DefaultServiceUrl = 'https://marketplace.visualstudio.com/_apis/public/gallery'
+$DefaultExtensionUrlTemplate = 'https://www.vscode-unpkg.net/_gallery/{publisher}/{name}/latest'
 $TempDir = Join-Path ([IO.Path]::GetTempPath()) "endor-vscode-tests-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $TempDir | Out-Null
 
@@ -51,6 +53,18 @@ function Assert-Patched {
     if (-not $product.unknownFixtureData.preserve) { throw 'unknown product data was not preserved' }
 }
 
+function Assert-Restored {
+    param([string]$ProductPath)
+    $product = Get-Content -LiteralPath $ProductPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($product.extensionsGallery.serviceUrl -ne $DefaultServiceUrl) {
+        throw 'default serviceUrl was not restored'
+    }
+    if ($product.extensionsGallery.extensionUrlTemplate -ne $DefaultExtensionUrlTemplate) {
+        throw 'default extensionUrlTemplate was not restored'
+    }
+    if (-not $product.unknownFixtureData.preserve) { throw 'unknown product data was not preserved' }
+}
+
 function Assert-FilesEqual {
     param([string]$Actual, [string]$Expected)
     $actualHash = (Get-FileHash -LiteralPath $Actual -Algorithm SHA256).Hash
@@ -64,10 +78,8 @@ try {
 
     Write-Host 'test: patches product.json, preserves fields, and is idempotent'
     $product = Join-Path $TempDir 'basic-product.json'
-    $original = Join-Path $TempDir 'basic-original.json'
     $state = Join-Path $TempDir 'basic-state'
     Copy-Item $Fixture $product
-    Copy-Item $Fixture $original
     Invoke-Installer $product $state
     Assert-Patched $product
     $before = (Get-FileHash $product -Algorithm SHA256).Hash
@@ -76,7 +88,7 @@ try {
     if ($before -ne $after) { throw 'idempotent run changed product.json' }
     & (Join-Path $state 'worker.ps1') -Mode Restore
     if ($LASTEXITCODE) { throw 'restore failed' }
-    Assert-FilesEqual $product $original
+    Assert-Restored $product
 
     Write-Host 'test: dry-run reports drift without writing'
     $product = Join-Path $TempDir 'dry-product.json'
@@ -88,21 +100,35 @@ try {
     if ($before -ne $after) { throw 'dry-run changed product.json' }
     if (Test-Path $state) { throw 'dry-run created managed state' }
 
-    Write-Host 'test: credential rotation keeps the clean backup'
+    Write-Host 'test: credential rotation preserves valid product.json modifications'
     $product = Join-Path $TempDir 'rotation-product.json'
-    $original = Join-Path $TempDir 'rotation-original.json'
     $state = Join-Path $TempDir 'rotation-state'
     Copy-Item $Fixture $product
-    Copy-Item $Fixture $original
     Invoke-Generate
     Invoke-Installer $product $state
+    $modifiedProduct = Get-Content $product -Raw | ConvertFrom-Json
+    $modifiedProduct.unknownFixtureData |
+        Add-Member -NotePropertyName adminModification -NotePropertyValue 'keep-me'
+    [IO.File]::WriteAllText(
+        $product,
+        (($modifiedProduct | ConvertTo-Json -Depth 100) + [Environment]::NewLine),
+        [Text.UTF8Encoding]::new($false)
+    )
     Invoke-Generate 'ci-smoke-rotated-secret'
     Invoke-Installer $product $state
+    $modifiedProduct = Get-Content $product -Raw | ConvertFrom-Json
+    if ($modifiedProduct.unknownFixtureData.adminModification -ne 'keep-me') {
+        throw 'credential rotation lost an admin product.json modification'
+    }
     & (Join-Path $state 'worker.ps1') -Mode Restore
     if ($LASTEXITCODE) { throw 'rotation restore failed' }
-    Assert-FilesEqual $product $original
+    Assert-Restored $product
+    $modifiedProduct = Get-Content $product -Raw | ConvertFrom-Json
+    if ($modifiedProduct.unknownFixtureData.adminModification -ne 'keep-me') {
+        throw 'restoration lost an admin product.json modification'
+    }
 
-    Write-Host 'test: an updater overwrite refreshes the restorable backup'
+    Write-Host 'test: an updater overwrite is patched without losing new product data'
     $product = Join-Path $TempDir 'update-product.json'
     $updated = Join-Path $TempDir 'update-upstream.json'
     $state = Join-Path $TempDir 'update-state'
@@ -122,7 +148,12 @@ try {
     Invoke-Installer $product $state
     & (Join-Path $state 'worker.ps1') -Mode Restore
     if ($LASTEXITCODE) { throw 'update restore failed' }
-    Assert-FilesEqual $product $updated
+    Assert-Restored $product
+    $restoredUpdate = Get-Content $product -Raw | ConvertFrom-Json
+    if ($restoredUpdate.commit -ne 'fixture-v2' -or
+        $restoredUpdate.extensionsGallery.controlUrl -ne 'https://new-upstream.example/control') {
+        throw 'restoration lost updated product.json data'
+    }
 
     Write-Host 'test: current versioned Windows resource paths are discovered'
     $versionRoot = Join-Path $TempDir 'fake-program-files'
@@ -148,7 +179,7 @@ try {
     Assert-Patched $newVersionedProduct
     & (Join-Path $env:ENDOR_VSCODE_STATE_DIR 'worker.ps1') -Mode Restore
     if ($LASTEXITCODE) { throw 'versioned path restore failed' }
-    Assert-FilesEqual $newVersionedProduct $Fixture
+    Assert-Restored $newVersionedProduct
 
     Write-Host 'test: malformed JSON fails without mutation'
     $product = Join-Path $TempDir 'malformed-product.json'

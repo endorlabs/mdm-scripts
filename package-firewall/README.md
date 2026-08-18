@@ -61,7 +61,7 @@ Running either generator produces these scripts in `out/<namespace>/`:
 | `endor-maven.*` | Configure Maven only |
 | `endor-vscode.*` | Patch VS Code `product.json` and install update remediation |
 | `endor-all.*` | Configure all supported package managers and VS Code |
-| `endor-remove.*` | Strip all Endor configuration and restore VS Code's upstream file |
+| `endor-remove.*` | Strip Endor configuration and restore VS Code gallery defaults |
 
 Each generated script carries all Endor configuration it needs; VS Code's Linux remediation also uses systemd and Python 3 as noted below.
 
@@ -71,17 +71,18 @@ Each generated script carries all Endor configuration it needs; VS Code's Linux 
 
 `endor-vscode.*` sets `extensionsGallery.serviceUrl` to the authenticated
 `/firewall/vscode/_ak/<token>` endpoint and removes `extensionUrlTemplate`, so
-VS Code cannot fall back to the upstream extension download template. It saves
-the current upstream `product.json` before patching and reapplies the patch
-after VS Code updates:
+VS Code cannot fall back to the upstream extension download template. It
+preserves every unrelated `product.json` value and reapplies only those two
+managed properties after VS Code updates:
 
 - macOS: root launchd daemon watching `/Applications`
 - Linux: systemd path/service units watching native `code` package locations
 - Windows: SYSTEM scheduled task using `FileSystemWatcher`, with a periodic rescan
 
 Run the script as root/SYSTEM. Restart VS Code after the first deployment if it
-was already open. `endor-remove.*` stops remediation and restores the latest
-clean upstream backup.
+was already open. `endor-remove.*` stops remediation and restores the stable
+default values for the two managed gallery properties without reverting other
+`product.json` changes.
 
 Supported scope is Microsoft VS Code Stable installed natively in its standard
 system locations (including Windows User Installer paths). Insiders, VSCodium,

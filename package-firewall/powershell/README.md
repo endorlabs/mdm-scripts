@@ -219,12 +219,11 @@ The script:
 - Finds system installs in Program Files, User Installer copies under
   `C:\Users\<user>\AppData\Local\Programs\Microsoft VS Code`, and current
   ten-character versioned resource directories.
-- Saves a SYSTEM-owned clean backup before each upstream version is patched.
 - Installs the **Endor VS Code Extension Firewall** scheduled task as SYSTEM.
   Its `FileSystemWatcher` responds to updater replacements and rescans every
   minute to recover missed events and discover later installs.
-- Updates the managed URL without replacing the clean backup during credential
-  rotation.
+- Modifies only `serviceUrl` and `extensionUrlTemplate`, preserving all other
+  current `product.json` values during updates and credential rotation.
 
 Run through Intune as SYSTEM. Restart VS Code after initial deployment if it is
 open. Supported scope is Microsoft VS Code Stable native installs only;
@@ -304,7 +303,7 @@ Deploy `endor-remove.ps1` to strip all Endor configuration from a machine. It:
 
 - Removes the sentinel block from `.npmrc`, `.yarnrc.yml`, `pip.ini`, `uv.toml`, the go env file, and `.m2\settings.xml`
 - Deletes all `ENDOR_*` and `POETRY_HTTP_BASIC_ENDOR_FIREWALL_*` keys from `HKCU:\Environment`
-- Stops and removes the VS Code scheduled task, then restores the latest clean `product.json` backup
+- Stops and removes the VS Code scheduled task, then restores the stable defaults for the two managed gallery properties
 - Deletes config files that are empty after block removal
 
 ```powershell
@@ -323,6 +322,6 @@ Deploy `endor-remove.ps1` to strip all Endor configuration from a machine. It:
 | `.npmrc`, `.yarnrc.yml`, `uv.toml` | Contain `${VAR}` references only — no credentials baked in. |
 | `.m2\settings.xml` | Contains `${env.*}` references only — no credentials baked in. ACL-restricted to owner. |
 | VS Code `product.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users because VS Code must consume it. |
-| `%ProgramData%\Endor Labs\vscode-firewall` | ACL-restricted to SYSTEM and Administrators; contains the worker and clean upstream backups. |
+| `%ProgramData%\Endor Labs\vscode-firewall` | ACL-restricted to SYSTEM and Administrators; contains the remediation worker. |
 | API secret in MDM | Generated scripts contain the API key and secret in plaintext (used to write registry env vars). Restrict access to the Intune policy and the generated `out/` directory. |
 | `out/` directory | Add to `.gitignore`. Do not commit generated scripts to source control. |
