@@ -5,6 +5,9 @@
 # Functions:
 #   detect_console_user                        — finds the logged-in user when running as root
 #   resolve_user_home       <user>             — resolves home via dscl / getent / POSIX
+#   _endor_mkdir_owned      <dir> <owner> <group>
+#                                              — mkdir -p that chowns newly created
+#                                                directory segments to the console user
 #   upsert_block            <file> <content> <owner> <group>
 #                                              — non-destructive, idempotent sentinel-block writer
 #                                                delegates to upsert_block_pip when <content> has
@@ -32,6 +35,18 @@ ENDOR_BLOCK_END="# ===== END ENDOR PACKAGE FIREWALL ====="
 # or re-runs and removal cannot find the managed block.
 ENDOR_XML_BLOCK_START="<!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->"
 ENDOR_XML_BLOCK_END="<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->"
+
+# Per-entry sentinel markers wrapping our <server> and <mirror>. They live in the
+# shared fragment (shared/blocks/mavensettings.txt) and are what let each entry be
+# merged into whichever <servers>/<mirrors> container already exists — Maven's
+# schema forbids a second container. Both the bash and PowerShell generators read
+# that same fragment, so these strings MUST match it byte-for-byte. The legacy
+# ENDOR_XML_BLOCK_* pair above is still recognised on strip/remove so files written
+# by older versions are cleaned up correctly.
+ENDOR_XML_SERVER_START="<!-- ===== BEGIN ENDOR PACKAGE FIREWALL server (managed — do not edit) ===== -->"
+ENDOR_XML_SERVER_END="<!-- ===== END ENDOR PACKAGE FIREWALL server ===== -->"
+ENDOR_XML_MIRROR_START="<!-- ===== BEGIN ENDOR PACKAGE FIREWALL mirror (managed — do not edit) ===== -->"
+ENDOR_XML_MIRROR_END="<!-- ===== END ENDOR PACKAGE FIREWALL mirror ===== -->"
 
 # ── User attribution helpers ──────────────────────────────────────────────────
 # Encode <console-user>@<machine> into the Basic-auth username. The firewall
@@ -110,6 +125,23 @@ resolve_user_home() {
   echo "$home"
 }
 
+# _endor_mkdir_owned <dir> <owner> <group>
+#
+# mkdir -p that hands any directories it CREATES to the console user. MDM runs
+# as root, so a bare mkdir -p leaves new dirs root-owned (755) — the user can
+# read through them but cannot write inside (e.g. Maven failing to create
+# ~/.m2/repository, XDG tools failing to create ~/.config/<app>). Only the
+# topmost segment that did not previously exist is chown'd (recursively), so
+# pre-existing directories and their contents are never touched. No-op when
+# the chain already exists.
+_endor_mkdir_owned() {
+  local dir="$1" owner="$2" group="$3" d="$1" topnew=""
+  while [[ -n "$d" && ! -d "$d" ]]; do topnew="$d"; d=$(dirname "$d"); done
+  mkdir -p "$dir"
+  [[ -n "$topnew" ]] && chown -R "$owner:$group" "$topnew"
+  return 0
+}
+
 # upsert_block <file> <content> <owner> <group>
 #
 # Non-destructive, idempotent config writer using sentinel blocks.
@@ -145,7 +177,7 @@ upsert_block() {
     return 0
   fi
 
-  mkdir -p "$(dirname "$file")"
+  _endor_mkdir_owned "$(dirname "$file")" "$owner" "$group"
 
   # Strip any existing Endor block, preserving everything else
   if [[ -f "$file" ]] && grep -qF "$ENDOR_BLOCK_START" "$file" 2>/dev/null; then
@@ -157,6 +189,13 @@ upsert_block() {
       !skip             { print }
     ' "$file" > "$tmp"
     mv "$tmp" "$file"
+  fi
+
+  # A file without a trailing newline would glue our start marker onto its last
+  # line, and the substring-based strip on re-run/remove would then delete that
+  # user line. Terminate it first so the marker always gets its own line.
+  if [[ -s "$file" && -n "$(tail -c 1 "$file")" ]]; then
+    echo >> "$file"
   fi
 
   printf '%s\n%s\n%s\n' \
@@ -216,7 +255,7 @@ upsert_block_pip() {
     return 0
   fi
 
-  mkdir -p "$(dirname "$file")"
+  _endor_mkdir_owned "$(dirname "$file")" "$owner" "$group"
 
   if [[ "$merge" == "1" ]]; then
     key_pattern=$(printf '%s\n' "$content" | awk '
@@ -301,77 +340,195 @@ upsert_block_pip() {
   chmod 600 "$file"
 }
 
+# ── Maven XML helpers ─────────────────────────────────────────────────────────
+# Support upsert_xml_block / remove_xml_block. Multi-line content is read from a
+# temp file with getline rather than `awk -v`, because BSD/macOS awk rejects a
+# multi-line -v value ("newline in string"). Awk built-in names (sub, close, index,
+# length, split…) must NOT be used as awk variables — the injected block is held in
+# `blk` and the closing tag in `closetag`.
+
+# _endor_xml_extract <start> <end>   (fragment on stdin) -> inclusive block on stdout
+# Emits the sentinel-delimited entry (the markers included) so it can be merged
+# as-is into an existing container and located again on re-run/removal.
+_endor_xml_extract() {
+  awk -v s="$1" -v e="$2" '
+    index($0,s){grab=1}
+    grab{print}
+    index($0,e){grab=0}
+  '
+}
+
+# _endor_xml_strip_managed <file> -> stdout with every managed region removed
+# (the per-entry server/mirror sub-blocks AND the legacy combined block).
+_endor_xml_strip_managed() {
+  awk -v ss="$ENDOR_XML_SERVER_START" -v se="$ENDOR_XML_SERVER_END" \
+      -v ms="$ENDOR_XML_MIRROR_START" -v me="$ENDOR_XML_MIRROR_END" \
+      -v bs="$ENDOR_XML_BLOCK_START"  -v be="$ENDOR_XML_BLOCK_END" '
+    index($0,ss){skip=1} index($0,ms){skip=1} index($0,bs){skip=1}
+    !skip{print}
+    index($0,se){skip=0} index($0,me){skip=0} index($0,be){skip=0}
+  ' "$1"
+}
+
+# _endor_xml_into_container <file> <open> <close> <selfclose> <subfile>
+# Inserts <subfile> as the FIRST child of an existing container (so an Endor
+# catch-all mirror wins Maven precedence). Prints result; rc 0 = injected,
+# rc 1 = container absent (caller must create it). Handles the multi-line form
+# (<servers> … </servers>), the single-line empty form (<servers></servers>),
+# and the self-closed form (<servers/>).
+_endor_xml_into_container() {
+  local file="$1" open="$2" closetag="$3" selfclose="$4" subfile="$5"
+  if grep -qF "$open" "$file"; then
+    awk -v openlit="$open" -v subfile="$subfile" '
+      BEGIN{ while((getline l < subfile)>0) blk=(blk==""?l:blk RS l); close(subfile) }
+      !done && (p=index($0,openlit)) {
+        print substr($0,1,p+length(openlit)-1); print blk
+        rest=substr($0,p+length(openlit)); if(rest!="") print rest
+        done=1; next
+      }
+      { print }
+    ' "$file"
+    return 0
+  elif grep -qF "$selfclose" "$file"; then
+    awk -v sclit="$selfclose" -v opentag="$open" -v closetag="$closetag" -v subfile="$subfile" '
+      BEGIN{ while((getline l < subfile)>0) blk=(blk==""?l:blk RS l); close(subfile) }
+      !done && (p=index($0,sclit)) {
+        print substr($0,1,p-1) opentag; print blk
+        print closetag substr($0,p+length(sclit))
+        done=1; next
+      }
+      { print }
+    ' "$file"
+    return 0
+  fi
+  return 1
+}
+
+# _endor_xml_insert_ordered <file> <subfile> <later-open-tag>...
+# Inserts <subfile> before the first "later-ordered" sibling (per Maven's schema
+# sequence servers→mirrors→profiles→activeProfiles→pluginGroups), else before
+# </settings>. Keeps a newly-created container in its schema-valid position.
+_endor_xml_insert_ordered() {
+  local file="$1" subfile="$2"; shift 2
+  awk -v subfile="$subfile" -v laters="$*" '
+    BEGIN{ while((getline l < subfile)>0) blk=(blk==""?l:blk RS l); close(subfile); n=split(laters,arr," ") }
+    !done { for(i=1;i<=n;i++) if(index($0,arr[i])){ print blk; done=1; break } }
+    !done && index($0,"</settings>"){ print blk; done=1 }
+    { print }
+  ' "$file"
+}
+
 # upsert_xml_block <file> <fragment> <owner> <group>
 #
-# Idempotent writer for an XML settings file (Maven ~/.m2/settings.xml).
-# Inserts an XML-comment-delimited <fragment> immediately BEFORE the closing
-# </settings> tag, so it always lands inside the <settings> root element.
-#   - File absent             → create a minimal settings.xml wrapping the fragment
-#   - File present, has block  → replace only the delimited fragment
-#   - File present, no block   → insert fragment just before </settings>
-#   - DRY_RUN=1               → print intent, write nothing
+# Idempotent, MERGE-AWARE writer for Maven ~/.m2/settings.xml. The <fragment>
+# (shared/blocks/mavensettings.txt) carries two sentinel-delimited entries — a
+# <server> and a <mirror>. Maven's schema forbids a second <servers>/<mirrors>, so
+# each entry is merged into whichever container already exists; a container is
+# created only when it is absent.
+#   - File absent or empty     → create a minimal settings.xml with both containers
+#   - File has no </settings>  → ERROR (rc 1): corrupt file, cannot merge safely
+#   - <servers> present        → insert our <server> as its first child
+#   - <servers> absent         → create <servers> (in schema order) wrapping our entry
+#   - <mirrors> present/absent → same treatment for our <mirror>
+#   - Re-run                   → prior managed entries (new or legacy) stripped first
+#   - DRY_RUN=1                → print intent, write nothing
 upsert_xml_block() {
-  local file="$1" fragment="$2" owner="$3" group="$4" tmp
+  local file="$1" fragment="$2" owner="$3" group="$4" tmp cf sf_server sf_mirror
+
+  # Pull each sentinel-delimited entry out of the fragment. Each keeps its own
+  # markers so it can be merged into an existing container and found again later.
+  sf_server=$(mktemp); sf_mirror=$(mktemp)
+  printf '%s\n' "$fragment" | _endor_xml_extract "$ENDOR_XML_SERVER_START" "$ENDOR_XML_SERVER_END" > "$sf_server"
+  printf '%s\n' "$fragment" | _endor_xml_extract "$ENDOR_XML_MIRROR_START" "$ENDOR_XML_MIRROR_END" > "$sf_mirror"
+
+  # The merge path needs an anchor line (existing container, later sibling, or
+  # </settings>) and would otherwise emit nothing — silently leaving the
+  # firewall unconfigured. So: a file that exists but is empty/whitespace-only
+  # is treated as absent (create from scratch); a non-empty file with no
+  # </settings> cannot be merged into safely and must fail loudly instead of
+  # reporting success.
+  local create=0
+  if [[ ! -f "$file" ]] || ! grep -q '[^[:space:]]' "$file" 2>/dev/null; then
+    create=1
+  elif ! grep -qF '</settings>' "$file" 2>/dev/null; then
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+      echo "[dry-run]   action : FAIL — malformed settings.xml (no </settings>); fix or delete it, then re-run"
+      echo "[dry-run]   file    : $file"
+      echo ""
+      rm -f "$sf_server" "$sf_mirror"
+      return 0
+    fi
+    echo "[endor] ERROR: $file exists but contains no </settings> — cannot merge safely." >&2
+    echo "[endor]        Maven firewall NOT configured. Fix or delete the file, then re-run." >&2
+    rm -f "$sf_server" "$sf_mirror"
+    return 1
+  fi
 
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    if [[ -f "$file" ]] && grep -qF "$ENDOR_XML_BLOCK_START" "$file" 2>/dev/null; then
-      echo "[dry-run]   action : REPLACE Endor block in settings.xml"
-    elif [[ -f "$file" ]]; then
-      echo "[dry-run]   action : INSERT Endor block before </settings>"
+    if [[ "$create" == "1" ]]; then
+      echo "[dry-run]   action : CREATE settings.xml with <servers> + <mirrors>"
     else
-      echo "[dry-run]   action : CREATE settings.xml with Endor block"
+      if grep -qF "<servers>" "$file" 2>/dev/null; then
+        echo "[dry-run]   action : MERGE <server> into existing <servers>"
+      else
+        echo "[dry-run]   action : CREATE <servers> with Endor <server>"
+      fi
+      if grep -qF "<mirrors>" "$file" 2>/dev/null; then
+        echo "[dry-run]   action : MERGE <mirror> into existing <mirrors> (inserted first)"
+      else
+        echo "[dry-run]   action : CREATE <mirrors> with Endor <mirror>"
+      fi
     fi
     echo "[dry-run]   file    : $file"
     echo "$fragment" | sed 's/^/[dry-run]     /'
     echo ""
+    rm -f "$sf_server" "$sf_mirror"
     return 0
   fi
 
-  mkdir -p "$(dirname "$file")"
+  _endor_mkdir_owned "$(dirname "$file")" "$owner" "$group"
 
-  # Case 1: file does not exist -> write a complete minimal settings.xml
-  if [[ ! -f "$file" ]]; then
+  # Case 1: file absent (or empty/whitespace-only) -> minimal settings.xml
+  # with both containers, in order.
+  if [[ "$create" == "1" ]]; then
     {
       echo '<?xml version="1.0" encoding="UTF-8"?>'
       echo '<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"'
       echo '          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
       echo '          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0 http://maven.apache.org/xsd/settings-1.2.0.xsd">'
-      echo "$fragment"
+      echo '  <servers>'; cat "$sf_server"; echo '  </servers>'
+      echo '  <mirrors>'; cat "$sf_mirror"; echo '  </mirrors>'
       echo '</settings>'
     } > "$file"
     chown "$owner:$group" "$file"; chmod 600 "$file"
+    rm -f "$sf_server" "$sf_mirror"
     return 0
   fi
 
-  # Case 2: existing Endor block -> strip it first (preserve the rest)
-  if grep -qF "$ENDOR_XML_BLOCK_START" "$file" 2>/dev/null; then
-    tmp=$(mktemp)
-    awk -v s="$ENDOR_XML_BLOCK_START" -v e="$ENDOR_XML_BLOCK_END" '
-      index($0, s) { skip=1; next }
-      index($0, e) { skip=0; next }
-      !skip        { print }
-    ' "$file" > "$tmp"
+  # Case 2: strip any prior managed entries so re-runs stay idempotent.
+  tmp=$(mktemp); _endor_xml_strip_managed "$file" > "$tmp"; mv "$tmp" "$file"
+
+  # Case 3a: merge the <server> entry (create <servers> only if absent).
+  tmp=$(mktemp)
+  if _endor_xml_into_container "$file" "<servers>" "</servers>" "<servers/>" "$sf_server" > "$tmp"; then
     mv "$tmp" "$file"
+  else
+    cf=$(mktemp); { echo '  <servers>'; cat "$sf_server"; echo '  </servers>'; } > "$cf"
+    _endor_xml_insert_ordered "$file" "$cf" "<mirrors" "<profiles" "<activeProfiles" "<pluginGroups" > "$tmp"
+    mv "$tmp" "$file"; rm -f "$cf"
   fi
 
-  # Case 3: insert the fresh fragment immediately before the first </settings>.
-  # The fragment is passed via a temp file and read with getline rather than
-  # `awk -v frag=...`, because BSD/macOS awk rejects a multi-line value in -v
-  # ("newline in string"). getline-from-file is portable across BSD and GNU awk.
-  local fragfile; fragfile=$(mktemp)
-  printf '%s\n' "$fragment" > "$fragfile"
+  # Case 3b: merge the <mirror> entry (create <mirrors> only if absent).
   tmp=$(mktemp)
-  awk -v fragfile="$fragfile" '
-    /<\/settings>/ && !done {
-      while ((getline line < fragfile) > 0) print line
-      close(fragfile)
-      done=1
-    }
-    { print }
-  ' "$file" > "$tmp"
-  mv "$tmp" "$file"
-  rm -f "$fragfile"
+  if _endor_xml_into_container "$file" "<mirrors>" "</mirrors>" "<mirrors/>" "$sf_mirror" > "$tmp"; then
+    mv "$tmp" "$file"
+  else
+    cf=$(mktemp); { echo '  <mirrors>'; cat "$sf_mirror"; echo '  </mirrors>'; } > "$cf"
+    _endor_xml_insert_ordered "$file" "$cf" "<profiles" "<activeProfiles" "<pluginGroups" > "$tmp"
+    mv "$tmp" "$file"; rm -f "$cf"
+  fi
 
+  rm -f "$sf_server" "$sf_mirror"
   chown "$owner:$group" "$file"; chmod 600 "$file"
 }
 
@@ -444,37 +601,37 @@ remove_block() {
 }
 
 # remove_xml_block <file> <owner> <group>
-# Strips the Endor XML fragment from settings.xml. If the file is left with an
-# empty <settings> element (i.e. it was Endor-only), the whole file is deleted.
+# Strips the Endor managed entries (new per-entry server/mirror sub-blocks AND the
+# legacy combined block) from settings.xml. Everything else — pre-existing
+# <server>/<mirror> entries, any other user settings, and the containers/skeleton
+# themselves — is always preserved; the file is never deleted. Content outside our
+# sentinels may be the user's, and an emptied <servers></servers>/<mirrors></mirrors>
+# left behind is harmless, valid XML.
 remove_xml_block() {
   local file="$1" owner="$2" group="$3" tmp
 
   [[ -f "$file" ]] || { echo "[endor-remove] skip (not found)    : $file"; return 0; }
-  if ! grep -qF "$ENDOR_XML_BLOCK_START" "$file" 2>/dev/null; then
+  if ! grep -qF "$ENDOR_XML_SERVER_START" "$file" 2>/dev/null \
+     && ! grep -qF "$ENDOR_XML_MIRROR_START" "$file" 2>/dev/null \
+     && ! grep -qF "$ENDOR_XML_BLOCK_START" "$file" 2>/dev/null; then
     echo "[endor-remove] skip (no Endor block): $file"; return 0
   fi
 
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    echo "[dry-run]   action : REMOVE Endor block from settings.xml"
+    echo "[dry-run]   action : REMOVE Endor <server>/<mirror> from settings.xml"
     echo "[dry-run]   file   : $file"
     return 0
   fi
 
   tmp=$(mktemp)
-  awk -v s="$ENDOR_XML_BLOCK_START" -v e="$ENDOR_XML_BLOCK_END" '
-    index($0, s) { skip=1; next }
-    index($0, e) { skip=0; next }
-    !skip        { print }
-  ' "$file" > "$tmp"
+  _endor_xml_strip_managed "$file" > "$tmp"
 
-  # If only the empty XML scaffold remains, the file was Endor-only -> delete it
-  if ! grep -qE '<(server|mirror|profile|proxy|pluginGroup|repository)' "$tmp"; then
-    rm -f "$file" "$tmp"
-    echo "[endor-remove] deleted (was empty) : $file"
-  else
-    mv "$tmp" "$file"; chown "$owner:$group" "$file"; chmod 600 "$file"
-    echo "[endor-remove] block removed       : $file"
-  fi
+  # Never delete the file: anything outside our sentinels is (or may be) the
+  # user's own configuration, and guessing "is this only our skeleton?" risks
+  # destroying it. The emptied containers we may leave behind are valid XML
+  # and a no-op for Maven.
+  mv "$tmp" "$file"; chown "$owner:$group" "$file"; chmod 600 "$file"
+  echo "[endor-remove] block removed       : $file"
 }
 
 # warn_if_key_conflict <file> <awk-pattern> <label>
@@ -506,10 +663,14 @@ warn_if_xml_key_conflict() {
 
   [[ -f "$file" ]] || return 0
 
-  if awk -v start="$ENDOR_XML_BLOCK_START" -v end="$ENDOR_XML_BLOCK_END" -v pat="$pattern" '
-    index($0, start) { skip=1; next }
-    index($0, end)   { skip=0; next }
+  # Scan lines OUTSIDE any Endor-managed region (per-entry server/mirror sub-blocks
+  # and the legacy combined block) so a re-run does not flag our own <mirror>.
+  if awk -v ss="$ENDOR_XML_SERVER_START" -v se="$ENDOR_XML_SERVER_END" \
+         -v ms="$ENDOR_XML_MIRROR_START" -v me="$ENDOR_XML_MIRROR_END" \
+         -v bs="$ENDOR_XML_BLOCK_START"  -v be="$ENDOR_XML_BLOCK_END" -v pat="$pattern" '
+    index($0,ss){skip=1} index($0,ms){skip=1} index($0,bs){skip=1}
     !skip && $0 ~ pat { found=1 }
+    index($0,se){skip=0} index($0,me){skip=0} index($0,be){skip=0}
     END { exit(found ? 0 : 1) }
   ' "$file" 2>/dev/null; then
     echo "[endor] WARNING: existing '${label}' found in ${file}." >&2
