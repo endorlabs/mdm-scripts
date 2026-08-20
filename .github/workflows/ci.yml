@@ -188,10 +188,14 @@ jobs:
           bash package-firewall/bash/generate.sh
           shopt -s nullglob
           files=(package-firewall/bash/out/ci-smoke/*.sh)
-          if [ "${#files[@]}" -lt 6 ]; then
-            echo "expected at least 6 generated scripts, got ${#files[@]}"
+          if [ "${#files[@]}" -lt 7 ]; then
+            echo "expected at least 7 generated scripts, got ${#files[@]}"
             exit 1
           fi
+          vscode_script=package-firewall/bash/out/ci-smoke/endor-vscode.sh
+          expected_url='https://factory.endorlabs.com/v1/namespaces/ci-smoke/firewall/vscode/_ak/Y2ktc21va2Uta2V5LWlkOmNpLXNtb2tlLXNlY3JldA'
+          test -f "$vscode_script"
+          grep -qF "$expected_url" "$vscode_script"
           for f in "${files[@]}"; do
             bash -n "$f"
             echo "ok: $f"
@@ -207,7 +211,13 @@ jobs:
           # separators differ across platforms.
           $files = @(Get-ChildItem -Path package-firewall/powershell -Recurse -Filter *.ps1 |
             Where-Object { $_.FullName -like '*ci-smoke*' })
-          if ($files.Count -lt 6) { Write-Error "expected at least 6 generated scripts, got $($files.Count)" }
+          if ($files.Count -lt 7) { Write-Error "expected at least 7 generated scripts, got $($files.Count)" }
+          $vscodeScript = 'package-firewall/powershell/out/ci-smoke/endor-vscode.ps1'
+          $expectedUrl = 'https://factory.endorlabs.com/v1/namespaces/ci-smoke/firewall/vscode/_ak/Y2ktc21va2Uta2V5LWlkOmNpLXNtb2tlLXNlY3JldA'
+          if (-not (Test-Path $vscodeScript)) { Write-Error 'missing generated endor-vscode.ps1' }
+          if (-not ((Get-Content $vscodeScript -Raw).Contains($expectedUrl))) {
+            Write-Error 'generated endor-vscode.ps1 does not contain the expected firewall URL'
+          }
           $bad = 0
           foreach ($f in $files) {
             $tokens = $null; $errors = $null
@@ -221,9 +231,7 @@ jobs:
           }
           if ($bad -gt 0) { Write-Error "$bad generated file(s) with parse errors" }
 
-  # The package-firewall test suites live in package-firewall/tests/ (currently
-  # on an unmerged branch). These jobs run them once the directory exists and
-  # log a skip notice until then.
+  # Run package-firewall integration tests on every supported operating system.
   tests:
     name: Tests (${{ matrix.os }})
     strategy:

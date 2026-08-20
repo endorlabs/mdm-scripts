@@ -27,6 +27,7 @@
 #   endor-python.sh   — Python:     pip · uv · poetry
 #   endor-go.sh       — Go:         go modules (GOPROXY → ~/.config/go/env)
 #   endor-maven.sh    — Maven:      Maven (settings.xml → ~/.m2/settings.xml)
+#   endor-vscode.sh   — VS Code:    extension gallery firewall + update watcher
 #   endor-all.sh      — All of the above (single-script MDM deploy)
 #   endor-remove.sh   — Offboarding: strips Endor config from all files
 #
@@ -67,6 +68,9 @@ NPM_REGISTRY_HOST="${FQDN_HOST}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/npm/"
 PYPI_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/pypi/simple/"
 MAVEN_REGISTRY_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/maven/"
 API_SECRET_B64=$(printf '%s' "${ENDOR_API_SECRET}" | base64 | tr -d '\n')
+VSCODE_TOKEN=$(printf '%s:%s' "${ENDOR_API_KEY_ID}" "${ENDOR_API_SECRET}" \
+  | base64 | tr -d '\n=' | tr '+/' '-_')
+VSCODE_SERVICE_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/vscode/_ak/${VSCODE_TOKEN}"
 
 # ─── Output directory ─────────────────────────────────────────────────────────
 OUT_DIR="${SCRIPT_DIR}/out/${ENDOR_NAMESPACE}"
@@ -85,7 +89,8 @@ substitute() {
     -e "s|{{NPM_REGISTRY_HOST}}|${NPM_REGISTRY_HOST}|g" \
     -e "s|{{PYPI_URL}}|${PYPI_URL}|g" \
     -e "s|{{TRUSTED_HOST}}|${TRUSTED_HOST}|g" \
-    -e "s|{{MAVEN_REGISTRY_URL}}|${MAVEN_REGISTRY_URL}|g"
+    -e "s|{{MAVEN_REGISTRY_URL}}|${MAVEN_REGISTRY_URL}|g" \
+    -e "s|{{VSCODE_SERVICE_URL}}|${VSCODE_SERVICE_URL}|g"
 }
 
 # inline_common
@@ -207,6 +212,23 @@ script_header() {
   echo ""
 }
 
+# system_script_header <output> <description>
+# Used by machine-level integrations that do not require an interactive user.
+system_script_header() {
+  local output="$1"
+  local description="$2"
+  echo "#!/usr/bin/env bash"
+  echo "# MDM-deployable: ${description}"
+  echo "# Generated for namespace=${ENDOR_NAMESPACE} fqdn=${FQDN}."
+  echo "# Do not edit — regenerate with generate.sh."
+  echo "# Usage: $( basename "$output" ) [--dry-run]"
+  echo ""
+  echo "set -euo pipefail"
+  echo ""
+  arg_parsing_block
+  echo ""
+}
+
 # build_script <template> <output> <description>
 build_script() {
   local template="$1"
@@ -223,6 +245,22 @@ build_script() {
     echo "# ════════════════════════════════════════════════════════════════════════════"
     substitute < "$TMPL_DIR/envsh.sh"
     echo ""
+    substitute < "$template"
+    echo ""
+    script_footer
+  } > "$output"
+
+  chmod 700 "$output"
+}
+
+# build_system_script <template> <output> <description>
+build_system_script() {
+  local template="$1"
+  local output="$2"
+  local description="$3"
+
+  {
+    system_script_header "$output" "$description"
     substitute < "$template"
     echo ""
     script_footer
@@ -265,13 +303,18 @@ build_script \
   "$OUT_DIR/endor-maven.sh" \
   "Configures Maven (~/.m2/settings.xml) for Endor Package Firewall."
 
+build_system_script \
+  "$TMPL_DIR/vscode.sh" \
+  "$OUT_DIR/endor-vscode.sh" \
+  "Configures Microsoft VS Code Stable extensions for Endor Package Firewall and installs update remediation."
+
 # ─── Generate remove script ───────────────────────────────────────────────────
 build_remove_script "$OUT_DIR/endor-remove.sh"
 
 # ─── Generate combined all.sh ─────────────────────────────────────────────────
 {
   script_header "$OUT_DIR/endor-all.sh" \
-    "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry · go · maven"
+    "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry · go · maven · vscode"
   credentials_block
   echo ""
   emit_all_blocks
@@ -300,8 +343,13 @@ build_remove_script "$OUT_DIR/endor-remove.sh"
   echo "# ════════════════════════════════════════════════════════════════════════════"
   substitute < "$TMPL_DIR/maven.sh"
   echo ""
+  echo "# ════════════════════════════════════════════════════════════════════════════"
+  echo "# VS Code extensions"
+  echo "# ════════════════════════════════════════════════════════════════════════════"
+  substitute < "$TMPL_DIR/vscode.sh"
+  echo ""
   echo "echo \"\""
-  echo "echo \"[endor] ✓ All package managers configured for ${ENDOR_NAMESPACE}.\""
+  echo "echo \"[endor] ✓ All package managers and VS Code configured for ${ENDOR_NAMESPACE}.\""
   echo ""
   script_footer
 } > "$OUT_DIR/endor-all.sh"
@@ -315,6 +363,7 @@ printf "   %-24s  %s\n" "endor-js.sh"     "npm · pnpm · yarn classic · yarn 2
 printf "   %-24s  %s\n" "endor-python.sh" "pip · uv · poetry"
 printf "   %-24s  %s\n" "endor-go.sh"     "go modules (GOPROXY)"
 printf "   %-24s  %s\n" "endor-maven.sh"  "maven (~/.m2/settings.xml)"
+printf "   %-24s  %s\n" "endor-vscode.sh" "VS Code extension gallery + update remediation"
 printf "   %-24s  %s\n" "endor-all.sh"    "all of the above (single-script deploy)"
 printf "   %-24s  %s\n" "endor-remove.sh" "offboarding — strips all Endor config"
 echo ""

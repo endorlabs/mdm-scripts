@@ -18,6 +18,9 @@
 #   Go:
 #     ~/.config/go/env
 #
+#   VS Code:
+#     Restores default gallery properties and removes update remediation
+#
 #   Shell profiles (env.sh source line):
 #     ~/.zshrc
 #     ~/.bash_profile
@@ -144,6 +147,63 @@ echo "[endor-remove] ── Maven ───────────────�
 
 remove_xml_block "$USER_HOME/.m2/settings.xml" "$CONSOLE_USER" "$USER_GROUP"
 
+# ── VS Code extension firewall ────────────────────────────────────────────────
+echo ""
+echo "[endor-remove] ── VS Code extensions ───────────────────────────────────────"
+
+_vscode_remove_os=$(uname -s)
+case "$_vscode_remove_os" in
+  Darwin)
+    _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/Library/Application Support/Endor Labs/vscode-firewall}"
+    _vscode_plist="/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist"
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+      echo "[dry-run]   action : UNLOAD and DELETE $_vscode_plist"
+    elif [[ "${ENDOR_VSCODE_SKIP_WATCHER:-0}" != "1" ]]; then
+      /bin/launchctl bootout system/com.endorlabs.vscode-firewall >/dev/null 2>&1 || true
+      rm -f "$_vscode_plist"
+    fi
+    ;;
+  Linux)
+    _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/var/lib/endor/vscode-firewall}"
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+      echo "[dry-run]   action : DISABLE and DELETE endor-vscode-firewall systemd units"
+    elif [[ "${ENDOR_VSCODE_SKIP_WATCHER:-0}" != "1" ]]; then
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now endor-vscode-firewall.path >/dev/null 2>&1 || true
+      fi
+      rm -f \
+        /etc/systemd/system/endor-vscode-firewall.path \
+        /etc/systemd/system/endor-vscode-firewall.service
+      command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload || true
+    fi
+    ;;
+  *)
+    _VSCODE_STATE_DIR=""
+    ;;
+esac
+
+_vscode_restore_ok=1
+if [[ -n "$_VSCODE_STATE_DIR" && -x "$_VSCODE_STATE_DIR/worker.sh" ]]; then
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" \
+      "$_VSCODE_STATE_DIR/worker.sh" --restore --dry-run || _vscode_restore_ok=0
+  else
+    ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" \
+      "$_VSCODE_STATE_DIR/worker.sh" --restore || _vscode_restore_ok=0
+    if [[ "$_vscode_restore_ok" == "1" ]]; then
+      rm -rf "$_VSCODE_STATE_DIR"
+    fi
+  fi
+else
+  echo "[endor-remove] skip (no VS Code managed state)"
+fi
+
+if [[ "$_vscode_restore_ok" != "1" ]]; then
+  echo "[endor-remove] WARNING: VS Code restoration was incomplete; managed state was retained." >&2
+  _ENDOR_WARNED=1
+fi
+unset _vscode_remove_os _VSCODE_STATE_DIR _vscode_plist _vscode_restore_ok
+
 echo ""
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
   echo "[endor-remove] ✓ Dry run complete — no files modified."
@@ -151,4 +211,8 @@ else
   echo "[endor-remove] ✓ Removal complete."
   echo "[endor-remove]   Package managers will fall back to their default registries."
   echo "[endor-remove]   Open a new terminal for shell profile changes to take effect."
+fi
+
+if [[ "${_ENDOR_WARNED:-0}" -eq 1 ]]; then
+  exit 1
 fi

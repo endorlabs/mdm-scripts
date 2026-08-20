@@ -19,6 +19,9 @@
 #   Java / Maven:
 #     %USERPROFILE%\.m2\settings.xml
 #
+#   VS Code:
+#     Restores default gallery properties and removes update remediation
+#
 # Registry env vars removed:
 #   ENDOR_API_KEY_ID, ENDOR_API_SECRET, ENDOR_AUTH_B64
 #   ENDOR_NPM_REGISTRY_URL, ENDOR_PYPI_URL, ENDOR_GO_PROXY_URL
@@ -136,6 +139,40 @@ Write-Host '[endor-remove] -- Maven --------------------------------------------
 Remove-XmlBlock -FilePath (Join-Path $UserHome '.m2\settings.xml') -DryRun:$DryRun
 Write-Host ''
 
+# -- VS Code extension firewall --
+Write-Host '[endor-remove] -- VS Code extensions ------------------------------------'
+$_vscodeStateRoot = if ($env:ENDOR_VSCODE_STATE_DIR) {
+    $env:ENDOR_VSCODE_STATE_DIR
+} else {
+    Join-Path $env:ProgramData 'Endor Labs\vscode-firewall'
+}
+$_vscodeWorkerPath = Join-Path $_vscodeStateRoot 'worker.ps1'
+
+if ($DryRun) {
+    Write-Host '[dry-run]   action : STOP and DELETE Endor VS Code Extension Firewall task'
+} elseif ($env:ENDOR_VSCODE_SKIP_WATCHER -ne '1') {
+    Stop-ScheduledTask -TaskName 'Endor VS Code Extension Firewall' -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName 'Endor VS Code Extension Firewall' -Confirm:$false -ErrorAction SilentlyContinue
+}
+
+if (Test-Path -LiteralPath $_vscodeWorkerPath) {
+    if ($DryRun) {
+        & $_vscodeWorkerPath -Mode Restore -DryRun
+    } else {
+        & $_vscodeWorkerPath -Mode Restore
+    }
+    if ($LASTEXITCODE) {
+        $EndorWarned = $true
+        Write-Warning '[endor-remove] VS Code restoration was incomplete; managed state was retained.'
+    } elseif (-not $DryRun) {
+        Remove-Item -LiteralPath $_vscodeStateRoot -Recurse -Force
+    }
+} else {
+    Write-Host '[endor-remove] skip (no VS Code managed state)'
+}
+Remove-Variable _vscodeStateRoot, _vscodeWorkerPath
+Write-Host ''
+
 if ($DryRun) {
     Write-Host '[endor-remove] [done] Dry run complete -- no files modified, no registry keys removed.'
 } else {
@@ -143,3 +180,5 @@ if ($DryRun) {
     Write-Host '[endor-remove]   Package managers will fall back to their default registries.'
     Write-Host '[endor-remove]   Open a new terminal for env var changes to take effect.'
 }
+
+if ($EndorWarned) { exit 1 }
