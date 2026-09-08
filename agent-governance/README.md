@@ -91,7 +91,7 @@ scripts/render.sh --agent cursor --target-os windows \
 
 **Behavior settings** go through `--env KEY=VALUE` (repeatable) and land in the right place per tool — Claude's `env` block, and inlined into Cursor's session hook / every Codex hook command (Codex has no managed env block). Response caching is on by default; monitor-only mode is just `--env ENDOR_AI_AUDIT_NO_BLOCKING=true`.
 
-**`--skip-endorctl-update`** makes the session hook use an already-installed `endorctl` instead of checking for a newer one every session — useful once the fleet is provisioned. It passes through the runner too.
+**`--skip-endorctl-update`** makes the session hook use an already-installed `endorctl` instead of ever checking for a newer one — useful once the fleet is provisioned. It still installs when the binary is missing, and it passes through the runner too. (Without it the check is throttled to once every 24 h and runs in the background, so it costs a session nothing either way.)
 
 `render.sh` also takes `-o/--output` (`-` for stdout). `render-plist.sh` is agent-agnostic — `--style plist` (default) with `--payload-type` (default `com.anthropic.claudecode`) selects a custom-settings app, or `--style mcx` with `--pref-domain`/`--pref-key` (defaults `com.openai.codex` / `requirements_toml_base64`) forces a managed preference; `--identifier`/`--organization` are required, with `--name`, `--profile-identifier`, and the UUID flags optional. Run either script with `--help` for the full list.
 
@@ -106,11 +106,19 @@ A good rollout starts in monitor-only, watches the Endor audit log over a repres
 
 **`endorctl` installs and updates itself.** It isn't shipped per tool — the generated session hook runs [`download_endorctl.sh`](scripts/download_endorctl.sh) (or [`download_endorctl.ps1`](scripts/download_endorctl.ps1) on Windows), which installs the binary on first run and refreshes it when a new version ships, verifying a SHA-256 each time. So the only things that change after setup are the config (when you regenerate it) and the governance rules (server-side at Endor, fetched at run time).
 
+**Downloading never blocks a session (POSIX).** `endorctl` is a ~300 MB binary, so on a slow link a foreground download would stall agent startup for minutes. The POSIX bootstrap instead decides what's needed and hands the work to a detached background job:
+
+- **Steady state** — a binary is installed and was checked within the TTL: no network at all, so the hook costs two file tests.
+- **Update available** — the session audits immediately using the binary already on disk; the new one is fetched in the background and swaps in for the next session.
+- **Nothing installed yet** — that one session is **not audited**; the download runs in the background and later sessions are covered.
+
+Downloads resume across sessions rather than restarting, and a lock keeps concurrent agents (Claude, Cursor, Codex, or several windows) from each pulling their own copy. The version check is throttled to once every 24 h — override with `--env ENDORCTL_UPDATE_TTL_MINUTES=<minutes>`. Windows still downloads in the foreground; see [`download_endorctl.ps1`](scripts/download_endorctl.ps1).
+
 **What needs re-delivery when it changes:**
 
 | What changes | How it updates | Your action |
 | --- | --- | --- |
-| `endorctl` binary | Self-updates on session start (SHA-256 verified); `--skip-endorctl-update` pins it | None |
+| `endorctl` binary | Self-updates in the background, at most once every 24 h (SHA-256 verified); `--skip-endorctl-update` pins it | None |
 | Governance rules | Server-side at Endor, fetched at run time | None |
 | Claude / Codex profile config (macOS) | Regenerate the `.mobileconfig`, re-upload to the MDM | Re-upload |
 | Cursor / Codex runner config (macOS/Linux) | Runner re-fetches `REF` and re-renders on each scheduled run | None after setup |
@@ -119,6 +127,7 @@ A good rollout starts in monitor-only, watches the Endor audit log over a repres
 **Security properties:**
 
 - **Tamper-resistance.** A profile-delivered config (Claude and Codex on macOS) is an OS-enforced managed setting — hard for a developer to override, and Codex additionally marks managed-source hooks trusted-by-policy so a user can't disable them. A script-delivered file (Cursor, and the file-based Linux/Windows paths) is not OS-enforced; a determined developer could override it. Cursor has no profile mechanism today.
+- **One unaudited session per machine (POSIX).** Because the first install runs in the background rather than blocking startup, the session that triggers it isn't audited — nor is any other session started before the download lands. Coverage is complete from then on. To close that window, pre-provision `endorctl` (an MDM package, or your config management) so the binary is already present the first time an agent runs.
 - **Least-privilege credentials.** A generated profile (or Codex `requirements.toml`) carries the API key and secret to every laptop — scope it to an **audit-only** credential.
 - **Pin the revision.** The runner executes this repo's code as root, so it fetches a specific revision: set `REF` (at the top of `runner.sh`) to a reviewed tag, branch, or commit and each device runs only that, not the moving branch tip. Bump `REF` to roll out a change; the default (`main`) tracks the latest.
 - **Credential isolation (Claude).** The `env` block exports into every subprocess Claude spawns, including any `endorctl` the agent itself runs. To keep audit credentials out of the agent's process tree, hook-scoped variables use an `AGENT_HOOK_ENDOR_*` prefix that `endorctl` doesn't read natively, and the hook passes them through as `--api-key …` flags. Codex has no managed env block, so its credentials are passed as `--api-key …` flags directly on each hook command (never exported), which keeps them out of the agent's environment the same way.
@@ -130,7 +139,7 @@ Each script needs only what's standard to where it runs; the laptop paths stay l
 
 | Script | Runs on | Needs |
 | --- | --- | --- |
-| [`download_endorctl.sh`](scripts/download_endorctl.sh) | developer laptop (inlined into the session hook) | POSIX `sh` + `curl` (plus `awk`/`sed`/`uname`/`mktemp`/`tr` and `sha256sum` or `shasum` — all standard on macOS & Linux) |
+| [`download_endorctl.sh`](scripts/download_endorctl.sh) | developer laptop (inlined into the session hook) | POSIX `sh` + `curl` (plus `awk`/`sed`/`find`/`wc`/`uname`/`tr` and `sha256sum` or `shasum` — all standard on macOS & Linux) |
 | [`download_endorctl.ps1`](scripts/download_endorctl.ps1) | Windows laptop (encoded into the session hook) | Windows PowerShell 5.1 (built in) |
 | [`scripts/render.sh`](scripts/render.sh) | admin machine (macOS/Linux, or Windows via Git Bash/WSL), or laptop via the runner | POSIX `sh` + `awk` + `sed`; for `--target-os windows` also `iconv` + `base64` |
 | [`scripts/render-plist.sh`](scripts/render-plist.sh) | admin machine (macOS) | `plutil` (native to macOS); `base64` for `--style mcx` |
@@ -146,8 +155,23 @@ scripts/
   render-plist.sh         wrap a config (stdin) into a .mobileconfig profile
   runner.sh               MDM runner: clone → render → swap-if-changed
 examples/                 checked-in samples (demo creds, placeholder UUIDs)
+tests/run-tests.sh        test suite (offline by default)
 docs/                     deployment runbooks + the support matrix
 ```
+
+## Tests
+
+```sh
+tests/run-tests.sh                 # offline; seconds
+tests/run-tests.sh --network       # + assert the download endpoint's contract
+tests/run-tests.sh --network-full  # + a real resume and install (~300 MB)
+```
+
+The offline suite drives `download_endorctl.sh` under a throwaway `HOME` with a stubbed `curl`, so branches that only occur on a bad network — a dead endpoint, a half-finished download, a corrupt one, two agents racing, a signal mid-transfer — are all reachable without waiting on a transfer. It also **regenerates every `examples/` artifact and fails if the checked-in copy differs**, which is the check that keeps the samples honest after a script change, and syntax-checks all 36 hook commands embedded across those artifacts to confirm they survived JSON/TOML escaping.
+
+`--network` is worth running when the download endpoint might have changed: it pins the behavior resume depends on — a closed `bytes=A-B` range returns `206`, while an open-ended `bytes=A-` returns the whole body. That second one is why the bootstrap builds an explicit closed range instead of using `curl -C -`; if it ever starts returning `206`, the code can be simplified.
+
+Everything needs only what ships with macOS/Linux; `plutil` (for the profile comparisons) and `python3` (for the escaping check) are used when present and skipped when not.
 
 ## Examples
 
@@ -164,7 +188,7 @@ docs/                     deployment runbooks + the support matrix
 | MDM profile (plist, mcx) | Codex | `examples/codex/com.openai.codex.mobileconfig` |
 | TOML (encoded PowerShell hook) | Codex | `examples/codex/requirements.windows.toml` |
 
-There's no separate Linux example: `settings.json` is exactly what Claude reads as the Linux `/etc/claude-code/managed-settings.json` and as the inner payload of the macOS profile, `requirements.toml` is what Codex reads at `/etc/codex/`, and JumpCloud reuses these same files. Only the Windows samples differ (the encoded `powershell` hook). After changing a script, regenerate the affected examples with the commands above so they stay in sync.
+There's no separate Linux example: `settings.json` is exactly what Claude reads as the Linux `/etc/claude-code/managed-settings.json` and as the inner payload of the macOS profile, `requirements.toml` is what Codex reads at `/etc/codex/`, and JumpCloud reuses these same files. Only the Windows samples differ (the encoded `powershell` hook). After changing a script, regenerate the affected examples with the commands above so they stay in sync — `tests/run-tests.sh` fails if you forget.
 
 ## Extending
 
