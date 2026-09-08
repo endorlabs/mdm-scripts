@@ -8,57 +8,57 @@
     ],
     "sessionEnd": [
       {
-        "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit cursor"
       }
     ],
     "beforeSubmitPrompt": [
       {
-        "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit cursor"
       }
     ],
     "preToolUse": [
       {
-        "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit cursor"
       }
     ],
     "postToolUse": [
       {
-        "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit cursor"
       }
     ],
     "postToolUseFailure": [
       {
-        "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit cursor"
       }
     ],
     "beforeShellExecution": [
       {
-        "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit cursor"
       }
     ],
     "afterShellExecution": [
       {
-        "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit cursor"
       }
     ],
     "beforeMCPExecution": [
       {
-        "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit cursor"
       }
     ],
     "beforeReadFile": [
       {
-        "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit cursor"
       }
     ],
     "afterFileEdit": [
       {
-        "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit cursor"
       }
     ],
     "stop": [
       {
-        "command": "\"$HOME/.endorctl/endorctl\" --api \"$AGENT_HOOK_ENDOR_API\" --namespace \"$AGENT_HOOK_ENDOR_NAMESPACE\" --api-key \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY\" --api-secret \"$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET\" ai-audit cursor"
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit cursor"
       }
     ]
   }

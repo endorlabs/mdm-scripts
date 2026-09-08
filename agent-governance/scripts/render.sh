@@ -27,8 +27,8 @@
 #   --api-url     ENDOR_API                  (default: https://api.endorlabs.com)
 #
 # Behavior settings go through --env KEY=VALUE (repeatable), routed to Claude's
-# env block / inlined into Cursor's sessionStart and every Codex hook command
-# (Codex has no managed env block). Cache is on by default; monitor-only is just
+# env block / inlined into every Cursor and Codex hook command (neither has a
+# managed env block). Cache is on by default; monitor-only is just
 # --env ENDOR_AI_AUDIT_NO_BLOCKING=true. --skip-endorctl-update uses an installed
 # endorctl as-is (no version check at all), installing only when missing.
 #
@@ -149,8 +149,8 @@ prompt_if_tty namespace  "namespace"  plain
 # env_json: pretty ",\n    \"K\": \"V\"" fragments appended into Claude's env
 #   block (each begins with a comma - the block always has the AGENT_HOOK_* keys
 #   before it); indented to match the 2-space layout the builders emit.
-# env_prefix: "K='V' " inline prefix for the POSIX Cursor sessionStart.
-# ps_env_sets: "$env:K = 'V'" lines for the PowerShell Cursor sessionStart.
+# env_prefix: "K='V' " inline prefix for every POSIX Cursor/Codex hook command.
+# ps_env_sets: "$env:K = 'V'" lines for every PowerShell Cursor/Codex hook command.
 # Keys are validated [A-Za-z_][A-Za-z0-9_]* (add_env), so they need no escaping.
 env_json=$(printf '%s\n' "$env_lines" | while IFS= read -r kv; do
   [ -n "$kv" ] || continue
@@ -181,18 +181,30 @@ psenc() {
   printf 'powershell -NoProfile -EncodedCommand %s' "$_b64"
 }
 
-# The audit invocation each hook runs (literal $VARS expand at hook time; Cursor
-# non-session hooks read AGENT_HOOK_ENDOR_* that endorctl sets at sessionStart).
+# The audit invocation each hook runs. Claude reads creds from its managed env
+# block at hook time (hook-scoped AGENT_HOOK_ENDOR_* names, see build_claude).
+# Cursor and Codex have no managed env block, so creds and behavior envs are
+# inlined literally into every hook command (*_inline): each hook is
+# self-contained and depends on nothing an earlier hook set up. Cursor can inject
+# env from a sessionStart hook's output, but that env is lost when a conversation
+# is resumed after a restart and never reaches hooks fired inside subagents, so
+# it is deliberately not relied on.
 # endorctl's audit subcommand per agent (Claude Code is "claudecode", not "claude").
 case "$agent" in claude) subcmd="claudecode" ;; cursor) subcmd="cursor" ;; codex) subcmd="codex" ;; esac
 posix_audit='"$HOME/.endorctl/endorctl" --api "$AGENT_HOOK_ENDOR_API" --namespace "$AGENT_HOOK_ENDOR_NAMESPACE" --api-key "$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY" --api-secret "$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET" ai-audit '"$subcmd"
+posix_inline=$(printf '%s"$HOME/.endorctl/endorctl" --api %s --namespace %s --api-key %s --api-secret %s ai-audit %s' \
+  "$env_prefix" "$(sq "$api_url")" "$(sq "$namespace")" "$(sq "$api_key")" "$(sq "$api_secret")" "$subcmd")
 ps_bin='& "$env:USERPROFILE\.endorctl\endorctl.exe"'
 ps_audit="$ps_bin"' --api "$env:AGENT_HOOK_ENDOR_API" --namespace "$env:AGENT_HOOK_ENDOR_NAMESPACE" --api-key "$env:AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY" --api-secret "$env:AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET" ai-audit '"$subcmd"'; exit $LASTEXITCODE'
+ps_inline=$(printf '%s --api %s --namespace %s --api-key %s --api-secret %s ai-audit %s; exit $LASTEXITCODE' \
+  "$ps_bin" "$(psq "$api_url")" "$(psq "$namespace")" "$(psq "$api_key")" "$(psq "$api_secret")" "$subcmd")
 # A native command under `powershell -EncodedCommand` does not inherit the agent's
 # event pipe (POSIX does), so per-event Windows hooks read stdin and pipe it in - else
 # endorctl gets an empty event and silently enforces nothing. IsInputRedirected guards
 # against a blocking read if a hook is invoked without a pipe.
-ps_audit_event=$(printf '$ProgressPreference = "SilentlyContinue"\n$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = if ([Console]::IsInputRedirected) { [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd() } else { "" }\n$in | %s' "$ps_audit")
+ps_event_prelude=$(printf '$ProgressPreference = "SilentlyContinue"\n$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = if ([Console]::IsInputRedirected) { [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd() } else { "" }')
+ps_audit_event=$(printf '%s\n$in | %s' "$ps_event_prelude" "$ps_audit")
+ps_inline_event=$(printf '%s\n%s\n$in | %s' "$ps_event_prelude" "$ps_env_sets" "$ps_inline")
 
 # --- compose per-hook command strings (session = bootstrap + audit) -----------
 case "$agent:$target_os" in
@@ -200,7 +212,7 @@ case "$agent:$target_os" in
     cmd_audit="$posix_audit"
     cmd_session=$(printf '%s\n%s' "$boot" "$posix_audit") ;;
   cursor:macos|cursor:linux)
-    cmd_audit="$posix_audit"
+    cmd_audit="$posix_inline"
     # Capture stdin first (Cursor closes its pipe quickly) into a per-user file,
     # clean up via trap, and let the audit be the last command so its exit code
     # (e.g. a block) is the hook's. `umask 077` makes the file born 0600 (no
@@ -208,35 +220,29 @@ case "$agent:$target_os" in
     # is predictable but lives in $HOME, which other users cannot write, so there's
     # no cross-user symlink race. Only builtins precede `cat` - no subshell, which
     # Cursor's stdin pipe does not tolerate, so $(mktemp) is intentionally avoided.
-    cmd_session=$(printf 'umask 077\nT="$HOME/.endorctl-cursor-stdin.$$"\ncat > "$T"\nchmod 600 "$T"\ntrap '\''rm -f "$T"'\'' EXIT\n%s\n%s"$HOME/.endorctl/endorctl" --api %s --namespace %s --api-key %s --api-secret %s ai-audit cursor < "$T"' \
-      "$boot" "$env_prefix" "$(sq "$api_url")" "$(sq "$namespace")" "$(sq "$api_key")" "$(sq "$api_secret")") ;;
+    cmd_session=$(printf 'umask 077\nT="$HOME/.endorctl-cursor-stdin.$$"\ncat > "$T"\nchmod 600 "$T"\ntrap '\''rm -f "$T"'\'' EXIT\n%s\n%s < "$T"' "$boot" "$posix_inline") ;;
   claude:windows)
     cmd_audit=$(psenc "$ps_audit_event")
     cmd_session=$(psenc "$(printf '%s\n%s' "$boot" "$ps_audit")") ;;
   cursor:windows)
-    cmd_audit=$(psenc "$ps_audit_event")
+    cmd_audit=$(psenc "$ps_inline_event")
     # Windows PowerShell 5.1 is not UTF-8 by default; force it and read stdin as raw
     # bytes so endorctl's JSON payload isn't mangled (avoid [Console]::InputEncoding,
     # whose setter throws on a piped handle).
-    cmd_session=$(psenc "$(printf '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd()\n%s\n%s\n$in | %s --api %s --namespace %s --api-key %s --api-secret %s ai-audit cursor; exit $LASTEXITCODE' \
-      "$boot" "$ps_env_sets" "$ps_bin" "$(psq "$api_url")" "$(psq "$namespace")" "$(psq "$api_key")" "$(psq "$api_secret")")") ;;
+    cmd_session=$(psenc "$(printf '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd()\n%s\n%s\n$in | %s' \
+      "$boot" "$ps_env_sets" "$ps_inline")") ;;
   codex:macos|codex:linux)
-    # Codex has no managed env block (unlike Claude), so creds are baked into every
-    # hook command and behavior envs are inlined; the requirements.toml is itself
-    # the credential-bearing artifact. Codex keeps the event pipe open (POSIX
-    # inherits it), so endorctl reads the event JSON from stdin directly - no
-    # capture-to-file dance is needed (that was a Cursor-only quirk).
-    cmd_audit=$(printf '%s"$HOME/.endorctl/endorctl" --api %s --namespace %s --api-key %s --api-secret %s ai-audit codex' \
-      "$env_prefix" "$(sq "$api_url")" "$(sq "$namespace")" "$(sq "$api_key")" "$(sq "$api_secret")")
-    cmd_session=$(printf '%s\n%s' "$boot" "$cmd_audit") ;;
+    # Codex keeps the event pipe open (POSIX inherits it), so endorctl reads the
+    # event JSON from stdin directly - no capture-to-file dance is needed (that is
+    # a Cursor-only quirk). The requirements.toml is the credential-bearing artifact.
+    cmd_audit="$posix_inline"
+    cmd_session=$(printf '%s\n%s' "$boot" "$posix_inline") ;;
   codex:windows)
     # As with Cursor on Windows, the EncodedCommand does not inherit the event
-    # pipe, so each hook reads stdin and pipes it into endorctl; creds/envs are
-    # inlined since Codex has no managed env block.
-    cmd_audit=$(psenc "$(printf '$ProgressPreference = "SilentlyContinue"\n$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = if ([Console]::IsInputRedirected) { [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd() } else { "" }\n%s\n$in | %s --api %s --namespace %s --api-key %s --api-secret %s ai-audit codex; exit $LASTEXITCODE' \
-      "$ps_env_sets" "$ps_bin" "$(psq "$api_url")" "$(psq "$namespace")" "$(psq "$api_key")" "$(psq "$api_secret")")")
-    cmd_session=$(psenc "$(printf '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd()\n%s\n%s\n$in | %s --api %s --namespace %s --api-key %s --api-secret %s ai-audit codex; exit $LASTEXITCODE' \
-      "$boot" "$ps_env_sets" "$ps_bin" "$(psq "$api_url")" "$(psq "$namespace")" "$(psq "$api_key")" "$(psq "$api_secret")")") ;;
+    # pipe, so each hook reads stdin and pipes it into endorctl.
+    cmd_audit=$(psenc "$ps_inline_event")
+    cmd_session=$(psenc "$(printf '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd()\n%s\n%s\n$in | %s' \
+      "$boot" "$ps_env_sets" "$ps_inline")") ;;
 esac
 
 # --- build (printf is pure structure; commands are JSON-escaped via js) --------
