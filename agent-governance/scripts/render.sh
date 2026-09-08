@@ -30,7 +30,13 @@
 # env block / inlined into every Cursor and Codex hook command (neither has a
 # managed env block). Cache is on by default; monitor-only is just
 # --env ENDOR_AI_AUDIT_NO_BLOCKING=true. --skip-endorctl-update uses an installed
-# endorctl as-is (no per-session version check), installing only when missing.
+# endorctl as-is (no version check at all), installing only when missing.
+#
+# On macOS/Linux the session hook never waits on the download: download_endorctl.sh
+# hands installs and updates to a detached background job, so the session audits
+# with the binary already on disk (or, on a machine that has none yet, skips that
+# one audit). The version check is throttled to once a day - override with
+# --env ENDORCTL_UPDATE_TTL_MINUTES=<minutes>. Windows still fetches inline.
 #
 # Example:
 #   render.sh --agent cursor --api-key K --api-secret S --namespace NS -o hooks.json
@@ -96,7 +102,7 @@ while [ $# -gt 0 ]; do
     --api-key)              api_key="$2"; shift 2 ;;
     --api-secret)           api_secret="$2"; shift 2 ;;
     --namespace)            namespace="$2"; shift 2 ;;
-    -h|--help)              sed -n '2,37p' "$0"; exit 0 ;;
+    -h|--help)              sed -n '2,43p' "$0"; exit 0 ;;
     *)                      die "unknown argument: $1" ;;
   esac
 done
@@ -111,12 +117,17 @@ case "$target_os" in
   macos|linux|windows) ;;
   *) die "unknown --target-os: $target_os (macos|linux|windows)" ;;
 esac
+# The bootstrap is embedded in every session hook (and base64'd into the Windows
+# form), so its comments and blank lines are dropped on the way in - they would
+# otherwise bloat every generated profile. Only whole-line comments are removed;
+# read scripts/download_endorctl.sh for why it does what it does.
+strip_src() { sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$1"; }
 if [ "$target_os" = windows ]; then
   command -v iconv >/dev/null || die "iconv is required for --target-os windows"
   command -v base64 >/dev/null || die "base64 is required for --target-os windows"
-  boot=$(cat "$SCRIPT_DIR/download_endorctl.ps1")
+  boot=$(strip_src "$SCRIPT_DIR/download_endorctl.ps1")
 else
-  boot=$(cat "$SCRIPT_DIR/download_endorctl.sh")
+  boot=$(strip_src "$SCRIPT_DIR/download_endorctl.sh")
 fi
 
 # Prompt only when interactive; unattended runs must supply creds up front.

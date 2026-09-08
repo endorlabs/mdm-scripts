@@ -90,36 +90,87 @@
 							<dict>
 								<key>command</key>
 								<string>BIN="${HOME}/.endorctl/endorctl"
-skip=
-[ -n "${ENDORCTL_SKIP_UPDATE:-}" ] &amp;&amp; [ -x "$BIN" ] &amp;&amp; skip=1
-if [ -z "$skip" ]; then
-  case "$(uname -s)" in Darwin) os=macos ;; Linux) os=linux ;; *) exit 1 ;; esac
-  case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) exit 1 ;; esac
-  URL="https://api.endorlabs.com/download/latest/endorctl_${os}_${arch}"
-  ARCH_KEY="ARCH_TYPE_$(echo "${os}_${arch}" | tr '[:lower:]' '[:upper:]')"
-  current=$([ -x "$BIN" ] &amp;&amp; "$BIN" --version 2&gt;/dev/null | awk '/version/ {print $NF; exit}')
-  meta=$(curl -fsSL --retry 5 --retry-connrefused --retry-all-errors https://api.endorlabs.com/meta/version)
-  latest=$(echo "$meta" | sed -n 's/.*"ClientVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-  expected_sha=$(echo "$meta" | sed -n "s/.*\"${ARCH_KEY}\"[[:space:]]*:[[:space:]]*\"\([a-f0-9]*\)\".*/\1/p")
-  uptodate=
-  [ -n "$current" ] &amp;&amp; { [ -z "$latest" ] || [ "$current" = "$latest" ]; } &amp;&amp; uptodate=1
-  if [ -z "$uptodate" ]; then
-    DIR=$(dirname "$BIN")
-    mkdir -p "$DIR"
-    # Sweep leftovers from interrupted past runs. Age-gated so a concurrent
-    # session's in-flight download is never deleted; the name cannot match the
-    # installed binary ("endorctl").
-    find "$DIR" -name 'endorctl-download-*' -mmin +60 -delete 2&gt;/dev/null
-    TMP=$(mktemp "$DIR/endorctl-download-XXXXXX") || exit 1
-    curl -fsSL --retry 5 --retry-connrefused --retry-all-errors -o "$TMP" "$URL" || { rm -f "$TMP"; exit 1; }
-    [ ${#expected_sha} -eq 64 ] || { rm -f "$TMP"; exit 1; }
-    case "$expected_sha" in *[!0-9a-f]*) rm -f "$TMP"; exit 1 ;; esac
-    if command -v sha256sum &gt;/dev/null 2&gt;&amp;1; then sum=$(sha256sum "$TMP" | awk '{print $1}'); else sum=$(shasum -a 256 "$TMP" | awk '{print $1}'); fi
-    [ "$sum" = "$expected_sha" ] || { rm -f "$TMP"; exit 1; }
-    chmod +x "$TMP" || { rm -f "$TMP"; exit 1; }
-    mv "$TMP" "$BIN"
-  fi
+DIR="${HOME}/.endorctl"
+STAMP="$DIR/.update-check"
+TTL="${ENDORCTL_UPDATE_TTL_MINUTES:-1440}"
+case "$TTL" in ''|*[!0-9]*) TTL=1440 ;; esac
+need=
+if [ ! -x "$BIN" ]; then
+  need=1
+elif [ -z "${ENDORCTL_SKIP_UPDATE:-}" ]; then
+  [ -f "$STAMP" ] &amp;&amp; [ -z "$(find "$STAMP" -mmin +"$TTL" 2&gt;/dev/null)" ] || need=1
 fi
+if [ -n "$need" ]; then
+  (
+    trap '' HUP
+    trap - EXIT
+    LOCK="$DIR/.update.lock"
+    PART="$DIR/.endorctl.part"
+    SHAF="$DIR/.endorctl.sha"
+    sha256() {
+      if command -v sha256sum &gt;/dev/null 2&gt;&amp;1; then sha256sum "$1" | awk '{print $1}'
+      else shasum -a 256 "$1" | awk '{print $1}'; fi
+    }
+    mkdir -p "$DIR" || exit 0
+    if [ -d "$LOCK" ]; then
+      ref="$PART"; [ -f "$PART" ] || ref="$LOCK"
+      [ -n "$(find "$ref" -mmin +30 2&gt;/dev/null)" ] || exit 0
+      mv "$LOCK" "$LOCK.stale.$$" 2&gt;/dev/null &amp;&amp; rm -rf "$LOCK.stale.$$"
+    fi
+    mkdir "$LOCK" 2&gt;/dev/null || exit 0
+    echo "$$" &gt; "$LOCK/owner" 2&gt;/dev/null || { rmdir "$LOCK" 2&gt;/dev/null; exit 0; }
+    [ "$(cat "$LOCK/owner" 2&gt;/dev/null)" = "$$" ] || exit 0
+    trap 'rm -rf "$LOCK"' EXIT
+    trap 'exit 1' INT TERM
+    find "$DIR" -name 'endorctl-download-*' -mmin +60 -delete 2&gt;/dev/null
+    case "$(uname -s)" in Darwin) os=macos ;; Linux) os=linux ;; *) exit 0 ;; esac
+    case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) exit 0 ;; esac
+    URL="https://api.endorlabs.com/download/latest/endorctl_${os}_${arch}"
+    ARCH_KEY="ARCH_TYPE_$(echo "${os}_${arch}" | tr '[:lower:]' '[:upper:]')"
+    current=$([ -x "$BIN" ] &amp;&amp; "$BIN" --version 2&gt;/dev/null | awk '/version/ {print $NF; exit}')
+    meta=$(curl -fsSL --connect-timeout 5 --max-time 30 https://api.endorlabs.com/meta/version) || exit 0
+    latest=$(echo "$meta" | sed -n 's/.*"ClientVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    expected_sha=$(echo "$meta" | sed -n "s/.*\"${ARCH_KEY}\"[[:space:]]*:[[:space:]]*\"\([a-f0-9]*\)\".*/\1/p")
+    [ -n "$latest" ] || exit 0
+    [ ${#expected_sha} -eq 64 ] || exit 0
+    case "$expected_sha" in *[!0-9a-f]*) exit 0 ;; esac
+    if [ -n "$current" ] &amp;&amp; [ "$current" = "$latest" ]; then
+      rm -f "$PART" "$SHAF"
+      : &gt; "$STAMP"
+      exit 0
+    fi
+    if [ ! -f "$SHAF" ] || [ "$(cat "$SHAF" 2&gt;/dev/null)" != "$expected_sha" ]; then
+      rm -f "$PART"
+      printf '%s\n' "$expected_sha" &gt; "$SHAF" || exit 0
+    fi
+    if [ ! -f "$PART" ] || [ "$(sha256 "$PART")" != "$expected_sha" ]; then
+      total=$(curl -fsSLI --connect-timeout 5 --max-time 30 "$URL" 2&gt;/dev/null \
+        | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ll]ength: *//p' | tail -1)
+      case "$total" in ''|*[!0-9]*) total= ;; esac
+      size=$(wc -c &lt; "$PART" 2&gt;/dev/null | tr -d ' ')
+      case "$size" in ''|*[!0-9]*) size=0 ;; esac
+      if [ -z "$total" ] || [ "$size" -ge "$total" ]; then rm -f "$PART"; fi
+      n=0; ok=
+      while [ "$n" -lt 3 ]; do
+        n=$((n + 1))
+        size=$(wc -c &lt; "$PART" 2&gt;/dev/null | tr -d ' ')
+        case "$size" in ''|*[!0-9]*) size=0 ;; esac
+        rng=
+        [ -n "$total" ] &amp;&amp; [ "$size" -gt 0 ] &amp;&amp; rng="-r $size-$((total - 1))"
+        if curl -fsSL --connect-timeout 10 --speed-limit 10240 --speed-time 60 \
+             $rng "$URL" &gt;&gt; "$PART"; then ok=1; break; fi
+        sleep 5
+      done
+      [ -n "$ok" ] || exit 0
+      [ "$(sha256 "$PART")" = "$expected_sha" ] || { rm -f "$PART" "$SHAF"; exit 0; }
+    fi
+    chmod +x "$PART" || exit 0
+    mv "$PART" "$BIN" || exit 0
+    rm -f "$SHAF"
+    : &gt; "$STAMP"
+  ) &gt;/dev/null 2&gt;&amp;1 &lt;/dev/null &amp;
+fi
+[ -x "$BIN" ] || exit 0
 "$HOME/.endorctl/endorctl" --api "$AGENT_HOOK_ENDOR_API" --namespace "$AGENT_HOOK_ENDOR_NAMESPACE" --api-key "$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY" --api-secret "$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET" ai-audit claudecode</string>
 								<key>type</key>
 								<string>command</string>
