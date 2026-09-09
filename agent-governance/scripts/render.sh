@@ -6,9 +6,11 @@
 # (.mobileconfig) is produced by piping this script's Claude output through
 # render-plist.sh.
 #
-# Outputs: --agent {claude,cursor} emit JSON; --agent codex emits a Codex
+# Outputs: --agent {claude,cursor,copilot} emit JSON; --agent codex emits a Codex
 # requirements.toml (managed hooks, auto-trusted) - wrap it for the macOS profile
-# by piping through 'render-plist.sh --style mcx'. The hook command strings are
+# by piping through 'render-plist.sh --style mcx'. Copilot's JSON is a policy hook
+# file for /etc/github-copilot/policy.d, the one Copilot config level a user cannot
+# bypass (see docs/deploy-copilot-policy.md). The hook command strings are
 # emitted for --target-os: macos/linux share a POSIX shell form; windows inlines the
 # PowerShell bootstrap + audit, invoked as a self-contained, shell-agnostic
 #   powershell -NoProfile -EncodedCommand <base64-UTF16LE>
@@ -27,8 +29,8 @@
 #   --api-url     ENDOR_API                  (default: https://api.endorlabs.com)
 #
 # Behavior settings go through --env KEY=VALUE (repeatable), routed to Claude's
-# env block / inlined into every Cursor and Codex hook command (neither has a
-# managed env block). Cache is on by default; monitor-only is just
+# env block / inlined into every Cursor, Codex, and Copilot hook command (none of
+# which has a managed env block). Cache is on by default; monitor-only is just
 # --env ENDOR_AI_AUDIT_NO_BLOCKING=true. --skip-endorctl-update uses an installed
 # endorctl as-is (no version check at all), installing only when missing.
 #
@@ -41,6 +43,7 @@
 # Example:
 #   render.sh --agent cursor --api-key K --api-secret S --namespace NS -o hooks.json
 #   render.sh --agent claude --target-os windows --api-key K --api-secret S --namespace NS
+#   render.sh --agent copilot --api-key K --api-secret S --namespace NS -o endor.json
 set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -102,16 +105,16 @@ while [ $# -gt 0 ]; do
     --api-key)              api_key="$2"; shift 2 ;;
     --api-secret)           api_secret="$2"; shift 2 ;;
     --namespace)            namespace="$2"; shift 2 ;;
-    -h|--help)              sed -n '2,43p' "$0"; exit 0 ;;
+    -h|--help)              sed -n '2,46p' "$0"; exit 0 ;;
     *)                      die "unknown argument: $1" ;;
   esac
 done
 
 # --- validation ---------------------------------------------------------------
 case "$agent" in
-  claude|cursor|codex) ;;
-  "") die "--agent is required (claude|cursor|codex)" ;;
-  *) die "unknown agent: $agent (claude|cursor|codex)" ;;
+  claude|cursor|codex|copilot) ;;
+  "") die "--agent is required (claude|cursor|codex|copilot)" ;;
+  *) die "unknown agent: $agent (claude|cursor|codex|copilot)" ;;
 esac
 case "$target_os" in
   macos|linux|windows) ;;
@@ -183,14 +186,14 @@ psenc() {
 
 # The audit invocation each hook runs. Claude reads creds from its managed env
 # block at hook time (hook-scoped AGENT_HOOK_ENDOR_* names, see build_claude).
-# Cursor and Codex have no managed env block, so creds and behavior envs are
+# Cursor, Codex, and Copilot have no managed env block, so creds and behavior envs are
 # inlined literally into every hook command (*_inline): each hook is
 # self-contained and depends on nothing an earlier hook set up. Cursor can inject
 # env from a sessionStart hook's output, but that env is lost when a conversation
 # is resumed after a restart and never reaches hooks fired inside subagents, so
 # it is deliberately not relied on.
 # endorctl's audit subcommand per agent (Claude Code is "claudecode", not "claude").
-case "$agent" in claude) subcmd="claudecode" ;; cursor) subcmd="cursor" ;; codex) subcmd="codex" ;; esac
+case "$agent" in claude) subcmd="claudecode" ;; cursor) subcmd="cursor" ;; codex) subcmd="codex" ;; copilot) subcmd="copilot" ;; esac
 posix_audit='"$HOME/.endorctl/endorctl" --api "$AGENT_HOOK_ENDOR_API" --namespace "$AGENT_HOOK_ENDOR_NAMESPACE" --api-key "$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY" --api-secret "$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET" ai-audit '"$subcmd"
 posix_inline=$(printf '%s"$HOME/.endorctl/endorctl" --api %s --namespace %s --api-key %s --api-secret %s ai-audit %s' \
   "$env_prefix" "$(sq "$api_url")" "$(sq "$namespace")" "$(sq "$api_key")" "$(sq "$api_secret")" "$subcmd")
@@ -231,13 +234,14 @@ case "$agent:$target_os" in
     # whose setter throws on a piped handle).
     cmd_session=$(psenc "$(printf '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd()\n%s\n%s\n$in | %s' \
       "$boot" "$ps_env_sets" "$ps_inline")") ;;
-  codex:macos|codex:linux)
-    # Codex keeps the event pipe open (POSIX inherits it), so endorctl reads the
-    # event JSON from stdin directly - no capture-to-file dance is needed (that is
-    # a Cursor-only quirk). The requirements.toml is the credential-bearing artifact.
+  codex:macos|codex:linux|copilot:macos|copilot:linux)
+    # Codex and Copilot both keep the event pipe open (POSIX inherits it), so
+    # endorctl reads the event JSON from stdin directly - no capture-to-file dance
+    # is needed (that is a Cursor-only quirk). The generated file is itself the
+    # credential-bearing artifact.
     cmd_audit="$posix_inline"
     cmd_session=$(printf '%s\n%s' "$boot" "$posix_inline") ;;
-  codex:windows)
+  codex:windows|copilot:windows)
     # As with Cursor on Windows, the EncodedCommand does not inherit the event
     # pipe, so each hook reads stdin and pipes it into endorctl.
     cmd_audit=$(psenc "$ps_inline_event")
@@ -317,9 +321,52 @@ build_codex() {
   codex_event Stop              "$_a" ""
 }
 
+# Copilot takes one JSON policy hook file covering both local surfaces (the
+# Copilot CLI and Copilot agent mode in VS Code). Event names must be PascalCase:
+# the CLI selects its payload format from the config's casing, and only the
+# PascalCase form emits the hook_event_name field that `ai-audit copilot` needs to
+# know which event fired. Matchers are deliberately unused (VS Code parses but
+# does not apply them).
+#
+# One "command" key serves both surfaces: the CLI documents it as the
+# cross-platform fallback, "copied to both bash and powershell when those fields
+# are absent", and it is the only command key VS Code recognizes (VS Code knows
+# nothing of bash/powershell). The two disagree on the timeout spelling - the CLI
+# reads timeoutSec, VS Code reads timeout - so both are emitted and each surface
+# ignores the one it does not know. Emitting a single command key also keeps the
+# session hook from carrying the whole bootstrap twice.
+#
+# The Windows command is the self-contained `powershell -NoProfile
+# -EncodedCommand ...` form, so it needs no per-shell or per-OS key either.
+copilot_hook() {  # $1=event  $2=js-escaped command  $3=timeout secs  $4=trailing "," or ""
+  printf '    "%s": [\n      {\n        "type": "command",\n        "command": "%s",\n        "timeoutSec": %s,\n        "timeout": %s\n      }\n    ]%s\n' \
+    "$1" "$2" "$3" "$3" "$4"
+}
+
+build_copilot() {
+  _s=$(js "$cmd_session"); _a=$(js "$cmd_audit")
+  # On POSIX the bootstrap hands the download to a background job, so the session
+  # hook returns immediately and the default 30s is ample. On Windows it still
+  # fetches a ~300 MB binary inline, which would blow a 30s budget the first time
+  # a machine runs an agent - so only that hook gets a long ceiling.
+  case "$target_os" in
+    windows) _session_timeout=1800 ;;
+    *)       _session_timeout=30 ;;
+  esac
+  printf '{\n  "version": 1,\n  "hooks": {\n'
+  copilot_hook SessionStart        "$_s" "$_session_timeout" ,
+  copilot_hook UserPromptSubmit    "$_a" 30 ,
+  copilot_hook PreToolUse          "$_a" 30 ,
+  copilot_hook PostToolUse         "$_a" 30 ,
+  copilot_hook PostToolUseFailure  "$_a" 30 ,
+  copilot_hook Stop                "$_a" 30 ,
+  copilot_hook SessionEnd          "$_a" 30 ""
+  printf '  }\n}\n'
+}
+
 # --- emit ---------------------------------------------------------------------
-emit() { case "$agent" in claude) build_claude ;; cursor) build_cursor ;; codex) build_codex ;; esac; }
-case "$agent" in claude) def_out="claude-settings.json" ;; cursor) def_out="cursor-hooks.json" ;; codex) def_out="codex-requirements.toml" ;; esac
+emit() { case "$agent" in claude) build_claude ;; cursor) build_cursor ;; codex) build_codex ;; copilot) build_copilot ;; esac; }
+case "$agent" in claude) def_out="claude-settings.json" ;; cursor) def_out="cursor-hooks.json" ;; codex) def_out="codex-requirements.toml" ;; copilot) def_out="copilot-hooks.json" ;; esac
 out_path="${output:-$def_out}"
 
 if [ "$out_path" = "-" ]; then

@@ -1,6 +1,6 @@
 # agent-governance
 
-Deploy Endor Labs audit hooks to every AI coding agent on your fleet — Claude Code, Cursor, and Codex — through your MDM.
+Deploy Endor Labs audit hooks to every AI coding agent on your fleet — Claude Code, Cursor, Codex, and GitHub Copilot — through your MDM.
 
 ## What this is
 
@@ -24,29 +24,34 @@ scripts/render.sh --agent claude \
 # Codex — writes ~/.codex/config.toml (overwrites; merge its [hooks]/[features] if you already have one)
 scripts/render.sh --agent codex \
   --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o ~/.codex/config.toml
+
+# GitHub Copilot — writes ~/.copilot/hooks/endor.json (read by the Copilot CLI and VS Code agent mode)
+mkdir -p ~/.copilot/hooks && scripts/render.sh --agent copilot \
+  --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o ~/.copilot/hooks/endor.json
 ```
 
 Start a new session in the tool: the hook installs `endorctl` on first run and begins reporting to your Endor namespace. (Codex treats hooks from a *user* file as untrusted until you approve them once — the fleet paths below deliver them from a managed source, where they're trusted automatically.) When you're ready to roll this out to the fleet, pick a deployment path below.
 
 ## Choose how to deploy
 
-Each tool is delivered the way it best supports it. On macOS, Claude Code and Codex take a tamper-resistant MDM **profile**; Cursor's config is a plain file delivered by a small **script**. A laptop can run any combination.
+Each tool is delivered the way it best supports it. On macOS, Claude Code and Codex take a tamper-resistant MDM **profile**; Cursor and Copilot are plain files delivered by a small **script** — though Copilot's file lands at a path Copilot itself treats as administrator policy, so it can't be switched off. A laptop can run any combination.
 
 | Tool | macOS delivery | Why | Runbook |
 | --- | --- | --- | --- |
 | **Claude Code** | MDM **Custom Profile** (`.mobileconfig`) | Claude reads a managed-settings profile payload (`com.anthropic.claudecode`), enforced by the OS | [Deploy Claude via profile](docs/deploy-claude-profile.md) |
 | **Cursor** | MDM **Custom Script** (the runner) | `hooks.json` is a plain file, not a profile payload | [Deploy Cursor via the runner](docs/deploy-cursor-runner.md) |
 | **Codex** | MDM **Custom Profile** (`.mobileconfig`) | Codex reads a Forced `com.openai.codex` preference (`requirements_toml_base64`); hooks from that managed source are auto-trusted | [Deploy Codex via profile](docs/deploy-codex-profile.md) |
+| **GitHub Copilot** | MDM **Custom Script** (the runner) | Copilot has no profile payload, but its own **policy level** (`/etc/github-copilot/policy.d/`) outranks user config and can't be switched off | [Deploy Copilot via policy file](docs/deploy-copilot-policy.md) |
 
-**Linux** delivers the same config as a file — Cursor at `/etc/cursor/hooks.json`, Claude at `/etc/claude-code/managed-settings.json`, Codex at `/etc/codex/requirements.toml` — via the runner or your config management (Ansible, Chef, …).
+**Linux** delivers the same config as a file — Cursor at `/etc/cursor/hooks.json`, Claude at `/etc/claude-code/managed-settings.json`, Codex at `/etc/codex/requirements.toml`, Copilot at `/etc/github-copilot/policy.d/endor.json` — via the runner or your config management (Ansible, Chef, …).
 
-**Windows** has no `.mobileconfig`. You pre-generate the config (`--target-os windows`) and push the file with **Intune** — Cursor/Claude as JSON, Codex as `%ProgramData%\OpenAI\Codex\requirements.toml`; the hook is a self-contained `powershell` command that runs regardless of how the agent launches it. See [Deploy on Windows via Intune](docs/deploy-windows-intune.md).
+**Windows** has no `.mobileconfig`. You pre-generate the config (`--target-os windows`) and push the file with **Intune** — Cursor/Claude as JSON, Codex as `%ProgramData%\OpenAI\Codex\requirements.toml`, Copilot as `%ProgramData%\GitHub\Copilot\policy.d\endor.json`; the hook is a self-contained `powershell` command that runs regardless of how the agent launches it. See [Deploy on Windows via Intune](docs/deploy-windows-intune.md).
 
 Other paths: [JumpCloud](docs/deploy-jumpcloud.md) (any OS), and [manual / enterprise-platform install](docs/deploy-manual-enterprise.md) for trials or orgs governing through Cursor Team hooks / Claude's admin console. The full agent × OS × MDM grid is the [support matrix](docs/support-matrix.md).
 
 ## The generator
 
-[`scripts/render.sh`](scripts/render.sh) builds a tool's config — JSON for Claude and Cursor, a `requirements.toml` for Codex. For a macOS profile, pipe that output through [`scripts/render-plist.sh`](scripts/render-plist.sh), which wraps it in the profile envelope and converts it to a `.mobileconfig` (`--style plist` for Claude's JSON payload, `--style mcx` for Codex's base64 TOML preference).
+[`scripts/render.sh`](scripts/render.sh) builds a tool's config — JSON for Claude, Cursor, and Copilot, a `requirements.toml` for Codex. For a macOS profile, pipe that output through [`scripts/render-plist.sh`](scripts/render-plist.sh), which wraps it in the profile envelope and converts it to a `.mobileconfig` (`--style plist` for Claude's JSON payload, `--style mcx` for Codex's base64 TOML preference).
 
 ```sh
 # Cursor hooks.json
@@ -73,6 +78,10 @@ scripts/render.sh --agent codex \
   --name "Codex - Endor AI Governance" \
   -o com.openai.codex.mobileconfig
 
+# GitHub Copilot policy hook file (deliver to /etc/github-copilot/policy.d/)
+scripts/render.sh --agent copilot \
+  --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o endor.json
+
 # Windows config (push via Intune)
 scripts/render.sh --agent cursor --target-os windows \
   --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o cursor-hooks.json
@@ -89,7 +98,7 @@ scripts/render.sh --agent cursor --target-os windows \
 
 **`--target-os {macos,linux,windows}`** (default `macos`; macOS and Linux are identical POSIX) chooses the hook form. `windows` inlines the PowerShell bootstrap as a base64 `powershell -NoProfile -EncodedCommand …` so it runs under Git Bash, PowerShell, or cmd alike.
 
-**Behavior settings** go through `--env KEY=VALUE` (repeatable) and land in the right place per tool — Claude's `env` block, and inlined into every Cursor and Codex hook command (neither has a managed env block). Response caching is on by default; monitor-only mode is just `--env ENDOR_AI_AUDIT_NO_BLOCKING=true`.
+**Behavior settings** go through `--env KEY=VALUE` (repeatable) and land in the right place per tool — Claude's `env` block, and inlined into every Cursor, Codex, and Copilot hook command (none of which has a managed env block). Response caching is on by default; monitor-only mode is just `--env ENDOR_AI_AUDIT_NO_BLOCKING=true`.
 
 **`--skip-endorctl-update`** makes the session hook use an already-installed `endorctl` instead of ever checking for a newer one — useful once the fleet is provisioned. It still installs when the binary is missing, and it passes through the runner too. (Without it the check is throttled to once every 24 h and runs in the background, so it costs a session nothing either way.)
 
@@ -112,7 +121,7 @@ A good rollout starts in monitor-only, watches the Endor audit log over a repres
 - **Update available** — the session audits immediately using the binary already on disk; the new one is fetched in the background and swaps in for the next session.
 - **Nothing installed yet** — that one session is **not audited**; the download runs in the background and later sessions are covered.
 
-Downloads resume across sessions rather than restarting, and a lock keeps concurrent agents (Claude, Cursor, Codex, or several windows) from each pulling their own copy. The version check is throttled to once every 24 h — override with `--env ENDORCTL_UPDATE_TTL_MINUTES=<minutes>`. Windows still downloads in the foreground; see [`download_endorctl.ps1`](scripts/download_endorctl.ps1).
+Downloads resume across sessions rather than restarting, and a lock keeps concurrent agents (Claude, Cursor, Codex, Copilot, or several windows) from each pulling their own copy. The version check is throttled to once every 24 h — override with `--env ENDORCTL_UPDATE_TTL_MINUTES=<minutes>`. Windows still downloads in the foreground; see [`download_endorctl.ps1`](scripts/download_endorctl.ps1).
 
 **What needs re-delivery when it changes:**
 
@@ -121,16 +130,17 @@ Downloads resume across sessions rather than restarting, and a lock keeps concur
 | `endorctl` binary | Self-updates in the background, at most once every 24 h (SHA-256 verified); `--skip-endorctl-update` pins it | None |
 | Governance rules | Server-side at Endor, fetched at run time | None |
 | Claude / Codex profile config (macOS) | Regenerate the `.mobileconfig`, re-upload to the MDM | Re-upload |
-| Cursor / Codex runner config (macOS/Linux) | Runner re-fetches `REF` and re-renders on each scheduled run | None after setup |
+| Cursor / Codex / Copilot runner config (macOS/Linux) | Runner re-fetches `REF` and re-renders on each scheduled run | None after setup |
 | Windows config | Regenerate (`--target-os windows`), re-push via Intune | Re-push |
 
 **Security properties:**
 
 - **Tamper-resistance.** A profile-delivered config (Claude and Codex on macOS) is an OS-enforced managed setting — hard for a developer to override, and Codex additionally marks managed-source hooks trusted-by-policy so a user can't disable them. A script-delivered file (Cursor, and the file-based Linux/Windows paths) is not OS-enforced; a determined developer could override it. Cursor has no profile mechanism today.
+- **Copilot is enforced by the app, not the OS.** Copilot has no profile payload, but `/etc/github-copilot/policy.d/` is its own administrator level: hooks there outrank user and project config, ignore a user's `disableAllHooks`, and run regardless of folder trust. Root ownership plus Copilot's own precedence rules do the work a profile does elsewhere. The limit is reach, not strength — **only the Copilot CLI reads that path**. VS Code's Copilot agent mode has no managed hook location (its enterprise `ChatHooks` policy only turns hooks on or off), so covering VS Code means a user-writable `~/.copilot/hooks/endor.json`, which is not tamper-resistant. See [the Copilot runbook](docs/deploy-copilot-policy.md#scope-the-cli-is-covered-vs-code-agent-mode-is-not).
 - **One unaudited session per machine (POSIX).** Because the first install runs in the background rather than blocking startup, the session that triggers it isn't audited — nor is any other session started before the download lands. Coverage is complete from then on. To close that window, pre-provision `endorctl` (an MDM package, or your config management) so the binary is already present the first time an agent runs.
-- **Least-privilege credentials.** A generated profile (or Codex `requirements.toml`) carries the API key and secret to every laptop — scope it to an **audit-only** credential.
+- **Least-privilege credentials.** A generated profile (or a Codex `requirements.toml` / Copilot policy file) carries the API key and secret to every laptop — scope it to an **audit-only** credential.
 - **Pin the revision.** The runner executes this repo's code as root, so it fetches a specific revision: set `REF` (at the top of `runner.sh`) to a reviewed tag, branch, or commit and each device runs only that, not the moving branch tip. Bump `REF` to roll out a change; the default (`main`) tracks the latest.
-- **Credential isolation (Claude).** The `env` block exports into every subprocess Claude spawns, including any `endorctl` the agent itself runs. To keep audit credentials out of the agent's process tree, hook-scoped variables use an `AGENT_HOOK_ENDOR_*` prefix that `endorctl` doesn't read natively, and the hook passes them through as `--api-key …` flags. Cursor and Codex have no managed env block, so their credentials are passed as `--api-key …` flags directly on each hook command (never exported), which keeps them out of the agent's environment the same way.
+- **Credential isolation (Claude).** The `env` block exports into every subprocess Claude spawns, including any `endorctl` the agent itself runs. To keep audit credentials out of the agent's process tree, hook-scoped variables use an `AGENT_HOOK_ENDOR_*` prefix that `endorctl` doesn't read natively, and the hook passes them through as `--api-key …` flags. Cursor, Codex, and Copilot have no managed env block, so their credentials are passed as `--api-key …` flags directly on each hook command (never exported), which keeps them out of the agent's environment the same way.
 - **Self-contained hooks (Cursor).** Every Cursor hook carries its own credentials and `--env` settings; none depends on state from an earlier hook. Cursor can inject env from a `sessionStart` hook's output, but that env is lost when a conversation is resumed after a restart and never reaches hooks fired inside subagents — so relying on it would leave those sessions unaudited and unenforced.
 - **Robust quoting.** Credentials and `--env` values are escaped for their target — the shell (POSIX single-quoting), PowerShell (single-quote doubling), and JSON/TOML (an `awk`/`sed` escaper) — and `$VAR` references in the generated commands are quoted, so a value containing a space, quote, `$`, `;`, `*`, or `` ` `` never word-splits or breaks the hook.
 
@@ -168,7 +178,7 @@ tests/run-tests.sh --network       # + assert the download endpoint's contract
 tests/run-tests.sh --network-full  # + a real resume and install (~300 MB)
 ```
 
-The offline suite drives `download_endorctl.sh` under a throwaway `HOME` with a stubbed `curl`, so branches that only occur on a bad network — a dead endpoint, a half-finished download, a corrupt one, two agents racing, a signal mid-transfer — are all reachable without waiting on a transfer. It also **regenerates every `examples/` artifact and fails if the checked-in copy differs**, which is the check that keeps the samples honest after a script change, and syntax-checks all 36 hook commands embedded across those artifacts to confirm they survived JSON/TOML escaping.
+The offline suite drives `download_endorctl.sh` under a throwaway `HOME` with a stubbed `curl`, so branches that only occur on a bad network — a dead endpoint, a half-finished download, a corrupt one, two agents racing, a signal mid-transfer — are all reachable without waiting on a transfer. It also **regenerates every `examples/` artifact and fails if the checked-in copy differs**, which is the check that keeps the samples honest after a script change, and syntax-checks all 43 hook commands embedded across those artifacts to confirm they survived JSON/TOML escaping.
 
 `--network` is worth running when the download endpoint might have changed: it pins the behavior resume depends on — a closed `bytes=A-B` range returns `206`, while an open-ended `bytes=A-` returns the whole body. That second one is why the bootstrap builds an explicit closed range instead of using `curl -C -`; if it ever starts returning `206`, the code can be simplified.
 
@@ -188,8 +198,10 @@ Everything needs only what ships with macOS/Linux; `plutil` (for the profile com
 | TOML (POSIX hooks) | Codex | `examples/codex/requirements.toml` |
 | MDM profile (plist, mcx) | Codex | `examples/codex/com.openai.codex.mobileconfig` |
 | TOML (encoded PowerShell hook) | Codex | `examples/codex/requirements.windows.toml` |
+| JSON (POSIX hooks) | Copilot | `examples/copilot/policy.json` |
+| JSON (encoded PowerShell hook) | Copilot | `examples/copilot/policy.windows.json` |
 
-There's no separate Linux example: `settings.json` is exactly what Claude reads as the Linux `/etc/claude-code/managed-settings.json` and as the inner payload of the macOS profile, `requirements.toml` is what Codex reads at `/etc/codex/`, and JumpCloud reuses these same files. Only the Windows samples differ (the encoded `powershell` hook). After changing a script, regenerate the affected examples with the commands above so they stay in sync — `tests/run-tests.sh` fails if you forget.
+There's no separate Linux example: `settings.json` is exactly what Claude reads as the Linux `/etc/claude-code/managed-settings.json` and as the inner payload of the macOS profile, `requirements.toml` is what Codex reads at `/etc/codex/`, `policy.json` is what Copilot reads at `/etc/github-copilot/policy.d/`, and JumpCloud reuses these same files. Only the Windows samples differ (the encoded `powershell` hook). After changing a script, regenerate the affected examples with the commands above so they stay in sync — `tests/run-tests.sh` fails if you forget.
 
 ## Extending
 

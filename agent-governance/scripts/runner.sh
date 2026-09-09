@@ -17,7 +17,7 @@
 set -eu
 
 # --- settings: edit these ---------------------------------------------------
-AGENT=cursor                                       # cursor | claude | codex
+AGENT=cursor                                       # cursor | claude | codex | copilot
 REF=main                                           # pin to a reviewed tag/commit, e.g. v1.0.0
 EXTRA=                                              # extra render flags, e.g. --env ENDOR_AI_AUDIT_NO_BLOCKING=true
 DEST=                                              # override install path; empty = OS default
@@ -42,6 +42,12 @@ if [ -z "$DEST" ]; then
     # alternative is an MDM profile (see docs/deploy-codex-profile.md) - deliver
     # that through your MDM instead of running this on the endpoint.
     codex:Darwin|codex:Linux) DEST="/etc/codex/requirements.toml" ;;
+    # Copilot's policy level is the same directory on macOS and Linux. Hooks here
+    # outrank user and project config, cannot be turned off with disableAllHooks,
+    # and run regardless of folder trust - so this file is the enforcement point.
+    # It is read by the Copilot CLI only; VS Code agent mode has no managed hook
+    # path (see docs/deploy-copilot-policy.md).
+    copilot:Darwin|copilot:Linux) DEST="/etc/github-copilot/policy.d/endor.json" ;;
     *) echo "runner.sh: set DEST for agent '$AGENT' on $os" >&2; exit 2 ;;
   esac
 fi

@@ -15,6 +15,9 @@ There's no native "push a file" feature — file delivery is just a Command that
 | Cursor | macOS | Command → `runner.sh (AGENT=cursor)` |
 | Cursor | Linux | Command → `runner.sh (AGENT=cursor)` → `/etc/cursor/hooks.json` |
 | Cursor | Windows | Command (PowerShell) writes the pre-generated config to `C:\ProgramData\Cursor\hooks.json` |
+| Copilot CLI | macOS | Command → `runner.sh (AGENT=copilot)` → `/etc/github-copilot/policy.d/endor.json` |
+| Copilot CLI | Linux | Command → `runner.sh (AGENT=copilot)` → `/etc/github-copilot/policy.d/endor.json` |
+| Copilot CLI | Windows | Command (PowerShell) writes the pre-generated config to `C:\ProgramData\GitHub\Copilot\policy.d\endor.json` |
 
 ## macOS — Claude via profile
 
