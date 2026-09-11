@@ -1,6 +1,6 @@
 # Deploy on Windows via Intune
 
-Windows has no Configuration Profiles for these tools — each agent reads a plain config file from a known path (Cursor/Claude as JSON, Codex as TOML). So the pattern is different from macOS: you **pre-generate the config on a macOS/Linux admin machine** (the generator is a POSIX shell script; a plain Windows laptop has no `sh`) and use **Microsoft Intune** to place the file. The endpoint never runs the generator.
+Windows has no Configuration Profiles for these tools — each agent reads a plain config file from a known path (Cursor/Claude/Copilot as JSON, Codex as TOML). So the pattern is different from macOS: you **pre-generate the config on a macOS/Linux admin machine** (the generator is a POSIX shell script; a plain Windows laptop has no `sh`) and use **Microsoft Intune** to place the file. The endpoint never runs the generator.
 
 ## How the Windows hook runs
 
@@ -28,6 +28,10 @@ scripts/render.sh --agent claude --target-os windows \
 # Codex
 scripts/render.sh --agent codex --target-os windows \
   --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o codex-requirements.toml
+
+# GitHub Copilot
+scripts/render.sh --agent copilot --target-os windows \
+  --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o copilot-endor.json
 ```
 
 Add `--env ENDOR_AI_AUDIT_NO_BLOCKING=true` for a monitor-only rollout, or `--skip-endorctl-update` to pin to the installed binary. (Generating Windows configs needs `sh` + `awk` + `sed` + `iconv` + `base64`, all standard on macOS/Linux.)
@@ -39,13 +43,14 @@ Add `--env ENDOR_AI_AUDIT_NO_BLOCKING=true` for a monitor-only rollout, or `--sk
 | **Cursor** | `C:\ProgramData\Cursor\hooks.json` (system-wide) or `%USERPROFILE%\.cursor\hooks.json` (per-user) | system-wide outranks per-user |
 | **Claude Code** | `C:\Program Files\ClaudeCode\managed-settings.json` (+ `managed-settings.d\`) | managed settings; users can't override |
 | **Codex** | `%ProgramData%\OpenAI\Codex\requirements.toml` | managed requirements; hooks auto-trusted, users can't disable |
+| **GitHub Copilot** | `C:\ProgramData\GitHub\Copilot\policy.d\endor.json` | policy level: outranks user/project config, ignores `disableAllHooks`, applies regardless of folder trust. Read by the **Copilot CLI only** — VS Code agent mode has no managed hook path ([details](deploy-copilot-policy.md#scope-the-cli-is-covered-vs-code-agent-mode-is-not)) |
 
 ## 3. Push with Intune
 
 Use a **Platform script** (Devices → Scripts → Add → Windows 10 and later) or a Win32 app, run in system context, that writes the generated config to the path above:
 
 ```powershell
-$dest = "$env:ProgramData\Cursor\hooks.json"   # or C:\Program Files\ClaudeCode\managed-settings.json, or $env:ProgramData\OpenAI\Codex\requirements.toml
+$dest = "$env:ProgramData\Cursor\hooks.json"   # or C:\Program Files\ClaudeCode\managed-settings.json, or $env:ProgramData\OpenAI\Codex\requirements.toml, or $env:ProgramData\GitHub\Copilot\policy.d\endor.json
 # Paste the generated config between the single-quoted here-string markers. Single
 # quotes (@'  '@) keep it literal so PowerShell doesn't interpret $ / quotes in it.
 $config = @'

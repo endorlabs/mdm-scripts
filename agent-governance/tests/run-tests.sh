@@ -270,7 +270,7 @@ chk "without re-downloading" "$(gets)" "0"
 # The checked-in examples/ are generated output. Any change to a script must be
 # reflected there, or the samples in the README silently drift from reality.
 sec "checked-in examples are in sync with the scripts"
-GEN="$WORK/gen"; mkdir -p "$GEN"/cursor "$GEN"/claude "$GEN"/codex
+GEN="$WORK/gen"; mkdir -p "$GEN"/cursor "$GEN"/claude "$GEN"/codex "$GEN"/copilot
 K=PEPE; S=PAPA; NS=spiderman     # demo credentials the samples were built with
 r() { "$AG/scripts/render.sh" --api-key $K --api-secret $S --namespace $NS "$@"; }
 {
@@ -280,6 +280,8 @@ r() { "$AG/scripts/render.sh" --api-key $K --api-secret $S --namespace $NS "$@";
   r --agent cursor --target-os windows -o "$GEN/cursor/hooks.windows.json"
   r --agent claude --target-os windows -o "$GEN/claude/settings.windows.json"
   r --agent codex  --target-os windows -o "$GEN/codex/requirements.windows.toml"
+  r --agent copilot -o "$GEN/copilot/policy.json"
+  r --agent copilot --target-os windows -o "$GEN/copilot/policy.windows.json"
 } >/dev/null 2>&1
 if command -v plutil >/dev/null 2>&1; then
   # Placeholder UUIDs, so a regenerated profile stays byte-identical.
@@ -300,7 +302,8 @@ for rel in cursor/hooks.json cursor/hooks.windows.json \
            claude/settings.json claude/settings.windows.json \
            claude/com.anthropic.claudecode.mobileconfig \
            codex/requirements.toml codex/requirements.windows.toml \
-           codex/com.openai.codex.mobileconfig; do
+           codex/com.openai.codex.mobileconfig \
+           copilot/policy.json copilot/policy.windows.json; do
   if [ ! -f "$GEN/$rel" ]; then echo "  (skipped $rel, needs plutil)"; continue; fi
   if cmp -s "$GEN/$rel" "$AG/examples/$rel"; then ok "examples/$rel"
   else bad "examples/$rel is stale - regenerate it (see README \"Examples\")"; fi
@@ -324,6 +327,8 @@ d = json.load(open(f'{ag}/examples/claude/settings.json'))
 for ev, a in d['hooks'].items(): check(f'claude:{ev}', a[0]['hooks'][0]['command'])
 d = json.load(open(f'{ag}/examples/cursor/hooks.json'))
 for ev, a in d['hooks'].items(): check(f'cursor:{ev}', a[0]['command'])
+d = json.load(open(f'{ag}/examples/copilot/policy.json'))
+for ev, a in d['hooks'].items(): check(f'copilot:{ev}', a[0]['command'])
 if tomllib:
     d = tomllib.load(open(f'{ag}/examples/codex/requirements.toml', 'rb'))
     for ev, arr in d['hooks'].items():

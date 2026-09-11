@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "BIN=\"${HOME}/.endorctl/endorctl\"\nDIR=\"${HOME}/.endorctl\"\nSTAMP=\"$DIR/.update-check\"\nTTL=\"${ENDORCTL_UPDATE_TTL_MINUTES:-1440}\"\ncase \"$TTL\" in ''|*[!0-9]*) TTL=1440 ;; esac\nneed=\nif [ ! -x \"$BIN\" ]; then\n  need=1\nelif [ -z \"${ENDORCTL_SKIP_UPDATE:-}\" ]; then\n  [ -f \"$STAMP\" ] && [ -z \"$(find \"$STAMP\" -mmin +\"$TTL\" 2>/dev/null)\" ] || need=1\nfi\nif [ -n \"$need\" ]; then\n  (\n    trap '' HUP\n    trap - EXIT\n    LOCK=\"$DIR/.update.lock\"\n    PART=\"$DIR/.endorctl.part\"\n    SHAF=\"$DIR/.endorctl.sha\"\n    sha256() {\n      if command -v sha256sum >/dev/null 2>&1; then sha256sum \"$1\" | awk '{print $1}'\n      else shasum -a 256 \"$1\" | awk '{print $1}'; fi\n    }\n    mkdir -p \"$DIR\" || exit 0\n    if [ -d \"$LOCK\" ]; then\n      ref=\"$PART\"; [ -f \"$PART\" ] || ref=\"$LOCK\"\n      [ -n \"$(find \"$ref\" -mmin +30 2>/dev/null)\" ] || exit 0\n      mv \"$LOCK\" \"$LOCK.stale.$$\" 2>/dev/null && rm -rf \"$LOCK.stale.$$\"\n    fi\n    mkdir \"$LOCK\" 2>/dev/null || exit 0\n    echo \"$$\" > \"$LOCK/owner\" 2>/dev/null || { rmdir \"$LOCK\" 2>/dev/null; exit 0; }\n    [ \"$(cat \"$LOCK/owner\" 2>/dev/null)\" = \"$$\" ] || exit 0\n    trap 'rm -rf \"$LOCK\"' EXIT\n    trap 'exit 1' INT TERM\n    find \"$DIR\" -name 'endorctl-download-*' -mmin +60 -delete 2>/dev/null\n    case \"$(uname -s)\" in Darwin) os=macos ;; Linux) os=linux ;; *) exit 0 ;; esac\n    case \"$(uname -m)\" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) exit 0 ;; esac\n    URL=\"https://api.endorlabs.com/download/latest/endorctl_${os}_${arch}\"\n    ARCH_KEY=\"ARCH_TYPE_$(echo \"${os}_${arch}\" | tr '[:lower:]' '[:upper:]')\"\n    current=$([ -x \"$BIN\" ] && \"$BIN\" --version 2>/dev/null | awk '/version/ {print $NF; exit}')\n    meta=$(curl -fsSL --connect-timeout 5 --max-time 30 https://api.endorlabs.com/meta/version) || exit 0\n    latest=$(echo \"$meta\" | sed -n 's/.*\"ClientVersion\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p')\n    expected_sha=$(echo \"$meta\" | sed -n \"s/.*\\\"${ARCH_KEY}\\\"[[:space:]]*:[[:space:]]*\\\"\\([a-f0-9]*\\)\\\".*/\\1/p\")\n    [ -n \"$latest\" ] || exit 0\n    [ ${#expected_sha} -eq 64 ] || exit 0\n    case \"$expected_sha\" in *[!0-9a-f]*) exit 0 ;; esac\n    if [ -n \"$current\" ] && [ \"$current\" = \"$latest\" ]; then\n      rm -f \"$PART\" \"$SHAF\"\n      : > \"$STAMP\"\n      exit 0\n    fi\n    if [ ! -f \"$SHAF\" ] || [ \"$(cat \"$SHAF\" 2>/dev/null)\" != \"$expected_sha\" ]; then\n      rm -f \"$PART\"\n      printf '%s\\n' \"$expected_sha\" > \"$SHAF\" || exit 0\n    fi\n    if [ ! -f \"$PART\" ] || [ \"$(sha256 \"$PART\")\" != \"$expected_sha\" ]; then\n      total=$(curl -fsSLI --connect-timeout 5 --max-time 30 \"$URL\" 2>/dev/null \\\n        | tr -d '\\r' | sed -n 's/^[Cc]ontent-[Ll]ength: *//p' | tail -1)\n      case \"$total\" in ''|*[!0-9]*) total= ;; esac\n      size=$(wc -c < \"$PART\" 2>/dev/null | tr -d ' ')\n      case \"$size\" in ''|*[!0-9]*) size=0 ;; esac\n      if [ -z \"$total\" ] || [ \"$size\" -ge \"$total\" ]; then rm -f \"$PART\"; fi\n      n=0; ok=\n      while [ \"$n\" -lt 3 ]; do\n        n=$((n + 1))\n        size=$(wc -c < \"$PART\" 2>/dev/null | tr -d ' ')\n        case \"$size\" in ''|*[!0-9]*) size=0 ;; esac\n        rng=\n        [ -n \"$total\" ] && [ \"$size\" -gt 0 ] && rng=\"-r $size-$((total - 1))\"\n        if curl -fsSL --connect-timeout 10 --speed-limit 10240 --speed-time 60 \\\n             $rng \"$URL\" >> \"$PART\"; then ok=1; break; fi\n        sleep 5\n      done\n      [ -n \"$ok\" ] || exit 0\n      [ \"$(sha256 \"$PART\")\" = \"$expected_sha\" ] || { rm -f \"$PART\" \"$SHAF\"; exit 0; }\n    fi\n    chmod +x \"$PART\" || exit 0\n    mv \"$PART\" \"$BIN\" || exit 0\n    rm -f \"$SHAF\"\n    : > \"$STAMP\"\n  ) >/dev/null 2>&1 </dev/null &\nfi\n[ -x \"$BIN\" ] || exit 0\nENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit copilot",
+        "timeoutSec": 30,
+        "timeout": 30
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit copilot",
+        "timeoutSec": 30,
+        "timeout": 30
+      }
+    ],
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit copilot",
+        "timeoutSec": 30,
+        "timeout": 30
+      }
+    ],
+    "PostToolUse": [
+      {
+        "type": "command",
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit copilot",
+        "timeoutSec": 30,
+        "timeout": 30
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "type": "command",
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit copilot",
+        "timeoutSec": 30,
+        "timeout": 30
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit copilot",
+        "timeoutSec": 30,
+        "timeout": 30
+      }
+    ],
+    "SessionEnd": [
+      {
+        "type": "command",
+        "command": "ENDOR_AI_AUDIT_CACHE_ENABLED='true' \"$HOME/.endorctl/endorctl\" --api 'https://api.endorlabs.com' --namespace 'spiderman' --api-key 'PEPE' --api-secret 'PAPA' ai-audit copilot",
+        "timeoutSec": 30,
+        "timeout": 30
+      }
+    ]
+  }
+}

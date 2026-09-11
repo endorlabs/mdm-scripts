@@ -12,4 +12,4 @@ Generates self-contained MDM scripts which configure developer machines to route
 
 ### [`agent-governance/`](agent-governance/README.md)
 
-Generates MDM-deployable Endor Labs audit hooks for every AI coding agent on your fleet.
+Generates MDM-deployable Endor Labs audit hooks for every AI coding agent on your fleet — Claude Code, Cursor, Codex, and GitHub Copilot.
