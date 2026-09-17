@@ -18,6 +18,7 @@ powershell/
 │   ├── python.ps1           ← orchestration: pip / uv config file writes
 │   ├── go.ps1               ← orchestration: go env file write
 │   ├── maven.ps1            ← orchestration: .m2\settings.xml write (XML-aware)
+│   ├── nuget.ps1            ← orchestration: %APPDATA%\NuGet\NuGet.Config write (section-aware XML)
 │   ├── vscode.ps1           ← VS Code product.json patch + scheduled remediation
 │   └── remove.ps1           ← orchestration: sentinel block + registry env var removal
 └── out/                     ← generated scripts (gitignore this)
@@ -26,6 +27,7 @@ powershell/
         ├── endor-python.ps1
         ├── endor-go.ps1
         ├── endor-maven.ps1
+        ├── endor-nuget.ps1
         ├── endor-vscode.ps1
         ├── endor-all.ps1
         └── endor-remove.ps1
@@ -37,7 +39,10 @@ powershell/
 ├── pipconf.txt              ← %APPDATA%\pip\pip.ini content
 ├── uvtoml.txt               ← %APPDATA%\uv\uv.toml content
 ├── goenv.txt                ← go env file content  (path resolved via `go env GOENV`)
-└── mavensettings.txt        ← %USERPROFILE%\.m2\settings.xml fragment  (Maven mirror + server)
+├── mavensettings.txt        ← %USERPROFILE%\.m2\settings.xml fragment  (Maven mirror + server)
+├── nugetconfig_sources.txt        ← NuGet.Config <packageSources> items  (clear + Endor source)
+├── nugetconfig_credentials.txt    ← NuGet.Config <packageSourceCredentials> item
+└── nugetconfig_sourcemapping.txt  ← NuGet.Config <packageSourceMapping> items  (only when the section exists)
 ```
 
 ---
@@ -98,6 +103,7 @@ Each script in `out/<namespace>/` is **fully self-contained** — no external fi
 | `endor-python.ps1` | Team uses Python (pip, uv, poetry) only |
 | `endor-go.ps1` | Team uses Go only |
 | `endor-maven.ps1` | Team uses Java / Maven only |
+| `endor-nuget.ps1` | Team uses .NET / NuGet only |
 | `endor-vscode.ps1` | Team uses Microsoft VS Code Stable extensions |
 | `endor-all.ps1` | Team uses multiple ecosystems — single-script deploy |
 
@@ -199,6 +205,24 @@ Key behaviour:
 
 ---
 
+### `endor-nuget.ps1`
+
+Writes registry env vars and Endor-managed blocks to:
+
+| File | Covers | Credentials |
+|---|---|---|
+| `%APPDATA%\NuGet\NuGet.Config` | dotnet CLI, NuGet CLI, Visual Studio, Rider — every tool that reads the user-level NuGet config | `%ENDOR_ATTR_USER%` / `%ENDOR_API_SECRET%` env var refs |
+
+The block content and behaviour are identical to the macOS version (see [`bash/README.md`](../bash/README.md#endor-nugetsh)): `<clear />` supersedes every other source, the block is merged *into* the existing section, a pre-existing user `<clear />` is disabled reversibly, `<packageSourceMapping>` gets a `*` → `endor-firewall` block only when the section already exists, and a non-nuget.org source outside the block warns and exits 1.
+
+Windows-specific notes:
+- **Credentials come from `HKCU:\Environment`**, which every user process inherits — Visual Studio and Rider launched from the Start menu included. The macOS gap for IDEs launched outside a shell does not exist here.
+- **`ClearTextPassword` is still used**, not NuGet's encrypted `Password`. Encryption is DPAPI-bound to the user who wrote it; a script running as SYSTEM would produce a value the developer cannot decrypt. The `%VAR%` reference keeps the secret out of the file anyway.
+- **Removal** strips only the Endor blocks, restores a disabled user `<clear />`, keeps every section and never deletes the file. If `<packageSources>` ends up with no item, the dotnet default `nuget.org` entry is put back; nuget.org is never added next to a surviving private feed.
+- **Limits**: a repo-level `nuget.config` overrides the user file for that repo (commit the firewall as the only source there too — snippet in the bash README); `dotnet nuget add source` appends after our block, so a developer-added source is live until the next MDM run.
+
+---
+
 ### `endor-vscode.ps1`
 
 Patches Microsoft VS Code Stable's installation-level `product.json`. It sets
@@ -245,6 +269,9 @@ To change what gets written to a config file on target machines, edit the releva
 | `../shared/blocks/uvtoml.txt` | `%APPDATA%\uv\uv.toml` |
 | `../shared/blocks/goenv.txt` | `%APPDATA%\go\env` |
 | `../shared/blocks/mavensettings.txt` | `%USERPROFILE%\.m2\settings.xml` |
+| `../shared/blocks/nugetconfig_sources.txt` | `%APPDATA%\NuGet\NuGet.Config` → `<packageSources>` |
+| `../shared/blocks/nugetconfig_credentials.txt` | `%APPDATA%\NuGet\NuGet.Config` → `<packageSourceCredentials>` |
+| `../shared/blocks/nugetconfig_sourcemapping.txt` | `%APPDATA%\NuGet\NuGet.Config` → `<packageSourceMapping>` (only when the section exists) |
 
 To change orchestration logic (which files get written, in what order), edit the relevant `templates/*.ps1` file directly.
 
@@ -255,7 +282,7 @@ Both support the same placeholder syntax as the macOS version:
 | `{{PLACEHOLDER}}` | Generation time by `generate.ps1` | Values baked into the config file (e.g. registry host) |
 | `${ENDOR_VAR}` | Runtime by the tool reading the config file | Credential values — resolved from registry env vars |
 
-Available placeholders: `{{API_KEY_ID}}`, `{{API_SECRET}}`, `{{NPM_REGISTRY_URL}}`, `{{NPM_REGISTRY_HOST}}`, `{{NPM_AUTH_B64}}`, `{{PYPI_URL}}`, `{{PIP_INDEX_URL}}`, `{{TRUSTED_HOST}}`, `{{GO_PROXY_URL}}`, `{{MAVEN_REGISTRY_URL}}`, `{{VSCODE_SERVICE_URL}}`, `{{NAMESPACE}}`, `{{FQDN}}`
+Available placeholders: `{{API_KEY_ID}}`, `{{API_SECRET}}`, `{{NPM_REGISTRY_URL}}`, `{{NPM_REGISTRY_HOST}}`, `{{NPM_AUTH_B64}}`, `{{PYPI_URL}}`, `{{PIP_INDEX_URL}}`, `{{TRUSTED_HOST}}`, `{{GO_PROXY_URL}}`, `{{MAVEN_REGISTRY_URL}}`, `{{NUGET_SOURCE_URL}}`, `{{VSCODE_SERVICE_URL}}`, `{{NAMESPACE}}`, `{{FQDN}}`, and `{{ATTR_USER}}` (filled at install time by the templates that support it)
 
 ---
 
@@ -301,7 +328,7 @@ Useful for validating what the script will do before deploying to devices.
 
 Deploy `endor-remove.ps1` to strip all Endor configuration from a machine. It:
 
-- Removes the sentinel block from `.npmrc`, `.yarnrc.yml`, `pip.ini`, `uv.toml`, the go env file, and `.m2\settings.xml`
+- Removes the sentinel block from `.npmrc`, `.yarnrc.yml`, `pip.ini`, `uv.toml`, the go env file, `.m2\settings.xml`, and `NuGet.Config`
 - Deletes all `ENDOR_*` and `POETRY_HTTP_BASIC_ENDOR_FIREWALL_*` keys from `HKCU:\Environment`
 - Stops and removes the VS Code scheduled task, then restores the stable defaults for the two managed gallery properties
 - Deletes config files that are empty after block removal
@@ -321,6 +348,7 @@ Deploy `endor-remove.ps1` to strip all Endor configuration from a machine. It:
 | `pip.ini` | Contains credentials in the `index-url`. File is ACL-restricted to owner. Credentials may appear in pip debug logs (`pip install -v`). pip cannot use env var references. |
 | `.npmrc`, `.yarnrc.yml`, `uv.toml` | Contain `${VAR}` references only — no credentials baked in. |
 | `.m2\settings.xml` | Contains `${env.*}` references only — no credentials baked in. ACL-restricted to owner. |
+| `NuGet.Config` | Contains `%ENDOR_*%` references only — no credentials baked in. ACL-restricted to owner. |
 | VS Code `product.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users because VS Code must consume it. |
 | `%ProgramData%\Endor Labs\vscode-firewall` | ACL-restricted to SYSTEM and Administrators; contains the remediation worker. |
 | API secret in MDM | Generated scripts contain the API key and secret in plaintext (used to write registry env vars). Restrict access to the Intune policy and the generated `out/` directory. |

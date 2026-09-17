@@ -19,6 +19,9 @@
 #   Java / Maven:
 #     %USERPROFILE%\.m2\settings.xml
 #
+#   .NET / NuGet:
+#     %APPDATA%\NuGet\NuGet.Config  (sections kept; nuget.org restored if no source is left)
+#
 #   VS Code:
 #     Restores default gallery properties and removes update remediation
 #
@@ -137,6 +140,12 @@ Write-Host ''
 Write-Host '[endor-remove] -- Maven --------------------------------------------------'
 
 Remove-XmlBlock -FilePath (Join-Path $UserHome '.m2\settings.xml') -DryRun:$DryRun
+Write-Host ''
+
+# -- NuGet config file --
+Write-Host '[endor-remove] -- NuGet / .NET -------------------------------------------'
+
+Remove-NuGetBlocks -FilePath (Join-Path $AppData 'NuGet\NuGet.Config') -DryRun:$DryRun
 Write-Host ''
 
 # -- VS Code extension firewall --
