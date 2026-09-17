@@ -27,6 +27,7 @@
 #   endor-python.sh   — Python:     pip · uv · poetry
 #   endor-go.sh       — Go:         go modules (GOPROXY → ~/.config/go/env)
 #   endor-maven.sh    — Maven:      Maven (settings.xml → ~/.m2/settings.xml)
+#   endor-nuget.sh    — .NET:       NuGet / dotnet (NuGet.Config → ~/.nuget/NuGet/NuGet.Config)
 #   endor-vscode.sh   — VS Code:    extension gallery firewall + update watcher
 #   endor-all.sh      — All of the above (single-script MDM deploy)
 #   endor-remove.sh   — Offboarding: strips Endor config from all files
@@ -67,6 +68,7 @@ NPM_REGISTRY_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/npm/"
 NPM_REGISTRY_HOST="${FQDN_HOST}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/npm/"
 PYPI_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/pypi/simple/"
 MAVEN_REGISTRY_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/maven/"
+NUGET_SOURCE_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/nuget/v3/index.json"
 API_SECRET_B64=$(printf '%s' "${ENDOR_API_SECRET}" | base64 | tr -d '\n')
 VSCODE_TOKEN=$(printf '%s:%s' "${ENDOR_API_KEY_ID}" "${ENDOR_API_SECRET}" \
   | base64 | tr -d '\n=' | tr '+/' '-_')
@@ -90,6 +92,7 @@ substitute() {
     -e "s|{{PYPI_URL}}|${PYPI_URL}|g" \
     -e "s|{{TRUSTED_HOST}}|${TRUSTED_HOST}|g" \
     -e "s|{{MAVEN_REGISTRY_URL}}|${MAVEN_REGISTRY_URL}|g" \
+    -e "s|{{NUGET_SOURCE_URL}}|${NUGET_SOURCE_URL}|g" \
     -e "s|{{VSCODE_SERVICE_URL}}|${VSCODE_SERVICE_URL}|g"
 }
 
@@ -126,6 +129,9 @@ emit_all_blocks() {
   emit_block_assignment "UV_BLOCK"            "$SHARED_BLOCKS_DIR/uvtoml.txt"
   emit_block_assignment "GO_BLOCK"            "$SHARED_BLOCKS_DIR/goenv.txt"
   emit_block_assignment "MAVEN_BLOCK"         "$SHARED_BLOCKS_DIR/mavensettings.txt"
+  emit_block_assignment "NUGET_SOURCES_BLOCK" "$SHARED_BLOCKS_DIR/nugetconfig_sources.txt"
+  emit_block_assignment "NUGET_CREDENTIALS_BLOCK" "$SHARED_BLOCKS_DIR/nugetconfig_credentials.txt"
+  emit_block_assignment "NUGET_SOURCEMAPPING_BLOCK" "$SHARED_BLOCKS_DIR/nugetconfig_sourcemapping.txt"
   echo "# ─────────────────────────────────────────────────────────────────────────────"
   echo ""
 }
@@ -303,6 +309,11 @@ build_script \
   "$OUT_DIR/endor-maven.sh" \
   "Configures Maven (~/.m2/settings.xml) for Endor Package Firewall."
 
+build_script \
+  "$TMPL_DIR/nuget.sh" \
+  "$OUT_DIR/endor-nuget.sh" \
+  "Configures NuGet / .NET (~/.nuget/NuGet/NuGet.Config) for Endor Package Firewall."
+
 build_system_script \
   "$TMPL_DIR/vscode.sh" \
   "$OUT_DIR/endor-vscode.sh" \
@@ -314,7 +325,7 @@ build_remove_script "$OUT_DIR/endor-remove.sh"
 # ─── Generate combined all.sh ─────────────────────────────────────────────────
 {
   script_header "$OUT_DIR/endor-all.sh" \
-    "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry · go · maven · vscode"
+    "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry · go · maven · nuget · vscode"
   credentials_block
   echo ""
   emit_all_blocks
@@ -344,6 +355,11 @@ build_remove_script "$OUT_DIR/endor-remove.sh"
   substitute < "$TMPL_DIR/maven.sh"
   echo ""
   echo "# ════════════════════════════════════════════════════════════════════════════"
+  echo "# NuGet / .NET"
+  echo "# ════════════════════════════════════════════════════════════════════════════"
+  substitute < "$TMPL_DIR/nuget.sh"
+  echo ""
+  echo "# ════════════════════════════════════════════════════════════════════════════"
   echo "# VS Code extensions"
   echo "# ════════════════════════════════════════════════════════════════════════════"
   substitute < "$TMPL_DIR/vscode.sh"
@@ -363,6 +379,7 @@ printf "   %-24s  %s\n" "endor-js.sh"     "npm · pnpm · yarn classic · yarn 2
 printf "   %-24s  %s\n" "endor-python.sh" "pip · uv · poetry"
 printf "   %-24s  %s\n" "endor-go.sh"     "go modules (GOPROXY)"
 printf "   %-24s  %s\n" "endor-maven.sh"  "maven (~/.m2/settings.xml)"
+printf "   %-24s  %s\n" "endor-nuget.sh"  "nuget / dotnet (~/.nuget/NuGet/NuGet.Config)"
 printf "   %-24s  %s\n" "endor-vscode.sh" "VS Code extension gallery + update remediation"
 printf "   %-24s  %s\n" "endor-all.sh"    "all of the above (single-script deploy)"
 printf "   %-24s  %s\n" "endor-remove.sh" "offboarding — strips all Endor config"
