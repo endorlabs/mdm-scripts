@@ -19,6 +19,10 @@
 #   Remove-XmlBlock       <path> ...             — strips Endor XML block from settings.xml
 #   Test-KeyConflict      <path> <pattern> <label> — warns when a key exists outside an Endor block
 #   Test-XmlKeyConflict   <path> <pattern> <label> — same, but for XML-comment-delimited blocks
+#   Invoke-UpsertNuGetBlock <path> <section> <content> ...
+#                                                — NuGet.Config writer; merges a block INTO a section
+#   Remove-NuGetBlocks    <path> ...             — strips NuGet.Config blocks, restores defaults
+#   Test-NuGetSourceConflict <path>              — warns on non-nuget.org sources outside the block
 
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║  SENTINEL CONTRACT — DO NOT CHANGE THESE STRINGS                    ║
@@ -30,9 +34,9 @@
 $ENDOR_BLOCK_START = '# ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ====='
 $ENDOR_BLOCK_END   = '# ===== END ENDOR PACKAGE FIREWALL ====='
 
-# XML sentinel markers — used for settings.xml (Maven), which cannot use '#' comments.
-# These MUST match the BEGIN/END lines in shared/blocks/mavensettings.txt exactly,
-# and the bash ENDOR_XML_BLOCK_* markers, or re-runs and removal cannot find the block.
+# XML sentinel markers — used for settings.xml (Maven) and NuGet.Config, which cannot use '#' comments.
+# These MUST match the BEGIN/END lines in shared/blocks/mavensettings.txt and nugetconfig_*.txt
+# exactly, and the bash ENDOR_XML_BLOCK_* markers, or re-runs and removal cannot find the block.
 $ENDOR_XML_BLOCK_START = '<!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->'
 $ENDOR_XML_BLOCK_END   = '<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->'
 
@@ -582,6 +586,191 @@ function Test-XmlKeyConflict {
     if ($found) {
         Write-Warning "[endor] WARNING: existing '$Label' found in $FilePath."
         Write-Warning "[endor]          Endor block will be inserted -- verify key precedence with your tool."
+        $script:EndorWarned = $true
+    }
+}
+
+# -- NuGet.Config helpers --
+# NuGet reads only the FIRST occurrence of a section (a second <packageSources>
+# is silently ignored) and honours only the FIRST <clear /> inside it. The Endor
+# block is therefore merged INTO the existing section as its last items, and a
+# user <clear /> above it is disabled reversibly so ours takes effect.
+
+# Invoke-UpsertNuGetBlock <filepath> <section> <content> <username> [-DryRun]
+#   - File absent / blank       -> create a <configuration> scaffold, then insert
+#   - Section absent            -> create it before </configuration>
+#   - Section self-closing      -> expand it, then insert
+#   - Block already present     -> replace only that block
+#   - User <clear /> in section -> rewritten as <!-- endor-bak <clear /> --> (restored on removal)
+#   - Malformed (no </configuration>) -> warn and leave untouched
+#   - -DryRun                   -> print intent, write nothing
+function Invoke-UpsertNuGetBlock {
+    param(
+        [string]$FilePath,
+        [string]$Section,
+        [string]$Content,
+        [string]$Username,
+        [switch]$DryRun
+    )
+
+    $Content   = $Content.Replace("`r", '')
+    $fragLines = @($Content -split "`n")
+    $openTag   = "<$Section>"
+    $closeTag  = "</$Section>"
+    $selfClose = "^\s*<$Section\s*/>\s*$"
+    $clearRx   = '^\s*<clear\s*/>\s*$'
+
+    $raw     = if (Test-Path $FilePath) { Get-Content $FilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue } else { '' }
+    $isBlank = -not ($raw -match '\S')
+    $lines   = if ($isBlank) {
+        @('<?xml version="1.0" encoding="utf-8"?>', '<configuration>', '</configuration>')
+    } else {
+        @(Get-Content $FilePath -Encoding UTF8)
+    }
+
+    $hasSection = $false; $hasBlock = $false; $userClear = $false; $inSec = $false; $inBlk = $false
+    foreach ($l in $lines) {
+        if ($l.Contains($openTag) -or ($l -match $selfClose))       { $hasSection = $true; $inSec = $true }
+        if ($inSec -and $l.Contains($ENDOR_XML_BLOCK_START))          { $hasBlock = $true; $inBlk = $true }
+        if ($inSec -and -not $inBlk -and $l -match $clearRx)          { $userClear = $true }
+        if ($inSec -and $l.Contains($ENDOR_XML_BLOCK_END))            { $inBlk = $false }
+        if ($l.Contains($closeTag) -or ($l -match $selfClose))      { $inSec = $false }
+    }
+
+    if ($DryRun) {
+        if     ($isBlank)    { Write-Host "[dry-run]   action : CREATE NuGet.Config with <$Section> Endor block" }
+        elseif ($hasBlock)   { Write-Host "[dry-run]   action : REPLACE Endor block in <$Section>" }
+        elseif ($hasSection) { Write-Host "[dry-run]   action : INSERT Endor block at end of existing <$Section>" }
+        else                 { Write-Host "[dry-run]   action : CREATE <$Section> with Endor block before </configuration>" }
+        if ($userClear) {
+            Write-Host "[dry-run]   note   : existing <clear /> in <$Section> disabled as <!-- endor-bak <clear /> --> (restored on removal)"
+        }
+        Write-Host "[dry-run]   file   : $FilePath"
+        $fragLines | ForEach-Object { Write-Host "[dry-run]     $_" }
+        Write-Host ''
+        return
+    }
+
+    $dir = Split-Path $FilePath -Parent
+    if ($dir -and -not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+
+    $out = [System.Collections.Generic.List[string]]::new()
+    $inSec = $false; $skip = $false; $done = $false
+    foreach ($line in $lines) {
+        if (-not $done -and $line -match $selfClose) {                       # <section /> -> expand
+            $ind = $line -replace '\S.*$', ''
+            $out.Add("$ind$openTag"); foreach ($f in $fragLines) { $out.Add($f) }; $out.Add("$ind$closeTag")
+            $done = $true; continue
+        }
+        if (-not $done -and -not $inSec -and $line.Contains($openTag)) { $inSec = $true; $out.Add($line); continue }
+        if ($inSec) {
+            if ($skip) { if ($line.Contains($ENDOR_XML_BLOCK_END)) { $skip = $false }; continue }
+            if ($line.Contains($ENDOR_XML_BLOCK_START)) { $skip = $true; continue }
+            if ($line.Contains($closeTag)) {
+                foreach ($f in $fragLines) { $out.Add($f) }
+                $out.Add($line); $inSec = $false; $done = $true; continue
+            }
+            if ($line -match $clearRx) { $out.Add(($line -replace '\S.*$', '') + '<!-- endor-bak <clear /> -->'); continue }
+            $out.Add($line); continue
+        }
+        if (-not $done -and $line.Contains('</configuration>')) {            # section absent -> create it
+            $out.Add("  $openTag"); foreach ($f in $fragLines) { $out.Add($f) }; $out.Add("  $closeTag")
+            $done = $true
+        }
+        $out.Add($line)
+    }
+
+    if (-not $done) {
+        Write-Warning "[endor] WARNING: could not place <$Section> block in $FilePath (no </configuration>?) -- left untouched."
+        $script:EndorWarned = $true
+        return
+    }
+    if ($userClear) {
+        Write-Host "[endor] NOTE: existing <clear /> in <$Section> of $FilePath disabled as <!-- endor-bak <clear /> --> (restored on removal)"
+    }
+    Write-EndorFile -FilePath $FilePath -Lines $out
+    Set-FileRestrictedAcl -FilePath $FilePath -Username $Username
+}
+
+# Remove-NuGetBlocks <filepath> [-DryRun]
+# Strips the Endor blocks only: sections stay, the file is never deleted, and a
+# disabled user <clear /> is restored. If <packageSources> is left with no item
+# the dotnet default nuget.org is put back (an empty section means "No sources
+# found"); the user's own sources are never touched and nuget.org is not added
+# next to them.
+function Remove-NuGetBlocks {
+    param([string]$FilePath, [switch]$DryRun)
+
+    if (-not (Test-Path $FilePath)) {
+        Write-Host "[endor-remove] skip (not found)    : $FilePath"
+        return
+    }
+    $raw = Get-Content $FilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    if (-not ($raw -match [regex]::Escape($ENDOR_XML_BLOCK_START))) {
+        Write-Host "[endor-remove] skip (no Endor block): $FilePath"
+        return
+    }
+
+    $kept    = [System.Collections.Generic.List[string]]::new()
+    $inBlock = $false
+    foreach ($line in @(Get-Content $FilePath -Encoding UTF8)) {
+        if ($line.Contains($ENDOR_XML_BLOCK_START)) { $inBlock = $true;  continue }
+        if ($line.Contains($ENDOR_XML_BLOCK_END))   { $inBlock = $false; continue }
+        if ($inBlock) { continue }
+        if ($line -match '^\s*<!-- endor-bak <clear /> -->\s*$') { $line = ($line -replace '\S.*$', '') + '<clear />' }
+        $kept.Add($line)
+    }
+
+    # Locate <packageSources> and count the <add> items left inside it.
+    $start = -1; $end = -1; $adds = 0
+    for ($i = 0; $i -lt $kept.Count; $i++) {
+        if     ($start -lt 0 -and $kept[$i] -match '^\s*<packageSources>\s*$')                 { $start = $i }
+        elseif ($start -ge 0 -and $end -lt 0 -and $kept[$i] -match '^\s*</packageSources>\s*$') { $end = $i }
+        elseif ($start -ge 0 -and $end -lt 0 -and $kept[$i] -match '<add\s')                    { $adds++ }
+    }
+    $restored = $false
+    if ($end -ge 0 -and $adds -eq 0) {
+        $ind = $kept[$start] -replace '\S.*$', ''
+        $kept.Insert($end, "$ind  <add key=`"nuget.org`" value=`"https://api.nuget.org/v3/index.json`" protocolVersion=`"3`" />")
+        $restored = $true
+    }
+
+    if ($DryRun) {
+        if ($restored) { Write-Host '[dry-run]   action : REMOVE Endor blocks -> <packageSources> would be empty -> RESTORE nuget.org default' }
+        else           { Write-Host '[dry-run]   action : REMOVE Endor blocks from NuGet.Config, preserve remaining content' }
+        Write-Host "[dry-run]   file   : $FilePath"
+        Write-Host ''
+        return
+    }
+
+    Write-EndorFile -FilePath $FilePath -Lines $kept
+    if ($restored) { Write-Host "[endor-remove] block removed       : $FilePath (nuget.org default restored)" }
+    else           { Write-Host "[endor-remove] block removed       : $FilePath" }
+}
+
+# Test-NuGetSourceConflict <filepath>
+# Warns when <packageSources> holds a source other than nuget.org outside the
+# Endor block -- the block's <clear /> supersedes it, so an admin must decide.
+function Test-NuGetSourceConflict {
+    param([string]$FilePath)
+
+    if (-not (Test-Path $FilePath)) { return }
+
+    $inBlock = $false; $inSec = $false; $found = $false
+    foreach ($line in @(Get-Content $FilePath -Encoding UTF8)) {
+        if ($line.Contains($ENDOR_XML_BLOCK_START)) { $inBlock = $true;  continue }
+        if ($line.Contains($ENDOR_XML_BLOCK_END))   { $inBlock = $false; continue }
+        if ($inBlock) { continue }
+        if ($line.Contains('<packageSources>'))  { $inSec = $true }
+        if ($line.Contains('</packageSources>')) { $inSec = $false }
+        if ($inSec -and $line -match '<add\s' -and $line -notmatch 'api\.nuget\.org') { $found = $true; break }
+    }
+
+    if ($found) {
+        Write-Warning "[endor] WARNING: non-nuget.org package source(s) in $FilePath outside the Endor block -- the block's"
+        Write-Warning '[endor]          <clear /> supersedes them; re-add needed private feeds in a repo-level nuget.config.'
         $script:EndorWarned = $true
     }
 }

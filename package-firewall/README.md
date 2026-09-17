@@ -25,7 +25,7 @@ See each directory's README for generation and deployment instructions.
 | Python | pip, uv, poetry |
 | Go | go modules (via GOPROXY) |
 | Java | Maven (via `~/.m2/settings.xml` mirror); Gradle when it reads `~/.m2` |
-| .NET | NuGet — dotnet CLI, NuGet CLI, Rider, VS Code (via user-level `NuGet.Config`). **bash only for now**; Windows support is pending |
+| .NET | NuGet — dotnet CLI, NuGet CLI, Visual Studio, Rider, VS Code (via user-level `NuGet.Config`) |
 | VS Code | Microsoft VS Code Stable extension gallery |
 
 ---
@@ -63,7 +63,7 @@ Running either generator produces these scripts in `out/<namespace>/`:
 | `endor-python.*` | Configure Python package managers only |
 | `endor-go.*` | Configure Go modules only |
 | `endor-maven.*` | Configure Maven only |
-| `endor-nuget.sh` | Configure NuGet / .NET only (bash only for now) |
+| `endor-nuget.*` | Configure NuGet / .NET only |
 | `endor-vscode.*` | Patch VS Code `product.json` and install update remediation |
 | `endor-all.*` | Configure all package managers (single-script deploy) |
 | `endor-remove.*` | Strip all Endor configuration from a machine |

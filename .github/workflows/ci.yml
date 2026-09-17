@@ -211,7 +211,7 @@ jobs:
           # separators differ across platforms.
           $files = @(Get-ChildItem -Path package-firewall/powershell -Recurse -Filter *.ps1 |
             Where-Object { $_.FullName -like '*ci-smoke*' })
-          if ($files.Count -lt 7) { Write-Error "expected at least 7 generated scripts, got $($files.Count)" }
+          if ($files.Count -lt 8) { Write-Error "expected at least 8 generated scripts, got $($files.Count)" }
           $vscodeScript = 'package-firewall/powershell/out/ci-smoke/endor-vscode.ps1'
           $expectedUrl = 'https://factory.endorlabs.com/v1/namespaces/ci-smoke/firewall/vscode/_ak/Y2ktc21va2Uta2V5LWlkOmNpLXNtb2tlLXNlY3JldA'
           if (-not (Test-Path $vscodeScript)) { Write-Error 'missing generated endor-vscode.ps1' }
