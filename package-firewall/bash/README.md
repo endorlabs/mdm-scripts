@@ -17,6 +17,7 @@ bash/
 │   ├── python.sh            ← orchestration: pip / uv config file writes
 │   ├── go.sh                ← orchestration: go env file write
 │   ├── maven.sh             ← orchestration: ~/.m2/settings.xml write (XML-aware)
+│   ├── nuget.sh             ← orchestration: ~/.nuget/NuGet/NuGet.Config write (section-aware XML)
 │   ├── vscode.sh            ← VS Code product.json patch + launchd/systemd remediation
 │   └── remove.sh            ← orchestration: sentinel block removal
 └── out/                     ← generated scripts (gitignore this)
@@ -25,6 +26,7 @@ bash/
         ├── endor-python.sh
         ├── endor-go.sh
         ├── endor-maven.sh
+        ├── endor-nuget.sh
         ├── endor-vscode.sh
         ├── endor-all.sh
         └── endor-remove.sh
@@ -37,7 +39,10 @@ bash/
 ├── pipconf.txt              ← pip.conf content
 ├── uvtoml.txt               ← ~/.config/uv/uv.toml content
 ├── goenv.txt                ← go env file content  (path resolved via `go env GOENV`)
-└── mavensettings.txt        ← ~/.m2/settings.xml fragment  (Maven mirror + server)
+├── mavensettings.txt        ← ~/.m2/settings.xml fragment  (Maven mirror + server)
+├── nugetconfig_sources.txt        ← NuGet.Config <packageSources> items  (clear + Endor source)
+├── nugetconfig_credentials.txt    ← NuGet.Config <packageSourceCredentials> item
+└── nugetconfig_sourcemapping.txt  ← NuGet.Config <packageSourceMapping> items  (only when the section exists)
 ```
 
 ---
@@ -93,6 +98,7 @@ Each script in `out/<namespace>/` carries all Endor configuration it needs. The 
 | `endor-python.sh` | Team uses Python (pip, uv, poetry) only |
 | `endor-go.sh` | Team uses Go only |
 | `endor-maven.sh` | Team uses Java / Maven only |
+| `endor-nuget.sh` | Team uses .NET / NuGet only |
 | `endor-vscode.sh` | Team uses Microsoft VS Code Stable extensions |
 | `endor-all.sh` | Team uses multiple ecosystems — single-script deploy |
 
@@ -200,6 +206,56 @@ Key behaviour:
 
 ---
 
+### `endor-nuget.sh`
+
+Writes `~/.config/endor/env.sh` and Endor-managed blocks to:
+
+| File | Covers | Credentials |
+|---|---|---|
+| `~/.nuget/NuGet/NuGet.Config` | dotnet CLI, NuGet CLI, Rider, VS Code — every tool that reads the user-level NuGet config (the Mono-era `~/.config/NuGet/` path is not managed) | `%ENDOR_ATTR_USER%` / `%ENDOR_API_SECRET%` env var refs |
+
+What ends up in the file (merged into the existing sections, never duplicated):
+
+```xml
+<packageSources>
+  <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />   <!-- pre-existing, kept but superseded -->
+  <!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->
+  <clear />
+  <add key="endor-firewall" value="https://factory.endorlabs.com/v1/namespaces/my-team/firewall/nuget/v3/index.json" protocolVersion="3" />
+  <!-- ===== END ENDOR PACKAGE FIREWALL ===== -->
+</packageSources>
+<packageSourceCredentials>
+  <!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->
+  <endor-firewall>
+    <add key="Username" value="%ENDOR_ATTR_USER%" />
+    <add key="ClearTextPassword" value="%ENDOR_API_SECRET%" />
+  </endor-firewall>
+  <!-- ===== END ENDOR PACKAGE FIREWALL ===== -->
+</packageSourceCredentials>
+```
+
+Key behaviour:
+- **`<clear />` is the enforcement.** NuGet queries every enabled source with no priority, so the Endor source must be the only public one. The block's `<clear />` supersedes every source listed above it (nuget.org included); those lines stay in the file and become active again on removal.
+- **Merged into the existing section.** NuGet reads only the *first* `<packageSources>` section in a file and only the *first* `<clear />` inside it. The writer therefore inserts the block as the section's last items (creating the section or the file when absent) and rewrites a pre-existing user `<clear />` as `<!-- endor-bak <clear /> -->` so ours takes effect — the same reversible trick the pip writer uses. Re-runs replace only the Endor block.
+- **Credentials** live in a `<packageSourceCredentials>` child named after the source key. `ClearTextPassword` is required off Windows (the encrypted form is DPAPI-only); `%VAR%` references are NuGet's syntax on every OS and resolve from `env.sh`, so no secret is written to the file. To bake literals instead, use `{{ATTR_USER}}` / `{{API_SECRET}}` in `nugetconfig_credentials.txt`.
+- **`<packageSourceMapping>`** gets a third block (`<clear />` + pattern `*` → `endor-firewall`) only when the user already has that section; otherwise NuGet lets every source serve every package and nothing is needed.
+- **Private feeds** (Artifactory, Azure Artifacts) are superseded by the `<clear />` too, so the script warns and exits 1 when it finds a non-nuget.org source outside the block; re-add such a feed in a repo-level `nuget.config`, or edit the block. Customers who already route through Artifactory should use the registry-side integration instead of this script.
+- **Removal** strips only the Endor blocks, restores a disabled user `<clear />`, keeps every section and never deletes the file. If `<packageSources>` ends up with no item, the dotnet default `nuget.org` entry is put back (an empty section means "No sources found"); nuget.org is never added next to a surviving private feed.
+- **Limits**: a repo-level `nuget.config` overrides the user file for that repo (see below; same as every ecosystem here); `dotnet nuget add source` appends after our block, so a developer-added source is live until the next MDM run; IDEs launched from the Dock do not inherit `env.sh`, so they get a 401 rather than a silent bypass.
+
+> **Repo-level `nuget.config`.** NuGet applies files found from the drive root down to the project folder *after* the user-level file. A repo that commits `<clear />` + nuget.org (Microsoft's recommended repo pattern) therefore bypasses the firewall for that repo, and a repo that merely adds a source keeps it alive next to the firewall. For full enforcement, commit the firewall as the only public source in each repo as well. No credentials go in the repo: the user-level block attaches them by source key, so the key must be exactly `endor-firewall`.
+> ```xml
+> <?xml version="1.0" encoding="utf-8"?>
+> <configuration>
+>   <packageSources>
+>     <clear />
+>     <add key="endor-firewall" value="https://factory.endorlabs.com/v1/namespaces/my-team/firewall/nuget/v3/index.json" protocolVersion="3" />
+>   </packageSources>
+> </configuration>
+> ```
+
+---
+
 ### `endor-vscode.sh`
 
 Patches Microsoft VS Code Stable's installation-level `product.json`:
@@ -255,6 +311,9 @@ To change what gets written to a config file on target machines, edit the releva
 | `../shared/blocks/uvtoml.txt` | `~/.config/uv/uv.toml` |
 | `../shared/blocks/goenv.txt` | `~/.config/go/env` |
 | `../shared/blocks/mavensettings.txt` | `~/.m2/settings.xml` |
+| `../shared/blocks/nugetconfig_sources.txt` | `~/.nuget/NuGet/NuGet.Config` → `<packageSources>` |
+| `../shared/blocks/nugetconfig_credentials.txt` | `~/.nuget/NuGet/NuGet.Config` → `<packageSourceCredentials>` |
+| `../shared/blocks/nugetconfig_sourcemapping.txt` | `~/.nuget/NuGet/NuGet.Config` → `<packageSourceMapping>` (only when the section exists) |
 
 To change orchestration logic (which files get written, in what order, with what warnings), edit the relevant `templates/*.sh` file directly.
 
@@ -265,7 +324,7 @@ Both support `{{PLACEHOLDER}}` substitution at generation time and `${ENDOR_VAR}
 | `{{PLACEHOLDER}}` | Generation time by `generate.sh` | Values baked into the config file (e.g. registry host in a key position) |
 | `${ENDOR_VAR}` | Runtime by the tool reading the config file | Credential values — kept out of config files, resolved from `env.sh` |
 
-Available placeholders: `{{API_KEY_ID}}`, `{{API_SECRET}}`, `{{NPM_REGISTRY_URL}}`, `{{NPM_REGISTRY_HOST}}`, `{{NPM_AUTH_B64}}`, `{{PYPI_URL}}`, `{{PIP_INDEX_URL}}`, `{{TRUSTED_HOST}}`, `{{GO_PROXY_URL}}`, `{{MAVEN_REGISTRY_URL}}`, `{{VSCODE_SERVICE_URL}}`, `{{NAMESPACE}}`, `{{FQDN}}`
+Available placeholders: `{{API_KEY_ID}}`, `{{API_SECRET}}`, `{{NPM_REGISTRY_URL}}`, `{{NPM_REGISTRY_HOST}}`, `{{NPM_AUTH_B64}}`, `{{PYPI_URL}}`, `{{PIP_INDEX_URL}}`, `{{TRUSTED_HOST}}`, `{{GO_PROXY_URL}}`, `{{MAVEN_REGISTRY_URL}}`, `{{NUGET_SOURCE_URL}}`, `{{VSCODE_SERVICE_URL}}`, `{{NAMESPACE}}`, `{{FQDN}}`, and `{{ATTR_USER}}` (filled at install time by the templates that support it)
 
 ---
 
@@ -335,6 +394,7 @@ remove_block() {
 | `pip.conf` | Contains credentials in the index-url. File is `chmod 600`. Credentials may appear in pip debug logs (`pip install -v`). pip cannot use env var references. |
 | `.npmrc`, `.yarnrc.yml`, `uv.toml` | Contain `${VAR}` references only — no credentials baked in. |
 | `~/.m2/settings.xml` | Contains `${env.*}` references only — no credentials baked in. File is `chmod 600`. |
+| `~/.nuget/NuGet/NuGet.Config` | Contains `%ENDOR_*%` references only — no credentials baked in (unless you opt into the `{{ATTR_USER}}` / `{{API_SECRET}}` fill). File is `chmod 600`. |
 | VS Code `product.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users because VS Code must consume it. |
 | VS Code worker state | Root-owned (`0700`) and contains the generated remediation worker. |
 | Shell profiles | Contain a single `source ~/.config/endor/env.sh` line. No credentials. |

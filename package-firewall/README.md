@@ -25,6 +25,7 @@ See each directory's README for generation and deployment instructions.
 | Python | pip, uv, poetry |
 | Go | go modules (via GOPROXY) |
 | Java | Maven (via `~/.m2/settings.xml` mirror); Gradle when it reads `~/.m2` |
+| .NET | NuGet — dotnet CLI, NuGet CLI, Rider, VS Code (via user-level `NuGet.Config`). **bash only for now**; Windows support is pending |
 | VS Code | Microsoft VS Code Stable extension gallery |
 
 ---
@@ -42,7 +43,10 @@ shared/blocks/
 ├── pipconf.txt        ← pip.conf / pip.ini content
 ├── uvtoml.txt         ← uv.toml content
 ├── goenv.txt          ← go env file content  (GOPROXY)
-└── mavensettings.txt  ← ~/.m2/settings.xml fragment  (Maven mirror + server)
+├── mavensettings.txt  ← ~/.m2/settings.xml fragment  (Maven mirror + server)
+├── nugetconfig_sources.txt        ← NuGet.Config <packageSources> items  (clear + Endor source)
+├── nugetconfig_credentials.txt    ← NuGet.Config <packageSourceCredentials> item
+└── nugetconfig_sourcemapping.txt  ← NuGet.Config <packageSourceMapping> items  (only when the section exists)
 ```
 
 Edit these files to customise what gets written to developer machines. The orchestration scripts (`templates/*.sh` / `templates/*.ps1`) control which files get written and in what order.
@@ -59,6 +63,7 @@ Running either generator produces these scripts in `out/<namespace>/`:
 | `endor-python.*` | Configure Python package managers only |
 | `endor-go.*` | Configure Go modules only |
 | `endor-maven.*` | Configure Maven only |
+| `endor-nuget.sh` | Configure NuGet / .NET only (bash only for now) |
 | `endor-vscode.*` | Patch VS Code `product.json` and install update remediation |
 | `endor-all.*` | Configure all package managers (single-script deploy) |
 | `endor-remove.*` | Strip all Endor configuration from a machine |

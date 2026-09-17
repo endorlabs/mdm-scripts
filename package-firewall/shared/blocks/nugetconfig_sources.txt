@@ -1,0 +1,4 @@
+    <!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->
+    <clear />
+    <add key="endor-firewall" value="{{NUGET_SOURCE_URL}}" protocolVersion="3" />
+    <!-- ===== END ENDOR PACKAGE FIREWALL ===== -->

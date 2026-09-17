@@ -188,8 +188,8 @@ jobs:
           bash package-firewall/bash/generate.sh
           shopt -s nullglob
           files=(package-firewall/bash/out/ci-smoke/*.sh)
-          if [ "${#files[@]}" -lt 7 ]; then
-            echo "expected at least 7 generated scripts, got ${#files[@]}"
+          if [ "${#files[@]}" -lt 8 ]; then
+            echo "expected at least 8 generated scripts, got ${#files[@]}"
             exit 1
           fi
           vscode_script=package-firewall/bash/out/ci-smoke/endor-vscode.sh
