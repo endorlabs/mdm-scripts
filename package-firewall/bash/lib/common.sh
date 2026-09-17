@@ -22,17 +22,10 @@
 #   warn_if_xml_key_conflict <file> <pattern> <label>
 #                                              — same, but for XML-comment-delimited blocks
 #                                                (e.g. Maven settings.xml)
-#   ensure_user_dir         <dir> <owner> <group>
-#                                              — mkdir -p that chowns the directories it creates
 #   upsert_nuget_block      <file> <section> <fragment> <owner> <group>
-#                                              — NuGet.Config writer; merges an Endor block INTO
-#                                                an existing <section> (NuGet ignores duplicate
-#                                                sections), creating file/section when absent
-#   remove_nuget_blocks     <file> <owner> <group>
-#                                              — strips Endor blocks from NuGet.Config; sections
-#                                                stay; restores nuget.org if no source is left
-#   warn_if_nuget_source_conflict <file>       — warns when non-nuget.org sources exist outside
-#                                                the Endor block (superseded by its <clear />)
+#                                              — NuGet.Config writer; merges a block INTO a section
+#   remove_nuget_blocks     <file> <owner> <group> — strips NuGet.Config blocks, restores defaults
+#   warn_if_nuget_source_conflict <file>       — warns on non-nuget.org sources outside the block
 
 # Sentinel markers — identical across all config files so re-runs and remove work reliably
 ENDOR_BLOCK_START="# ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ====="
@@ -529,52 +522,23 @@ warn_if_xml_key_conflict() {
   fi
 }
 
-
 # ── NuGet.Config helpers ──────────────────────────────────────────────────────
-# NuGet.Config is XML with a <configuration> root, but unlike Maven's settings.xml
-# it cannot take a second <packageSources> section: NuGet honours only the FIRST
-# occurrence of a section and silently ignores later duplicates. The Endor items
-# are therefore merged INTO the existing section (created when absent) as its
-# LAST items, so the <clear /> they carry supersedes every source defined before
-# it — including the nuget.org entry NuGet writes into a fresh user config.
-
-# ensure_user_dir <dir> <owner> <group>
-# mkdir -p that chowns every directory component it creates to <owner>, so a
-# root-run script never leaves a root-owned ~/.nuget behind (which would break
-# the user's own writes to ~/.nuget/packages).
-ensure_user_dir() {
-  local dir="$1" owner="$2" group="$3" d="$1" m
-  local missing=()
-  while [[ -n "$d" && "$d" != "/" && ! -d "$d" ]]; do
-    missing+=("$d")
-    d=$(dirname "$d")
-  done
-  [[ ${#missing[@]} -eq 0 ]] && return 0
-  mkdir -p "$dir"
-  for m in "${missing[@]}"; do
-    chown "$owner:$group" "$m"
-  done
-}
+# NuGet reads only the FIRST occurrence of a section (a second <packageSources>
+# is silently ignored) and honours only the FIRST <clear /> inside it. The Endor
+# block is therefore merged INTO the existing section as its last items, and a
+# user <clear /> above it is disabled reversibly so ours takes effect.
 
 # upsert_nuget_block <file> <section> <fragment> <owner> <group>
-#
-# Idempotent writer for one Endor block inside a NuGet.Config <section>
-# (e.g. packageSources, packageSourceCredentials). The fragment carries its own
-# XML-comment sentinels (from shared/blocks/nugetconfig_*.txt).
-#   - File absent / blank         → create a <configuration> scaffold, then insert
-#   - Section absent              → create <section> immediately before </configuration>
-#   - Section self-closing/inline → expand to open + close tags, then insert
-#   - Block already in section    → replace only that block (other sections untouched)
-#   - Pre-existing <clear /> in the section outside our block
-#                                 → disabled reversibly as <!-- endor-bak <clear /> -->:
-#                                   NuGet honours only the FIRST <clear /> in a section, so
-#                                   a user clear above ours would make ours a no-op and leave
-#                                   nuget.org active (verified). Restored by remove_nuget_blocks.
-#   - No </configuration> found   → warn and skip (NuGet ignores malformed files anyway)
-#   - DRY_RUN=1                   → print intent, write nothing
+#   - File absent / blank       → create a <configuration> scaffold, then insert
+#   - Section absent            → create it before </configuration>
+#   - Section self-closing      → expand it, then insert
+#   - Block already present     → replace only that block
+#   - User <clear /> in section → rewritten as <!-- endor-bak <clear /> --> (restored on removal)
+#   - Malformed (no </configuration>) → warn and leave untouched
+#   - DRY_RUN=1                 → print intent, write nothing
 upsert_nuget_block() {
   local file="$1" section="$2" fragment="$3" owner="$4" group="$5"
-  local tmp fragfile has_section=0 has_block=0 has_root=1 user_clear=0 is_blank=1 state
+  local tmp fragfile has_section=0 has_block=0 user_clear=0 is_blank=1 state
 
   if [[ -f "$file" ]] && grep -q '[^[:space:]]' "$file" 2>/dev/null; then
     is_blank=0
@@ -584,119 +548,75 @@ upsert_nuget_block() {
       insec && !inb && $0 ~ /^[[:space:]]*<clear[[:space:]]*\/>[[:space:]]*$/ { uc = 1 }
       insec && index($0, e)                                      { inb = 0 }
       index($0, "</" sec ">") || $0 ~ ("<" sec "[[:space:]]*/>") { insec = 0 }
-      index($0, "</configuration>")                              { root = 1 }
-      END { printf "%d %d %d %d", hs, hb, root, uc }' "$file")
-    read -r has_section has_block has_root user_clear <<< "$state"
+      END { printf "%d %d %d", hs, hb, uc }' "$file")
+    read -r has_section has_block user_clear <<< "$state"
   fi
 
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    if [[ "$is_blank" == "1" ]]; then
-      echo "[dry-run]   action : CREATE NuGet.Config with <${section}> Endor block"
-    elif [[ "$has_root" == "0" ]]; then
-      echo "[dry-run]   action : SKIP — no </configuration> in file (malformed; fix manually)"
-    elif [[ "$has_block" == "1" ]]; then
-      echo "[dry-run]   action : REPLACE Endor block in <${section}>"
-    elif [[ "$has_section" == "1" ]]; then
-      echo "[dry-run]   action : INSERT Endor block at end of existing <${section}>"
-    else
-      echo "[dry-run]   action : CREATE <${section}> with Endor block before </configuration>"
+    if   [[ "$is_blank" == "1" ]];    then echo "[dry-run]   action : CREATE NuGet.Config with <${section}> Endor block"
+    elif [[ "$has_block" == "1" ]];   then echo "[dry-run]   action : REPLACE Endor block in <${section}>"
+    elif [[ "$has_section" == "1" ]]; then echo "[dry-run]   action : INSERT Endor block at end of existing <${section}>"
+    else                                   echo "[dry-run]   action : CREATE <${section}> with Endor block before </configuration>"
     fi
     if [[ "$user_clear" == "1" ]]; then
-      echo "[dry-run]   note   : existing <clear /> in <${section}> will be disabled as <!-- endor-bak <clear /> -->"
-      echo "[dry-run]            (NuGet honours only the first <clear />; restored on removal)"
+      echo "[dry-run]   note   : existing <clear /> in <${section}> disabled as <!-- endor-bak <clear /> --> (restored on removal)"
     fi
-    echo "[dry-run]   file    : $file"
+    echo "[dry-run]   file   : $file"
     echo "$fragment" | sed 's/^/[dry-run]     /'
     echo ""
     return 0
   fi
 
-  if [[ "$is_blank" == "0" && "$has_root" == "0" ]]; then
-    echo "[endor] WARNING: ${file} has no </configuration> closing tag — NuGet would ignore it." >&2
-    echo "[endor]          Left untouched; repair the file and re-run." >&2
-    _ENDOR_WARNED=1
-    return 0
-  fi
-
-  ensure_user_dir "$(dirname "$file")" "$owner" "$group"
-
+  # Own both ~/.nuget and ~/.nuget/NuGet: a root-owned ~/.nuget would break the
+  # user's package cache. chown of a dir the user already owns is a no-op.
+  mkdir -p "$(dirname "$file")"
+  chown "$owner:$group" "$(dirname "$(dirname "$file")")" "$(dirname "$file")"
   if [[ "$is_blank" == "1" ]]; then
-    {
-      echo '<?xml version="1.0" encoding="utf-8"?>'
-      echo '<configuration>'
-      echo '</configuration>'
-    } > "$file"
+    printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<configuration>' '</configuration>' > "$file"
   fi
 
   # Fragment via temp file + getline: BSD awk rejects multi-line -v values.
-  fragfile=$(mktemp)
-  printf '%s\n' "$fragment" > "$fragfile"
+  fragfile=$(mktemp); printf '%s\n' "$fragment" > "$fragfile"
   tmp=$(mktemp)
   if ! awk -v sec="$section" -v s="$ENDOR_XML_BLOCK_START" -v e="$ENDOR_XML_BLOCK_END" -v fragfile="$fragfile" '
     function emit_frag() { while ((getline l < fragfile) > 0) print l; close(fragfile) }
     function indent_of(str) { match(str, /^[[:space:]]*/); return substr(str, 1, RLENGTH) }
-    BEGIN { insec = 0; skip = 0; done = 0 }
     {
       line = $0
-      # <section /> on its own line → expand and insert
-      if (!done && line ~ ("^[[:space:]]*<" sec "[[:space:]]*/>[[:space:]]*$")) {
-        ind = indent_of(line)
-        print ind "<" sec ">"; emit_frag(); print ind "</" sec ">"
-        done = 1; next
-      }
-      # <section>…</section> on one line → split, keep any inline content
-      if (!done && index(line, "<" sec ">") && index(line, "</" sec ">")) {
-        i = index(line, "<" sec ">"); j = index(line, "</" sec ">")
-        ind = indent_of(line)
-        mid = substr(line, i + length(sec) + 2, j - (i + length(sec) + 2))
-        print ind "<" sec ">"
-        if (mid ~ /[^[:space:]]/) print ind "  " mid
-        emit_frag(); print ind "</" sec ">"
-        done = 1; next
+      if (!done && line ~ ("^[[:space:]]*<" sec "[[:space:]]*/>[[:space:]]*$")) {   # <section /> → expand
+        ind = indent_of(line); print ind "<" sec ">"; emit_frag(); print ind "</" sec ">"; done = 1; next
       }
       if (!done && !insec && index(line, "<" sec ">")) { insec = 1; print; next }
       if (insec) {
         if (skip)           { if (index(line, e)) skip = 0; next }
         if (index(line, s)) { skip = 1; next }
         if (index(line, "</" sec ">")) { emit_frag(); print; insec = 0; done = 1; next }
-        # A user <clear /> above ours would make ours a no-op — disable it reversibly.
-        if (line ~ /^[[:space:]]*<clear[[:space:]]*\/>[[:space:]]*$/) {
-          print indent_of(line) "<!-- endor-bak <clear /> -->"; next
-        }
+        if (line ~ /^[[:space:]]*<clear[[:space:]]*\/>[[:space:]]*$/) { print indent_of(line) "<!-- endor-bak <clear /> -->"; next }
         print; next
       }
-      # section absent → create it just before the root closing tag
-      if (!done && index(line, "</configuration>")) {
-        print "  <" sec ">"; emit_frag(); print "  </" sec ">"
-        done = 1
-      }
+      if (!done && index(line, "</configuration>")) { print "  <" sec ">"; emit_frag(); print "  </" sec ">"; done = 1 }
       print
     }
     END { exit(done ? 0 : 1) }
   ' "$file" > "$tmp"; then
     rm -f "$tmp" "$fragfile"
-    echo "[endor] WARNING: could not place <${section}> block in ${file} — left untouched." >&2
+    echo "[endor] WARNING: could not place <${section}> block in ${file} (no </configuration>?) — left untouched." >&2
     _ENDOR_WARNED=1
     return 0
   fi
   if [[ "$user_clear" == "1" ]]; then
     echo "[endor] NOTE: existing <clear /> in <${section}> of ${file} disabled as <!-- endor-bak <clear /> --> (restored on removal)"
   fi
-  mv "$tmp" "$file"
-  rm -f "$fragfile"
-
+  mv "$tmp" "$file"; rm -f "$fragfile"
   chown "$owner:$group" "$file"; chmod 600 "$file"
 }
 
 # remove_nuget_blocks <file> <owner> <group>
-# Strips every Endor block from NuGet.Config and nothing else: sections stay in
-# place (even ones the install created) and the file is never deleted. A user
-# <clear /> that the install disabled as <!-- endor-bak <clear /> --> is put
-# back. If <packageSources> is left without a single item, the dotnet default
-# nuget.org item is put back — an empty section means "No sources found", NuGet
-# does not re-add nuget.org to an existing file, and every restore would fail.
-# Sources the user had before (e.g. a private feed) are untouched and nuget.org
-# is NOT added next to them.
+# Strips the Endor blocks only: sections stay, the file is never deleted, and a
+# disabled user <clear /> is restored. If <packageSources> is left with no item
+# the dotnet default nuget.org is put back (an empty section means "No sources
+# found"); the user's own sources are never touched and nuget.org is not added
+# next to them.
 remove_nuget_blocks() {
   local file="$1" owner="$2" group="$3" tmp restored=0
 
@@ -710,16 +630,14 @@ remove_nuget_blocks() {
     index($0, s) { skip = 1; next }
     index($0, e) { skip = 0; next }
     !skip {
-      # Restore a user <clear /> the install disabled.
       if ($0 ~ /^[[:space:]]*<!-- endor-bak <clear \/> -->[[:space:]]*$/) {
         match($0, /^[[:space:]]*/); $0 = substr($0, 1, RLENGTH) "<clear />"
       }
       lines[++n] = $0
     }
     END {
-      # Locate <packageSources> and count the <add> items left inside it.
       for (i = 1; i <= n; i++) {
-        if (!start && lines[i] ~ /^[[:space:]]*<packageSources>[[:space:]]*$/)          { start = i }
+        if (!start && lines[i] ~ /^[[:space:]]*<packageSources>[[:space:]]*$/)            { start = i }
         else if (start && !end && lines[i] ~ /^[[:space:]]*<\/packageSources>[[:space:]]*$/) { end = i }
         else if (start && !end && lines[i] ~ /<add[[:space:]]/)                            { adds++ }
       }
@@ -732,40 +650,28 @@ remove_nuget_blocks() {
       }
     }
   ' "$file" > "$tmp"
-
-  if ! grep -q 'api\.nuget\.org' "$file" && grep -q 'api\.nuget\.org' "$tmp"; then
-    restored=1
-  fi
+  if ! grep -q 'api\.nuget\.org' "$file" && grep -q 'api\.nuget\.org' "$tmp"; then restored=1; fi
 
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    if [[ "$restored" == "1" ]]; then
-      echo "[dry-run]   action : REMOVE Endor blocks → <packageSources> would be empty → RESTORE nuget.org default"
-    else
-      echo "[dry-run]   action : REMOVE Endor blocks from NuGet.Config, preserve remaining content"
+    if [[ "$restored" == "1" ]]; then echo "[dry-run]   action : REMOVE Endor blocks → <packageSources> would be empty → RESTORE nuget.org default"
+    else                              echo "[dry-run]   action : REMOVE Endor blocks from NuGet.Config, preserve remaining content"
     fi
-    echo "[dry-run]   file   : $file"
-    echo ""
-    rm -f "$tmp"
-    return 0
+    echo "[dry-run]   file   : $file"; echo ""
+    rm -f "$tmp"; return 0
   fi
 
   mv "$tmp" "$file"; chown "$owner:$group" "$file"; chmod 600 "$file"
-  if [[ "$restored" == "1" ]]; then
-    echo "[endor-remove] block removed       : $file (nuget.org default restored)"
-  else
-    echo "[endor-remove] block removed       : $file"
+  if [[ "$restored" == "1" ]]; then echo "[endor-remove] block removed       : $file (nuget.org default restored)"
+  else                              echo "[endor-remove] block removed       : $file"
   fi
 }
 
 # warn_if_nuget_source_conflict <file>
 # Warns when <packageSources> holds a source other than nuget.org outside the
-# Endor block. The block's <clear /> supersedes those sources, so an admin must
-# decide whether to re-add them (repo-level nuget.config) or edit the block.
-# nuget.org itself is not reported — replacing it is the point of the firewall.
+# Endor block — the block's <clear /> supersedes it, so an admin must decide.
 warn_if_nuget_source_conflict() {
   local file="$1"
   [[ -f "$file" ]] || return 0
-
   if awk -v s="$ENDOR_XML_BLOCK_START" -v e="$ENDOR_XML_BLOCK_END" '
       index($0, s) { skip = 1; next }
       index($0, e) { skip = 0; next }
@@ -775,9 +681,8 @@ warn_if_nuget_source_conflict() {
       insec && /<add[[:space:]]/ && !/api\.nuget\.org/ { found = 1 }
       END { exit(found ? 0 : 1) }
     ' "$file" 2>/dev/null; then
-    echo "[endor] WARNING: package source(s) other than nuget.org found in ${file} outside the Endor block." >&2
-    echo "[endor]          The Endor block's <clear /> supersedes them. Re-add any private feed that must" >&2
-    echo "[endor]          stay reachable in a repo-level nuget.config, or edit the block." >&2
+    echo "[endor] WARNING: non-nuget.org package source(s) in ${file} outside the Endor block — the block's" >&2
+    echo "[endor]          <clear /> supersedes them; re-add needed private feeds in a repo-level nuget.config." >&2
     _ENDOR_WARNED=1
   fi
 }

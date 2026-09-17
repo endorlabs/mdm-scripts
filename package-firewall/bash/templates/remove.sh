@@ -18,9 +18,6 @@
 #   Go:
 #     ~/.config/go/env
 #
-#   Java / Maven:
-#     ~/.m2/settings.xml
-#
 #   .NET / NuGet:
 #     ~/.nuget/NuGet/NuGet.Config  (sections kept; nuget.org restored if no source is left)
 #
@@ -157,18 +154,7 @@ remove_xml_block "$USER_HOME/.m2/settings.xml" "$CONSOLE_USER" "$USER_GROUP"
 echo ""
 echo "[endor-remove] ── NuGet / .NET ────────────────────────────────────────────────"
 
-# Resolve NuGet.Config path the same way the install script does.
-_NUGET_CONFIG="$USER_HOME/.nuget/NuGet/NuGet.Config"
-for _name in NuGet.Config nuget.config NuGet.config; do
-  if [[ -f "$USER_HOME/.nuget/NuGet/$_name" ]]; then
-    _NUGET_CONFIG="$USER_HOME/.nuget/NuGet/$_name"
-    break
-  fi
-done
-unset _name
-
-remove_nuget_blocks "$_NUGET_CONFIG" "$CONSOLE_USER" "$USER_GROUP"
-unset _NUGET_CONFIG
+remove_nuget_blocks "$USER_HOME/.nuget/NuGet/NuGet.Config" "$CONSOLE_USER" "$USER_GROUP"
 
 # ── VS Code extension firewall ────────────────────────────────────────────────
 echo ""
