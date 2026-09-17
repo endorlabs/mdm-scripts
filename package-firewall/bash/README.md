@@ -241,7 +241,18 @@ Key behaviour:
 - **`<packageSourceMapping>`** gets a third block (`<clear />` + pattern `*` → `endor-firewall`) only when the user already has that section; otherwise NuGet lets every source serve every package and nothing is needed.
 - **Private feeds** (Artifactory, Azure Artifacts) are superseded by the `<clear />` too, so the script warns and exits 1 when it finds a non-nuget.org source outside the block; re-add such a feed in a repo-level `nuget.config`, or edit the block. Customers who already route through Artifactory should use the registry-side integration instead of this script.
 - **Removal** strips only the Endor blocks, restores a disabled user `<clear />`, keeps every section and never deletes the file. If `<packageSources>` ends up with no item, the dotnet default `nuget.org` entry is put back (an empty section means "No sources found"); nuget.org is never added next to a surviving private feed.
-- **Limits**: a repo-level `nuget.config` with its own `<clear />` overrides the user file (same as every ecosystem here); `dotnet nuget add source` appends after our block, so a developer-added source is live until the next MDM run; IDEs launched from the Dock do not inherit `env.sh`, so they get a 401 rather than a silent bypass.
+- **Limits**: a repo-level `nuget.config` overrides the user file for that repo (see below; same as every ecosystem here); `dotnet nuget add source` appends after our block, so a developer-added source is live until the next MDM run; IDEs launched from the Dock do not inherit `env.sh`, so they get a 401 rather than a silent bypass.
+
+> **Repo-level `nuget.config`.** NuGet applies files found from the drive root down to the project folder *after* the user-level file. A repo that commits `<clear />` + nuget.org (Microsoft's recommended repo pattern) therefore bypasses the firewall for that repo, and a repo that merely adds a source keeps it alive next to the firewall. For full enforcement, commit the firewall as the only public source in each repo as well. No credentials go in the repo: the user-level block attaches them by source key, so the key must be exactly `endor-firewall`.
+> ```xml
+> <?xml version="1.0" encoding="utf-8"?>
+> <configuration>
+>   <packageSources>
+>     <clear />
+>     <add key="endor-firewall" value="https://factory.endorlabs.com/v1/namespaces/my-team/firewall/nuget/v3/index.json" protocolVersion="3" />
+>   </packageSources>
+> </configuration>
+> ```
 
 ---
 
