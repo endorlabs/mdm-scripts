@@ -38,7 +38,23 @@ plutil -lint com.anthropic.claudecode.mobileconfig
 
 ## 3. Verify
 
-Open Claude Code on a target machine and start a session. The `SessionStart` hook installs/updates `endorctl` and begins reporting to your Endor namespace — confirm the activity in the Endor audit log.
+Two things need checking: that the profile arrived on the endpoint intact, and that it's reporting.
+
+Check the payload first. The `plutil -lint` in step 1 only proves the file is a well-formed plist — it says nothing about the shell inside it. A payload whose line endings were rewritten in transit (for example by pasting the profile's contents into an MDM web form instead of uploading it as a file) still lints clean while the `SessionStart` hook is unparseable. So extract the *delivered* hook on a target machine and parse it:
+
+```sh
+PROFILE="/Library/Managed Preferences/com.anthropic.claudecode.plist"
+plutil -extract hooks.SessionStart.0.hooks.0.command raw "$PROFILE" > /tmp/hook.sh
+
+sh -n /tmp/hook.sh && echo "hook parses OK"   # non-zero exit = corrupt payload
+tr -dc '\r' < /tmp/hook.sh | wc -c           # must print 0
+```
+
+`sh -n` parses the hook without running it, so a non-zero exit means the delivered bootstrap is broken whatever the cause. A non-zero CR count names the most common one: CRLF line endings. Those break the script at its first `esac` — `esac\r` isn't the keyword, so the `case` never closes and the bootstrap exits 2 on every session. The fix is to re-upload the `.mobileconfig` as a file, with LF endings.
+
+Then check reporting. Open Claude Code on a target machine and start a session. The `SessionStart` hook installs/updates `endorctl` and begins reporting to your Endor namespace — confirm the activity in the Endor audit log.
+
+Do both, in that order: **the audit log alone will not catch a broken bootstrap.** The per-event audit hooks are single-line commands and keep firing even when the multi-line `SessionStart` bootstrap fails to parse, so governance goes on recording normally while `endorctl` silently stops updating itself.
 
 ## Updating
 

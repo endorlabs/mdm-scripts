@@ -45,6 +45,23 @@ Kandji Custom Scripts run as **root** and can run on a schedule, but Kandji has 
 
 After a run, confirm `/Library/Application Support/Cursor/hooks.json` (or `/etc/cursor/hooks.json` on Linux) exists, then open Cursor and start a session — the `sessionStart` hook installs/updates `endorctl` and begins reporting. Confirm the activity in the Endor audit log.
 
+Also confirm the runner itself parsed. You paste it into the MDM as text, and a paste that rewrites line endings leaves it unrunnable — a CRLF copy of `runner.sh` dies at `case "$os" in` with exit 2 before it fetches or renders anything. Your MDM records that as a failed script run, so check the run's exit status, not only the output file. To check a pasted body directly, parse it without executing it:
+
+```sh
+sh -n runner.sh && echo "runner parses OK"
+```
+
 ## Updating
 
 Nothing to do. Each scheduled run re-fetches the repo at `REF` and re-renders, swapping the file in only if it changed — so repo updates **and** credential/flag changes both take effect. To move to a new release, bump `REF`. How quickly an update lands depends on the MDM's schedule (minutes to an hour).
+
+One caveat to "nothing to do": it assumes the runner is still running. If a later edit or re-paste breaks it, the last-rendered config stays on disk and the agent goes on using it — auditing continues and nothing looks wrong — while credential rotations, `EXTRA` flag changes, and `REF` bumps quietly stop landing.
+
+`DEST`'s own timestamp won't tell you, because the runner swaps the file in only when the rendered output changed and deliberately leaves it untouched otherwise. The reliable tell is the repo cache, which is removed and re-fetched on every successful run:
+
+```sh
+ls -ld "/Library/Application Support/EndorAIGovernance/repo"   # macOS
+ls -ld /var/lib/endor-ai-governance/repo                       # Linux
+```
+
+Its mtime is the last time the runner got as far as a successful fetch. If that's older than the MDM's schedule, the runner is failing — check the script run status in the MDM.
