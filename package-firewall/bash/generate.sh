@@ -17,7 +17,9 @@
 #   ENDOR_NAMESPACE    Required. Your Endor namespace (e.g. my-team)
 #   ENDOR_API_KEY_ID   Required. API key ID (Basic Auth username)
 #   ENDOR_API_SECRET   Required. API secret  (Basic Auth password)
-#   ENDOR_FQDN         Optional. Base URL (default: https://factory.endorlabs.com)
+#   ENDOR_FQDN         Optional. Base URL — scheme + host, no path.
+#                      US (default): https://factory.endorlabs.com
+#                      EU:           https://factory.eu.endorlabs.com
 #
 # To customise config blocks, edit shared/blocks/*.txt directly.
 # To customise orchestration logic, edit templates/*.sh directly.
@@ -55,6 +57,26 @@ esac
 
 # ─── Resolve FQDN ─────────────────────────────────────────────────────────────
 FQDN="${ENDOR_FQDN:-https://factory.endorlabs.com}"
+
+# Trim trailing slashes so ${FQDN}/v1/... never doubles up — matches TrimEnd('/')
+# in generate.ps1.
+while [[ "$FQDN" == */ ]]; do FQDN="${FQDN%/}"; done
+
+# Reject anything that is not scheme + host[:port]. A scheme-less or path-bearing
+# value still generates scripts, but emits registry URLs that silently fail on the
+# developer machine. Ports are allowed — TRUSTED_HOST strips them below.
+case "$FQDN" in
+  http://*|https://*) FQDN_REST="${FQDN#*://}" ;;
+  *)                  FQDN_REST="" ;;
+esac
+case "$FQDN_REST" in
+  ""|*/*)
+    echo "ERROR: ENDOR_FQDN must be a base URL with a scheme and no path." >&2
+    echo "       US: https://factory.endorlabs.com   EU: https://factory.eu.endorlabs.com" >&2
+    echo "       got: ${ENDOR_FQDN}" >&2
+    exit 1 ;;
+esac
+unset FQDN_REST
 
 # ─── Compute derived values ────────────────────────────────────────────────────
 # Only machine-independent values are derived here. Attribution values

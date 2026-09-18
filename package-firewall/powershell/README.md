@@ -72,15 +72,22 @@ Get-Content .env | Where-Object { $_ -match '^\s*[^#\s]' } | ForEach-Object {
 ./generate.ps1
 ```
 
-`ENDOR_FQDN` is optional and defaults to `https://factory.endorlabs.com`:
+`ENDOR_FQDN` is optional and defaults to the US host. EU tenants must set it:
+
+| Tenant | Base URL |
+|---|---|
+| US (default) | `https://factory.endorlabs.com` |
+| EU | `https://factory.eu.endorlabs.com` |
 
 ```powershell
-$env:ENDOR_FQDN       = 'https://factory.staging.endorlabs.com'
+$env:ENDOR_FQDN       = 'https://factory.eu.endorlabs.com'
 $env:ENDOR_NAMESPACE  = 'my-team'
 $env:ENDOR_API_KEY_ID = 'your-key-id'
 $env:ENDOR_API_SECRET = 'your-key-secret'
 ./generate.ps1
 ```
+
+The value must be a scheme plus a host with no trailing path (`https://host`). `generate.ps1` exits non-zero on anything else rather than emitting registry URLs that fail on the developer machine.
 
 Re-running `generate.ps1` overwrites the same `out/<namespace>/` directory.
 

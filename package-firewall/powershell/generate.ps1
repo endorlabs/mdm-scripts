@@ -21,7 +21,9 @@
 #   ENDOR_NAMESPACE    Required. Your Endor namespace (e.g. my-team)
 #   ENDOR_API_KEY_ID   Required. API key ID (Basic Auth username)
 #   ENDOR_API_SECRET   Required. API secret  (Basic Auth password)
-#   ENDOR_FQDN         Optional. Base URL (default: https://factory.endorlabs.com)
+#   ENDOR_FQDN         Optional. Base URL - scheme + host, no path.
+#                      US (default): https://factory.endorlabs.com
+#                      EU:           https://factory.eu.endorlabs.com
 #
 # To customise config blocks, edit shared/blocks/*.txt directly.
 # To customise orchestration logic, edit templates/*.ps1 directly.
@@ -60,6 +62,16 @@ $ENDOR_NAMESPACE  = $env:ENDOR_NAMESPACE
 $ENDOR_API_KEY_ID = $env:ENDOR_API_KEY_ID
 $ENDOR_API_SECRET = $env:ENDOR_API_SECRET
 $FQDN = if ($env:ENDOR_FQDN) { $env:ENDOR_FQDN.TrimEnd('/') } else { 'https://factory.endorlabs.com' }
+
+# Reject anything that is not scheme + host[:port]. A scheme-less or path-bearing
+# value still generates scripts, but emits registry URLs that silently fail on the
+# developer machine. Ports are allowed - TRUSTED_HOST strips them below.
+if ($FQDN -notmatch '^https?://[^/]+$') {
+    Write-Error ("ENDOR_FQDN must be a base URL with a scheme and no path. " +
+                 "US: https://factory.endorlabs.com   EU: https://factory.eu.endorlabs.com   " +
+                 "got: $env:ENDOR_FQDN")
+    exit 1
+}
 
 # Reject credential characters that would corrupt generated scripts/URLs.
 if ("${ENDOR_API_KEY_ID}${ENDOR_API_SECRET}" -match '[^A-Za-z0-9+/=_.-]') {
