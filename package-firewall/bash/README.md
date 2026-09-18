@@ -67,15 +67,22 @@ set -a; source .env; set +a
 ./generate.sh
 ```
 
-`ENDOR_FQDN` is optional and defaults to `https://factory.endorlabs.com`. Override it to target a different environment:
+`ENDOR_FQDN` is optional and defaults to the US host. EU tenants must set it:
+
+| Tenant | Base URL |
+|---|---|
+| US (default) | `https://factory.endorlabs.com` |
+| EU | `https://factory.eu.endorlabs.com` |
 
 ```bash
-ENDOR_FQDN=https://factory.staging.endorlabs.com \
+ENDOR_FQDN=https://factory.eu.endorlabs.com \
 ENDOR_NAMESPACE=my-team \
 ENDOR_API_KEY_ID=your-key-id \
 ENDOR_API_SECRET=your-key-secret \
 ./generate.sh
 ```
+
+The value must be a scheme plus a host with no trailing path (`https://host`). `generate.sh` exits non-zero on anything else rather than emitting registry URLs that fail on the developer machine.
 
 Re-running `generate.sh` overwrites the same `out/<namespace>/` directory — no accumulation of stale directories.
 
