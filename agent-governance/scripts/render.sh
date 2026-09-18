@@ -40,6 +40,15 @@
 # one audit). The version check is throttled to once a day - override with
 # --env ENDORCTL_UPDATE_TTL_MINUTES=<minutes>. Windows still fetches inline.
 #
+# macOS/Linux session hooks render as a single physical line. Some MDMs rewrite the
+# line endings of a multi-line hook command in transit - a Kandji Custom Profile
+# upload was observed turning every LF in the SessionStart command into CRLF, and
+# `esac\r` is not the `esac` keyword, so the bootstrap stopped parsing and the hook
+# exited 2 on every session. A command with no line breaks has nothing to rewrite.
+# --multi-line renders the readable unfolded form instead; download_endorctl.sh
+# stays the multi-line source of truth either way, and the fold is checked with
+# `sh -n` before it is emitted. Windows hooks are already immune (base64-encoded).
+#
 # Example:
 #   render.sh --agent cursor --api-key K --api-secret S --namespace NS -o hooks.json
 #   render.sh --agent claude --target-os windows --api-key K --api-secret S --namespace NS
@@ -84,7 +93,7 @@ ${1}"
 }
 
 # --- defaults / arg parsing ---------------------------------------------------
-agent=""; output=""; skip_update=""; target_os="macos"
+agent=""; output=""; skip_update=""; target_os="macos"; multi_line=""
 api_url="${ENDOR_API:-$DEFAULT_API_URL}"
 api_key="${ENDOR_API_CREDENTIALS_KEY:-}"
 api_secret="${ENDOR_API_CREDENTIALS_SECRET:-}"
@@ -101,11 +110,12 @@ while [ $# -gt 0 ]; do
     -o|--output)            output="$2"; shift 2 ;;
     --env)                  add_env "$2"; shift 2 ;;
     --skip-endorctl-update) skip_update=1; shift ;;
+    --multi-line)           multi_line=1; shift ;;
     --api-url)              api_url="$2"; shift 2 ;;
     --api-key)              api_key="$2"; shift 2 ;;
     --api-secret)           api_secret="$2"; shift 2 ;;
     --namespace)            namespace="$2"; shift 2 ;;
-    -h|--help)              sed -n '2,46p' "$0"; exit 0 ;;
+    -h|--help)              sed -n '2,55p' "$0"; exit 0 ;;
     *)                      die "unknown argument: $1" ;;
   esac
 done
@@ -125,6 +135,27 @@ esac
 # otherwise bloat every generated profile. Only whole-line comments are removed;
 # read scripts/download_endorctl.sh for why it does what it does.
 strip_src() { sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$1"; }
+
+# Fold a POSIX shell script onto one physical line (see the --multi-line note in
+# the header for why). Lines are joined with "; ", except where the previous line
+# already continues the command - a trailing backslash, pipe, &&, (, {, or a
+# `then`/`do`/`else`/`in` keyword - and there an extra ";" would be a syntax error.
+# Leading indentation goes with it; the result is checked with `sh -n` before use.
+one_line() {
+  printf '%s\n' "$1" | awk '
+    { sub(/^[ \t]+/, ""); sub(/[ \t]+$/, "") }
+    $0 == "" { next }
+    {
+      line = $0
+      if (n++ > 0) out = out (cont ? " " : "; ")
+      if (line ~ /\\$/) { sub(/\\$/, "", line); sub(/[ \t]+$/, "", line); cont = 1 }
+      else cont = (line ~ /([|&(!{]|;;?)$/ || line ~ /(^|[ \t;&|])(then|do|else|in)$/)
+      out = out line
+    }
+    END { printf "%s", out }
+  '
+}
+
 if [ "$target_os" = windows ]; then
   command -v iconv >/dev/null || die "iconv is required for --target-os windows"
   command -v base64 >/dev/null || die "base64 is required for --target-os windows"
@@ -247,6 +278,19 @@ case "$agent:$target_os" in
     cmd_audit=$(psenc "$ps_inline_event")
     cmd_session=$(psenc "$(printf '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd()\n%s\n%s\n$in | %s' \
       "$boot" "$ps_env_sets" "$ps_inline")") ;;
+esac
+
+# Fold the composed POSIX session hook onto one physical line, so no MDM in the
+# delivery path has a line ending to rewrite (header, --multi-line). The per-event
+# audit hooks are single-line already. `sh -n` proves the fold before it ships -
+# the same check docs/deploy-claude-profile.md runs against the delivered payload.
+case "$target_os" in
+  macos|linux)
+    if [ -z "$multi_line" ]; then
+      cmd_session=$(one_line "$cmd_session")
+      printf '%s\n' "$cmd_session" | sh -n 2>/dev/null \
+        || die "the folded session hook does not parse - please report this (--multi-line renders the unfolded form)"
+    fi ;;
 esac
 
 # --- build (printf is pure structure; commands are JSON-escaped via js) --------

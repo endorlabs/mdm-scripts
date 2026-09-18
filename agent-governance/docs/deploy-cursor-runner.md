@@ -45,11 +45,13 @@ Kandji Custom Scripts run as **root** and can run on a schedule, but Kandji has 
 
 After a run, confirm `/Library/Application Support/Cursor/hooks.json` (or `/etc/cursor/hooks.json` on Linux) exists, then open Cursor and start a session — the `sessionStart` hook installs/updates `endorctl` and begins reporting. Confirm the activity in the Endor audit log.
 
-Also confirm the runner itself parsed. You paste it into the MDM as text, and a paste that rewrites line endings leaves it unrunnable — a CRLF copy of `runner.sh` dies at `case "$os" in` with exit 2 before it fetches or renders anything. Your MDM records that as a failed script run, so check the run's exit status, not only the output file. To check a pasted body directly, parse it without executing it:
+Also confirm the runner itself parsed. `runner.sh` is the one multi-line script in this path — it is pasted into the MDM as text, and a paste that rewrites line endings leaves it unrunnable. A CRLF copy dies at `case "$os" in` with exit 2 before it fetches or renders anything. Your MDM records that as a failed script run, so check the run's exit status, not only the output file. To check a pasted body directly, parse it without executing it:
 
 ```sh
 sh -n runner.sh && echo "runner parses OK"
 ```
+
+What the runner *writes* is not exposed the same way: the hook commands it renders are single-line (`render.sh` folds the POSIX session hook, and JSON escapes the rest), so only the runner's own body is at risk here. The [Claude profile runbook](deploy-claude-profile.md#3-verify) has the background on why that fold exists.
 
 ## Updating
 

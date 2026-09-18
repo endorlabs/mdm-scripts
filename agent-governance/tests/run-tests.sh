@@ -118,6 +118,68 @@ for s in sh bash dash; do
   done
 done
 
+sec "single-line session hooks (the MDM line-ending workaround)"
+# render.sh folds the composed POSIX session hook onto one physical line, so an MDM
+# that rewrites line endings in transit has nothing in the command to rewrite. The
+# multi-line form died at its first `esac` - `esac\r` is not the keyword - on a
+# Kandji Custom Profile upload. Prove the fold is one line, that it behaves exactly
+# like the multi-line source it is folded from, and that it survives that rewrite.
+if command -v python3 >/dev/null 2>&1; then
+  R() { "$AG/scripts/render.sh" --api-key K --api-secret S --namespace NS "$@" 2>/dev/null; }
+  getcmd() { python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["hooks"]["SessionStart"][0]["hooks"][0]["command"])'; }
+  folded=$(R --agent claude -o - | getcmd)
+  unfolded=$(R --agent claude --multi-line -o - | getcmd)
+  chk "the default session hook has no line breaks" "$(printf '%s' "$folded" | wc -l | tr -d ' ')" "0"
+  chk "--multi-line still renders the readable form" \
+    "$([ "$(printf '%s' "$unfolded" | wc -l | tr -d ' ')" -gt 1 ] && echo yes || echo no)" "yes"
+
+  # Strip the audit call off the tail to get the folded bootstrap on its own, then
+  # put the whole offline scenario set through it via $BOOT.
+  FOLDED="$WORK/boot-folded.sh"
+  printf '%s\n' "${folded%; \"\$HOME/.endorctl/endorctl\"*}" > "$FOLDED"
+  chk "the folded bootstrap survived the strip" "$([ -s "$FOLDED" ] && echo yes || echo no)" "yes"
+  chk "the audit tail was stripped off it" "$(grep -c 'ai-audit' "$FOLDED" | tr -d ' ')" "0"
+  for s in sh bash dash; do
+    command -v "$s" >/dev/null || continue
+    if $s -n "$FOLDED" 2>/dev/null; then ok "$s -n folded bootstrap"; else bad "$s -n folded bootstrap"; fi
+  done
+
+  BOOT_MULTI="$BOOT"; BOOT="$FOLDED"
+  newhome; out=$(run)
+  chk "folded: audit did not run this session" "$(echo "$out" | grep -c AUDIT-RAN)" "0"
+  settle
+  chk "folded: background job installed it" "$(ver)" "endorctl version v1.7.1085"
+  chk "folded: lock released" "$(have "$H/.endorctl/.update.lock")" "no"
+  out=$(run); settle
+  chk "folded: a fresh stamp audits with no network at all" \
+    "$(echo "$out" | grep -c AUDIT-RAN)$(wc -l < "$H/curl.log" | tr -d ' ')" "10"
+  BOOT="$BOOT_MULTI"
+
+  # The delivered payload, against the rewrite that broke the customer's profile.
+  if command -v plutil >/dev/null 2>&1; then
+    mangle() {  # $1 = render.sh flags ("" or --multi-line), $2 = tag
+      R --agent claude $1 -o - | "$AG/scripts/render-plist.sh" \
+        --identifier com.endorlabs.test.claudecode --organization "Endor Labs" \
+        -o "$WORK/$2.mobileconfig" 2>/dev/null
+      sed -e 's/$/\r/' "$WORK/$2.mobileconfig" > "$WORK/$2.crlf.mobileconfig"
+      plutil -extract PayloadContent.0.hooks.SessionStart.0.hooks.0.command raw \
+        "$WORK/$2.crlf.mobileconfig" > "$WORK/$2.hook.sh" 2>/dev/null
+    }
+    mangle "" folded
+    chk "a CRLF-rewritten profile delivers a CR-free command" \
+      "$(tr -dc '\r' < "$WORK/folded.hook.sh" | wc -c | tr -d ' ')" "0"
+    chk "and the delivered command still parses" \
+      "$(sh -n "$WORK/folded.hook.sh" 2>/dev/null && echo yes || echo no)" "yes"
+    mangle --multi-line unfolded
+    chk "the same rewrite is what breaks the multi-line form" \
+      "$(sh -n "$WORK/unfolded.hook.sh" 2>/dev/null && echo yes || echo no)" "no"
+  else
+    echo "  (skipped the CRLF profile checks, needs plutil)"
+  fi
+else
+  echo "  (skipped, needs python3 to read the rendered command)"
+fi
+
 sec "cold machine: no binary, so the session is not audited and the install is backgrounded"
 newhome
 out=$(run)

@@ -23,6 +23,7 @@ scripts/render.sh --agent claude \
 - UUIDs are generated fresh unless you pass `--profile-uuid` / `--content-uuid`.
 - `--payload-type` defaults to `com.anthropic.claudecode`, so it's omitted here.
 - For an initial monitor-only rollout, add `--env ENDOR_AI_AUDIT_NO_BLOCKING=true` to the `render.sh` step.
+- The `SessionStart` hook comes out as one long line on purpose — see [step 3](#3-verify). `--multi-line` renders the readable unfolded form if you want to read the profile by eye, but don't deploy that one.
 
 Confirm it's a valid property list before uploading (there's a ready-made sample at `examples/claude/com.anthropic.claudecode.mobileconfig`):
 
@@ -40,7 +41,7 @@ plutil -lint com.anthropic.claudecode.mobileconfig
 
 Two things need checking: that the profile arrived on the endpoint intact, and that it's reporting.
 
-Check the payload first. The `plutil -lint` in step 1 only proves the file is a well-formed plist — it says nothing about the shell inside it. A payload whose line endings were rewritten in transit (for example by pasting the profile's contents into an MDM web form instead of uploading it as a file) still lints clean while the `SessionStart` hook is unparseable. So extract the *delivered* hook on a target machine and parse it:
+Check the payload first. The `plutil -lint` in step 1 only proves the file is a well-formed plist — it says nothing about the shell inside it. A payload whose line endings were rewritten in transit still lints clean while the `SessionStart` hook is unparseable. So extract the *delivered* hook on a target machine and parse it:
 
 ```sh
 PROFILE="/Library/Managed Preferences/com.anthropic.claudecode.plist"
@@ -50,11 +51,17 @@ sh -n /tmp/hook.sh && echo "hook parses OK"   # non-zero exit = corrupt payload
 tr -dc '\r' < /tmp/hook.sh | wc -c           # must print 0
 ```
 
-`sh -n` parses the hook without running it, so a non-zero exit means the delivered bootstrap is broken whatever the cause. A non-zero CR count names the most common one: CRLF line endings. Those break the script at its first `esac` — `esac\r` isn't the keyword, so the `case` never closes and the bootstrap exits 2 on every session. The fix is to re-upload the `.mobileconfig` as a file, with LF endings.
+`sh -n` parses the hook without running it, so a non-zero exit means the delivered bootstrap is broken whatever the cause. A non-zero CR count names the most likely one: CRLF line endings.
+
+> **Why the `SessionStart` command is one long line.** It used to be 83 readable lines, and a Kandji Custom Profile upload was observed rewriting every one of those line breaks to CRLF. `esac\r` isn't the `esac` keyword, so the `case` never closed, the bootstrap failed to parse, and the hook exited 2 on every session — `endorctl` quietly stopped updating itself while the per-event hooks carried on reporting.
+>
+> **Uploading the `.mobileconfig` as a file rather than pasting it does not avoid this.** The affected profile was uploaded as a file, exactly as step 2 describes. So `render.sh` now folds the whole POSIX session hook onto a single physical line, which leaves nothing inside the command for an MDM to rewrite: the command no longer contains a line ending, and a CR appended to the profile's own lines lands after `</string>`, outside the value. `scripts/download_endorctl.sh` stays the readable, multi-line source of truth — only the rendered payload is folded, and `tests/run-tests.sh` puts the folded form through the same behavioral suite.
+>
+> Keep running the check above anyway. It catches any corruption of the delivered payload, not just this one.
 
 Then check reporting. Open Claude Code on a target machine and start a session. The `SessionStart` hook installs/updates `endorctl` and begins reporting to your Endor namespace — confirm the activity in the Endor audit log.
 
-Do both, in that order: **the audit log alone will not catch a broken bootstrap.** The per-event audit hooks are single-line commands and keep firing even when the multi-line `SessionStart` bootstrap fails to parse, so governance goes on recording normally while `endorctl` silently stops updating itself.
+Do both, in that order: **the audit log alone will not catch a broken bootstrap.** The per-event audit hooks are short, self-contained commands and keep firing even when the `SessionStart` bootstrap fails to parse, so governance goes on recording normally while `endorctl` silently stops updating itself.
 
 ## Updating
 
