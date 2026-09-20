@@ -87,7 +87,11 @@ $env:ENDOR_API_SECRET = 'your-key-secret'
 ./generate.ps1
 ```
 
-The value must be a scheme plus a host with no trailing path (`https://host`). `generate.ps1` exits non-zero on anything else rather than emitting registry URLs that fail on the developer machine.
+The value must be lowercase `https://` followed by a host of letters, digits, dots and hyphens, optionally followed by `:` and a numeric port — for example `https://factory.eu.endorlabs.com` or `https://factory.eu.endorlabs.com:8443`. Trailing `/` characters are stripped first, so `https://factory.eu.endorlabs.com/` and `https://factory.eu.endorlabs.com///` are both accepted.
+
+Everything else makes `generate.ps1` exit non-zero rather than emit registry URLs that fail on the developer machine or inject the value into the generated scripts: a path, query string, fragment, userinfo, whitespace, a shell metacharacter or any other character outside that set; a missing or uppercased scheme; and `http://`. Plaintext `http://` is rejected rather than downgraded — both hosted base URLs are https, and the generated configuration sends Basic Auth credentials on every request.
+
+`ENDOR_NAMESPACE` is checked separately, against a different rule: letters, digits, dots, hyphens and underscores — underscore is allowed here, and there is no scheme or port. Empty, `.` and `..` are rejected outright, because they would collapse the `out/<namespace>/` path. Names that merely look unusual, such as `.hidden` or `-rf`, are accepted: they stay inside `out/` and contain no character that could alter the generated scripts. Windows adds one wrinkle: Win32 path canonicalization strips trailing dots from the final path segment, so a name ending in a dot loses it — `my-team.` writes to `out/my-team`, and an all-dots name such as `...` collapses entirely, writing the scripts straight into `out/` rather than `out/.../`.
 
 Re-running `generate.ps1` overwrites the same `out/<namespace>/` directory.
 
