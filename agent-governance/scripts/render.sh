@@ -209,11 +209,24 @@ ps_event_prelude=$(printf '$ProgressPreference = "SilentlyContinue"\n$OutputEnco
 ps_audit_event=$(printf '%s\n$in | %s' "$ps_event_prelude" "$ps_audit")
 ps_inline_event=$(printf '%s\n%s\n$in | %s' "$ps_event_prelude" "$ps_env_sets" "$ps_inline")
 
+# Armor a multi-line POSIX hook against CRLF conversion. The Claude profile is
+# the one artifact that stores the session command as literal newlines (JSON
+# and TOML carry \n escapes; the MCX and Windows forms are base64), and a
+# profile that picks up CRLF on its way to the MDM - a Windows checkout, an
+# editor, a paste into a web form - breaks the shell at the first `esac`, so the
+# bootstrap never runs. plutil -lint and xmllint both accept such a file, and
+# macOS keeps the CR when it installs the managed preference. The shell parses
+# a -c script statement by statement, so wrapping the body in single quotes,
+# stripping CRs with tr, and eval'ing the result runs it intact either way.
+# `sq` writes each ' in the body as '\''. The trailing comment is load-bearing:
+# it absorbs the CR that lands after the closing quote. Costs ~8 ms per hook.
+crguard() { printf "eval \"\$(printf '%%s' %s | tr -d '\\\\r')\" #" "$(sq "$1")"; }
+
 # --- compose per-hook command strings (session = bootstrap + audit) -----------
 case "$agent:$target_os" in
   claude:macos|claude:linux)
     cmd_audit="$posix_audit"
-    cmd_session=$(printf '%s\n%s' "$boot" "$posix_audit") ;;
+    cmd_session=$(crguard "$(printf '%s\n%s' "$boot" "$posix_audit")") ;;
   cursor:macos|cursor:linux)
     cmd_audit="$posix_inline"
     # Capture stdin first (Cursor closes its pipe quickly) into a per-user file,

@@ -312,7 +312,7 @@ done
 sec "every embedded hook command is valid shell after JSON/TOML escaping"
 if command -v python3 >/dev/null 2>&1; then
   python3 - "$AG" "$WORK" <<'PY'
-import json, subprocess, sys, os, plistlib, base64
+import json, subprocess, sys, os, plistlib, base64, shutil
 ag, work = sys.argv[1], sys.argv[2]
 try: import tomllib
 except ImportError: tomllib = None
@@ -333,11 +333,17 @@ if tomllib:
     d = tomllib.load(open(f'{ag}/examples/codex/requirements.toml', 'rb'))
     for ev, arr in d['hooks'].items():
         for e in arr: check(f'codex:{ev}', e['hooks'][0]['command'])
+# The Claude profile is read with plutil, not plistlib: plistlib's expat parser
+# folds CRLF to LF as the XML spec says, so it would pass a CRLF-corrupted
+# profile that macOS (which keeps the CR) then fails to run.
 pf = f'{ag}/examples/claude/com.anthropic.claudecode.mobileconfig'
-if os.path.exists(pf):
-    pl = plistlib.load(open(pf, 'rb'))
-    for ev, a in pl['PayloadContent'][0]['hooks'].items():
-        check(f'profile:{ev}', a[0]['hooks'][0]['command'])
+if os.path.exists(pf) and shutil.which('plutil'):
+    events = plistlib.load(open(pf, 'rb'))['PayloadContent'][0]['hooks'].keys()
+    for ev in events:
+        kp = f'PayloadContent.0.hooks.{ev}.0.hooks.0.command'
+        r = subprocess.run(['plutil', '-extract', kp, 'raw', '-o', '-', pf], capture_output=True, text=True)
+        if r.returncode: bad.append((f'profile:{ev}', r.stderr.strip())); continue
+        check(f'profile:{ev}', r.stdout)
 pf = f'{ag}/examples/codex/com.openai.codex.mobileconfig'
 if os.path.exists(pf) and tomllib:
     pl = plistlib.load(open(pf, 'rb'))
@@ -354,6 +360,48 @@ PY
   if [ $? -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
 else
   echo "  (skipped, needs python3 to parse JSON/TOML/plist)"
+fi
+
+# --- CRLF armor -------------------------------------------------------------
+# The Claude profile stores the session command as literal newlines, and a
+# profile that picks up CRLF between render and MDM (a Windows checkout, an
+# editor, a paste into a web form) reaches the endpoint with the CRs intact:
+# plutil -lint accepts it and macOS keeps the CR in the managed preference.
+# render.sh wraps the command so it strips CRs from itself before the body is
+# parsed. Prove the wrapper does that, on the bytes plutil hands back, under
+# every shell an agent might use to run a hook.
+sec "a CRLF-converted profile still runs its session hook"
+chk "no checked-in example carries a CR" \
+  "$(cat "$AG"/examples/*/* | tr -cd '\r' | wc -c | tr -d ' ')" "0"
+# The bare bootstrap is what the wrapper protects; without it, CRLF is fatal.
+chk "unarmored bootstrap fails to parse with CRLF (the defect the armor covers)" \
+  "$({ cat "$BOOT"; echo 'echo AUDIT-RAN'; } | sed 's/$/\r/' | /bin/sh -n 2>/dev/null && echo parses || echo fails)" "fails"
+if command -v plutil >/dev/null 2>&1; then
+  CRLF="$WORK/crlf.mobileconfig"
+  sed 's/$/\r/' "$GEN/claude/com.anthropic.claudecode.mobileconfig" > "$CRLF"
+  chk "fixture is CRLF on every line" \
+    "$(tr -cd '\r' < "$CRLF" | wc -c | tr -d ' ')" "$(wc -l < "$GEN/claude/com.anthropic.claudecode.mobileconfig" | tr -d ' ')"
+  chk "plutil -lint accepts it (which is why the docs check cannot catch this)" \
+    "$(plutil -lint "$CRLF" >/dev/null 2>&1 && echo ok || echo rejected)" "ok"
+  KP='PayloadContent.0.hooks.SessionStart.0.hooks.0.command'
+  plutil -extract "$KP" raw -o "$WORK/crlf.cmd" "$CRLF"
+  chk "plutil keeps the CRs inside the command (as macOS does on install)" \
+    "$([ "$(tr -cd '\r' < "$WORK/crlf.cmd" | wc -c)" -gt 0 ] && echo yes || echo no)" "yes"
+  # Warm HOME with a fake endorctl that reports the audit ran, plus a fresh
+  # stamp so the bootstrap takes its no-network path and hands off to the audit.
+  H=$(mktemp -d "$WORK/home.XXXXXX"); mkdir -p "$H/.endorctl"; : > "$H/.endorctl/.update-check"
+  printf '#!/bin/sh\nlast=; for a; do last=$a; done\nprintf "AUDIT-RAN %%s stdin=%%s\\n" "$last" "$(cat)"\n' > "$H/.endorctl/endorctl"
+  chmod +x "$H/.endorctl/endorctl"
+  for s in /bin/sh dash bash; do
+    command -v "$s" >/dev/null || { echo "  (no $s, skipped)"; continue; }
+    out=$(export HOME="$H" AGENT_HOOK_ENDOR_API=x AGENT_HOOK_ENDOR_NAMESPACE=x \
+                 AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY=x AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET=x
+          printf '{"event":"SessionStart"}' | "$s" -c "$(cat "$WORK/crlf.cmd")" 2>&1)
+    chk "$s -c runs the CRLF command through to the audit, stdin intact" \
+      "$out" 'AUDIT-RAN claudecode stdin={"event":"SessionStart"}'
+  done
+else
+  echo "  (profile cases skipped, need plutil)"
 fi
 
 # --- network ----------------------------------------------------------------
