@@ -4,6 +4,8 @@ Generates self-contained scripts for IT admins to push via MDM. Once deployed, s
 
 Scripts are **idempotent** and safe to re-push on MDM check-in cycles.
 
+Both generators target `https://factory.endorlabs.com` by default. EU tenants must set `ENDOR_FQDN=https://factory.eu.endorlabs.com` — see either platform README.
+
 ---
 
 ## Platforms

@@ -67,15 +67,26 @@ set -a; source .env; set +a
 ./generate.sh
 ```
 
-`ENDOR_FQDN` is optional and defaults to `https://factory.endorlabs.com`. Override it to target a different environment:
+`ENDOR_FQDN` is optional and defaults to the US host. EU tenants must set it:
+
+| Tenant | Base URL |
+|---|---|
+| US (default) | `https://factory.endorlabs.com` |
+| EU | `https://factory.eu.endorlabs.com` |
 
 ```bash
-ENDOR_FQDN=https://factory.staging.endorlabs.com \
+ENDOR_FQDN=https://factory.eu.endorlabs.com \
 ENDOR_NAMESPACE=my-team \
 ENDOR_API_KEY_ID=your-key-id \
 ENDOR_API_SECRET=your-key-secret \
 ./generate.sh
 ```
+
+The value must be lowercase `https://` followed by a host of letters, digits, dots and hyphens, optionally followed by `:` and a numeric port — for example `https://factory.eu.endorlabs.com` or `https://factory.eu.endorlabs.com:8443`. Trailing `/` characters are stripped first, so `https://factory.eu.endorlabs.com/` and `https://factory.eu.endorlabs.com///` are both accepted.
+
+Everything else makes `generate.sh` exit non-zero rather than emit registry URLs that fail on the developer machine or inject the value into the generated scripts: a path, query string, fragment, userinfo, whitespace, a shell metacharacter or any other character outside that set; a missing or uppercased scheme; and `http://`. Plaintext `http://` is rejected rather than downgraded — both hosted base URLs are https, and the generated configuration sends Basic Auth credentials on every request.
+
+`ENDOR_NAMESPACE` is checked separately, against a different rule: letters, digits, dots, hyphens and underscores — underscore is allowed here, and there is no scheme or port. Empty, `.` and `..` are rejected outright, because they would collapse the `out/<namespace>/` path. Names that merely look unusual, such as `.hidden`, `...` or `-rf`, are accepted: they stay inside `out/` and contain no character that could alter the generated scripts.
 
 Re-running `generate.sh` overwrites the same `out/<namespace>/` directory — no accumulation of stale directories.
 

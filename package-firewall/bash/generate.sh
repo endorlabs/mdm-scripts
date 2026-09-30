@@ -14,10 +14,16 @@
 #   set -a; source .env; set +a; ./generate.sh
 #
 # Environment variables:
-#   ENDOR_NAMESPACE    Required. Your Endor namespace (e.g. my-team)
+#   ENDOR_NAMESPACE    Required. Your Endor namespace (e.g. my-team).
+#                      Letters, digits, dots, hyphens, underscores only.
 #   ENDOR_API_KEY_ID   Required. API key ID (Basic Auth username)
 #   ENDOR_API_SECRET   Required. API secret  (Basic Auth password)
-#   ENDOR_FQDN         Optional. Base URL (default: https://factory.endorlabs.com)
+#   ENDOR_FQDN         Optional. Base URL — https:// + host, optional numeric
+#                      port, no path, no userinfo, no query/fragment.
+#                      http:// is rejected: both hosted tenants are https, and
+#                      the generated scripts send Basic Auth credentials.
+#                      US (default): https://factory.endorlabs.com
+#                      EU:           https://factory.eu.endorlabs.com
 #
 # To customise config blocks, edit shared/blocks/*.txt directly.
 # To customise orchestration logic, edit templates/*.sh directly.
@@ -46,21 +52,126 @@ SHARED_BLOCKS_DIR="$SCRIPT_DIR/../shared/blocks"
 : "${ENDOR_API_KEY_ID:?ENDOR_API_KEY_ID is required}"
 : "${ENDOR_API_SECRET:?ENDOR_API_SECRET is required}"
 
+# ─── Input validation ─────────────────────────────────────────────────────────
+# Every guard below turns on a bracket range ([A-Za-z0-9.-]) or a character class
+# ([:print:]), and bash resolves both against the current locale. Outside the C
+# locale a range is a collation-order span, not an ASCII span: 'é' and Cyrillic
+# 'а' sort between 'a' and 'z' and therefore match [A-Za-z]. bash 5.0+ turns
+# `globasciiranges` on by default, which pins ranges back to ASCII; bash 3.2 has
+# no such option, and 3.2.57 is the stock /bin/bash on macOS — what
+# `#!/usr/bin/env bash` resolves to on an admin Mac, and what GitHub's macos
+# runners ship. macOS is the primary target for this tooling, so an unforced
+# guard accepts https://café.endorlabs.com under en_US.UTF-8 and bakes that host
+# into all seven generated artifacts.
+#
+# Each guard therefore runs inside a function that declares `local LC_ALL=C`.
+# bash calls setlocale() on that assignment and restores the previous value —
+# including the "was unset" case — when the function returns, so the C locale
+# covers the guard and any helper it calls, while the generation code further
+# down (base64, sed, tr, the emitted bytes) still runs under the operator's
+# locale, unchanged.
+#
+# Two alternatives do not work here. `shopt -s globasciiranges` does not exist in
+# bash 3.2. A `LC_ALL=C funcname` command prefix does not work either: bash 3.2
+# sets the variable for the call but does not call setlocale() for a temporary
+# assignment, so the range still collates — verified on 3.2.57. Only a real
+# assignment takes effect on 3.2.
+
+# Reject namespace characters that would escape OUT_DIR or inject shell syntax
+# into the generated scripts. Real Endor namespaces are letters, digits, dots,
+# hyphens and underscores (e.g. lab.team_x, my-team.2_x). '.' and '..' pass the
+# charset check but still break OUT_DIR, so they are rejected explicitly.
+validate_namespace() {
+  local LC_ALL=C ns_shown
+  case "$1" in
+    ""|.|..|*[!A-Za-z0-9._-]*)
+      ns_shown="${1//[![:print:]]/?}"
+      echo "ERROR: ENDOR_NAMESPACE must be letters, digits, dots, hyphens or underscores" >&2
+      echo "       (e.g. my-team, lab.team_x) — and not '.' or '..'." >&2
+      echo "       got: ${ns_shown}" >&2
+      if [[ "$ns_shown" != "$1" ]]; then
+        echo "       (non-ASCII or non-printable characters shown as '?')" >&2
+      fi
+      exit 1 ;;
+  esac
+}
+validate_namespace "$ENDOR_NAMESPACE"
+
 # Reject credential characters that would corrupt generated scripts/URLs.
-case "${ENDOR_API_KEY_ID}${ENDOR_API_SECRET}" in
-  *[!A-Za-z0-9+/=_.-]*)
-    echo "ERROR: ENDOR_API_KEY_ID / ENDOR_API_SECRET contain unsupported characters" >&2
-    exit 1 ;;
-esac
+# Same locale hazard as the guards either side of it: under en_US.UTF-8 on bash
+# 3.2 an unforced range accepts a non-ASCII secret and interpolates it into the
+# sed replacements and the quoted shell strings of five of the seven artifacts,
+# and into the base64 VS Code service token of a sixth. The offending value is
+# deliberately not echoed back — it is a credential.
+validate_credentials() {
+  local LC_ALL=C
+  case "$1" in
+    *[!A-Za-z0-9+/=_.-]*)
+      echo "ERROR: ENDOR_API_KEY_ID / ENDOR_API_SECRET contain unsupported characters" >&2
+      exit 1 ;;
+  esac
+}
+validate_credentials "${ENDOR_API_KEY_ID}${ENDOR_API_SECRET}"
 
 # ─── Resolve FQDN ─────────────────────────────────────────────────────────────
 FQDN="${ENDOR_FQDN:-https://factory.endorlabs.com}"
+
+# Trim trailing slashes so ${FQDN}/v1/... never doubles up — matches TrimEnd('/')
+# in generate.ps1.
+while [[ "$FQDN" == */ ]]; do FQDN="${FQDN%/}"; done
+
+# Accept only https:// + host[:port]. This is an allowlist, not a denylist: the
+# value is interpolated into sed replacements and into shell strings inside
+# scripts pushed fleet-wide, so every character outside [A-Za-z0-9.-] (plus one
+# optional numeric port) is rejected rather than escaped. Ports are allowed —
+# TRUSTED_HOST strips them below. Mirrors the regex in generate.ps1.
+#
+# http:// is rejected, not accepted-and-downgraded. Both hosted base URLs are
+# https; the generated config carries Basic Auth credentials on every request,
+# so plaintext transport is not something this generator should bless; and no
+# working setup is lost, because credentials_block() below hardcodes https:// in
+# ENDOR_PYPI_URL (pip and uv) and ENDOR_GO_PROXY_URL — an http:// value only ever
+# produced a half-broken fleet deploy: npm/maven/VS Code on http, pip/uv/go on
+# https, and exit 0 to tell the admin it worked.
+#
+# Called only from validate_fqdn below, so it inherits that function's
+# `local LC_ALL=C` and renders under the C locale — see the note above.
+fqdn_error() {
+  # Render the offending value with every byte outside printable ASCII replaced
+  # by '?'. Without this a CRLF .env prints a 'got:' line byte-identical to the
+  # correct value, an ANSI escape in the value repaints the operator's terminal,
+  # and a Cyrillic homoglyph host (fаctory, U+0430) prints a line visually
+  # identical to the real one. ENDOR_FQDN may be unset under 'set -u', and bash
+  # cannot combine ${v-default} with ${v//pattern/repl} in one expansion, so
+  # default into a local first.
+  local raw shown
+  raw="${ENDOR_FQDN-}"
+  shown="${raw//[![:print:]]/?}"
+  echo "ERROR: ENDOR_FQDN must be https:// + host[:port], e.g. https://factory.endorlabs.com (US)" >&2
+  echo "       or https://factory.eu.endorlabs.com (EU) — letters, digits, dots, hyphens only." >&2
+  echo "       http:// is not accepted. got: ${shown}" >&2
+  if [[ "$shown" != "$raw" ]]; then
+    echo "       (non-ASCII or non-printable characters shown as '?')" >&2
+  fi
+  exit 1
+}
+validate_fqdn() {
+  local LC_ALL=C authority
+  case "$1" in https://*) ;; *) fqdn_error ;; esac
+  authority="${1#*://}"
+  case "$authority" in
+    *:*)
+      case "${authority##*:}" in ""|*[!0-9]*) fqdn_error ;; esac
+      authority="${authority%:*}" ;;
+  esac
+  case "$authority" in ""|*[!A-Za-z0-9.-]*) fqdn_error ;; esac
+}
+validate_fqdn "$FQDN"
 
 # ─── Compute derived values ────────────────────────────────────────────────────
 # Only machine-independent values are derived here. Attribution values
 # (<console-user>@<machine>) are computed at install time — see credentials_block.
 FQDN_HOST="${FQDN#https://}"
-FQDN_HOST="${FQDN_HOST#http://}"
 TRUSTED_HOST="${FQDN_HOST%%:*}"
 
 NPM_REGISTRY_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/npm/"

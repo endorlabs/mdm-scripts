@@ -18,10 +18,16 @@
 #   ./generate.ps1
 #
 # Environment variables:
-#   ENDOR_NAMESPACE    Required. Your Endor namespace (e.g. my-team)
+#   ENDOR_NAMESPACE    Required. Your Endor namespace (e.g. my-team).
+#                      Letters, digits, dots, hyphens, underscores only.
 #   ENDOR_API_KEY_ID   Required. API key ID (Basic Auth username)
 #   ENDOR_API_SECRET   Required. API secret  (Basic Auth password)
-#   ENDOR_FQDN         Optional. Base URL (default: https://factory.endorlabs.com)
+#   ENDOR_FQDN         Optional. Base URL - https:// + host, optional numeric
+#                      port, no path, no userinfo, no query/fragment.
+#                      http:// is rejected: both hosted tenants are https, and
+#                      the generated scripts send Basic Auth credentials.
+#                      US (default): https://factory.endorlabs.com
+#                      EU:           https://factory.eu.endorlabs.com
 #
 # To customise config blocks, edit shared/blocks/*.txt directly.
 # To customise orchestration logic, edit templates/*.ps1 directly.
@@ -61,9 +67,73 @@ $ENDOR_API_KEY_ID = $env:ENDOR_API_KEY_ID
 $ENDOR_API_SECRET = $env:ENDOR_API_SECRET
 $FQDN = if ($env:ENDOR_FQDN) { $env:ENDOR_FQDN.TrimEnd('/') } else { 'https://factory.endorlabs.com' }
 
+# Guard order below is ENDOR_NAMESPACE -> credentials -> ENDOR_FQDN, matching
+# generate.sh. With more than one variable invalid, both platforms then report
+# the same first error for the same .env.
+
+# Reject namespace characters that would escape $OutDir or inject syntax into the
+# generated scripts. Real Endor namespaces are letters, digits, dots, hyphens and
+# underscores (e.g. lab.team_x, my-team.2_x). '.' and '..' pass the charset check
+# but still break $OutDir, so they are rejected explicitly. Mirrors generate.sh.
+if ($ENDOR_NAMESPACE -cmatch '[^A-Za-z0-9._-]' -or
+    $ENDOR_NAMESPACE -eq '' -or $ENDOR_NAMESPACE -eq '.' -or $ENDOR_NAMESPACE -eq '..') {
+    # Same masking as the ENDOR_FQDN message below.
+    $NsRaw   = [string]$env:ENDOR_NAMESPACE
+    $NsShown = $NsRaw -creplace '[^\x20-\x7E]', '?'
+    $NsHint  = if ($NsShown -cne $NsRaw) { " (non-ASCII or non-printable characters shown as '?')" } else { '' }
+    Write-Error ("ENDOR_NAMESPACE must be letters, digits, dots, hyphens or " +
+                 "underscores (e.g. my-team, lab.team_x) - and not '.' or '..'. " +
+                 "got: $NsShown$NsHint")
+    exit 1
+}
+
 # Reject credential characters that would corrupt generated scripts/URLs.
-if ("${ENDOR_API_KEY_ID}${ENDOR_API_SECRET}" -match '[^A-Za-z0-9+/=_.-]') {
+if ("${ENDOR_API_KEY_ID}${ENDOR_API_SECRET}" -cmatch '[^A-Za-z0-9+/=_.-]') {
     Write-Error 'ENDOR_API_KEY_ID / ENDOR_API_SECRET contain unsupported characters'
+    exit 1
+}
+
+# Accept only https:// + host[:port]. This is an allowlist, not a denylist: the
+# value is interpolated into generated scripts pushed fleet-wide, so every
+# character outside [A-Za-z0-9.-] (plus one optional numeric port) is rejected
+# rather than escaped. Ports are allowed - TRUSTED_HOST strips them below.
+# -cnotmatch (not -notmatch) keeps this case-sensitive so 'HTTPS://' is rejected
+# here exactly as the case statement in generate.sh rejects it. \z (not $) anchors
+# at the true end of the string; .NET's $ also matches before a trailing newline.
+# .NET character ranges are ordinal, so this guard is locale-independent as
+# written; generate.sh has to force LC_ALL=C to get the same behaviour.
+#
+# http:// is rejected, not accepted-and-downgraded. Both hosted base URLs are
+# https; the generated config carries Basic Auth credentials on every request,
+# so plaintext transport is not something this generator should bless; and no
+# working setup is lost, because templates/envvars.ps1 hardcodes https:// in
+# $ENDOR_PYPI_URL (pip and uv) and $ENDOR_GO_PROXY_URL - an http:// value only
+# ever produced a half-broken fleet deploy: npm/maven/VS Code on http, pip/uv/go
+# on https, and exit 0 to tell the admin it worked.
+#
+# The 'got:' value is rendered with every character outside printable ASCII
+# replaced by '?'. Without that, a CRLF .env prints a value indistinguishable
+# from the correct one, an ANSI escape in the value repaints the operator's
+# console, and a Cyrillic homoglyph host (factory with U+0430) prints a line
+# visually identical to the real one. generate.sh renders the same way with
+# ${var//[![:print:]]/?} evaluated under LC_ALL=C. Both mask the same set of
+# characters - everything outside U+0020-U+007E - but only with the
+# case-sensitive operators: .NET's default IgnoreCase folds the input into ASCII
+# before testing a class (U+212A KELVIN SIGN folds to 'k'), so -replace would
+# leave such characters unmasked and -match would let them through a negated
+# ASCII class. Hence -creplace for masking and -cmatch/-cnotmatch in the guards.
+# The two differ only in how many '?' one masked character produces - bash
+# substitutes per byte of UTF-8, .NET per UTF-16 code unit - which does not
+# affect what this rendering is for: no masked value can be misread as correct.
+if ($FQDN -cnotmatch '^https://[A-Za-z0-9.-]+(:[0-9]+)?\z') {
+    $FqdnRaw   = [string]$env:ENDOR_FQDN
+    $FqdnShown = $FqdnRaw -creplace '[^\x20-\x7E]', '?'
+    $FqdnHint  = if ($FqdnShown -cne $FqdnRaw) { " (non-ASCII or non-printable characters shown as '?')" } else { '' }
+    Write-Error ("ENDOR_FQDN must be https:// + host[:port], e.g. " +
+                 "https://factory.endorlabs.com (US) or " +
+                 "https://factory.eu.endorlabs.com (EU) - " +
+                 "letters, digits, dots, hyphens only. http:// is not accepted. " +
+                 "got: $FqdnShown$FqdnHint")
     exit 1
 }
 
@@ -71,7 +141,7 @@ if ("${ENDOR_API_KEY_ID}${ENDOR_API_SECRET}" -match '[^A-Za-z0-9+/=_.-]') {
 # Package-manager attribution credentials are computed at install time because
 # <console-user>@<machine> exists only on the endpoint. Machine-independent
 # values, including the VS Code path token, are derived here.
-$FQDN_HOST        = $FQDN -replace '^https?://', ''
+$FQDN_HOST        = $FQDN -replace '^https://', ''
 $TRUSTED_HOST     = $FQDN_HOST -replace ':.*', ''
 
 $NPM_REGISTRY_URL  = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/npm/"
