@@ -1,0 +1,6 @@
+    <!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->
+    <clear />
+    <packageSource key="endor-firewall">
+      <package pattern="*" />
+    </packageSource>
+    <!-- ===== END ENDOR PACKAGE FIREWALL ===== -->

@@ -18,6 +18,9 @@
 #   Go:
 #     ~/.config/go/env
 #
+#   .NET / NuGet:
+#     ~/.nuget/NuGet/NuGet.Config  (sections kept; nuget.org restored if no source is left)
+#
 #   VS Code:
 #     Restores default gallery properties and removes update remediation
 #
@@ -146,6 +149,12 @@ echo ""
 echo "[endor-remove] ── Maven ────────────────────────────────────────────────────────────"
 
 remove_xml_block "$USER_HOME/.m2/settings.xml" "$CONSOLE_USER" "$USER_GROUP"
+
+# ── NuGet config file ─────────────────────────────────────────────────────────
+echo ""
+echo "[endor-remove] ── NuGet / .NET ────────────────────────────────────────────────"
+
+remove_nuget_blocks "$USER_HOME/.nuget/NuGet/NuGet.Config" "$CONSOLE_USER" "$USER_GROUP"
 
 # ── VS Code extension firewall ────────────────────────────────────────────────
 echo ""
