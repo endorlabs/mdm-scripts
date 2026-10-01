@@ -6,6 +6,7 @@
 #   Get-ConsoleUser                              — finds the logged-in user when running as SYSTEM
 #   Set-UserEnvVar        <name> <value> <sid>   — writes persistent HKCU env var via user SID
 #   Remove-UserEnvVar     <name> <sid>           — removes HKCU env var
+#   Send-EnvironmentChangeBroadcast              — WM_SETTINGCHANGE so new apps see HKCU env changes
 #   Set-FileRestrictedAcl <path> <username>      — restricts file to owner only
 #   Invoke-UpsertBlock    <path> <content> ...   — idempotent sentinel-block writer;
 #                                                  delegates to Invoke-UpsertBlockPip when
@@ -158,6 +159,34 @@ function Remove-UserEnvVar {
     $regPath = "Registry::HKEY_USERS\$UserSID\Environment"
     if (Test-Path $regPath) {
         Remove-ItemProperty -Path $regPath -Name $Name -ErrorAction SilentlyContinue
+    }
+}
+
+# Send-EnvironmentChangeBroadcast
+# Asks running desktop apps (Explorer included) to reload their environment
+# after HKCU:\Environment changed. Set-ItemProperty only writes the registry;
+# without WM_SETTINGCHANGE Explorer keeps its old environment block and every
+# app it launches (Start menu, taskbar, new terminals) inherits stale values
+# until the next sign-in. Window messages never cross sessions, so when the
+# script runs as SYSTEM (Intune default) the broadcast cannot reach the user's
+# desktop and is skipped; the values then apply at the next sign-in. Processes
+# that are already running never reload their environment either way.
+# Best effort: returns 'sent', 'system' or 'failed: <reason>' and never throws.
+function Send-EnvironmentChangeBroadcast {
+    try {
+        if ([System.Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) { return 'system' }
+        if (-not ('Endor.NativeMethods' -as [type])) {
+            Add-Type -Namespace Endor -Name NativeMethods -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+        }
+        $result = [UIntPtr]::Zero
+        # HWND_BROADCAST = 0xffff, WM_SETTINGCHANGE = 0x1A, SMTO_ABORTIFHUNG = 0x2, 5 s per window
+        [void][Endor.NativeMethods]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 0x2, 5000, [ref]$result)
+        return 'sent'
+    } catch {
+        return "failed: $($_.Exception.Message)"
     }
 }
 

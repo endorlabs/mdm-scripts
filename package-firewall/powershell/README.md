@@ -144,7 +144,9 @@ Config files reference these as `${ENDOR_...}` env var placeholders — the tool
 
 **Windows advantage over macOS:** `HKCU:\Environment` variables are inherited by every process the user starts — including Makefiles, git hooks, IDE terminals, and scheduled tasks. No shell profile sourcing required. This natively covers the non-interactive context gap.
 
-**Credential rotation**: redeploy the MDM script with new credentials. `HKCU:\Environment` and `pip.ini` (which contains literal credentials) are both updated in place.
+**When the values take effect:** Windows hands each process a copy of the environment when it starts, so anything already running — an open terminal, VS Code, an IDE — keeps the old values until it is restarted. After writing the registry the script broadcasts `WM_SETTINGCHANGE`, so Explorer reloads its environment and apps launched afterwards from the Start menu or taskbar see the new values. That broadcast cannot cross sessions: when the script runs as SYSTEM (the Intune default) the values apply at the developer's **next sign-in**. To make them live immediately, run the script in the user's context instead (Intune: *Run this script using the logged on credentials* = Yes). A new tab inside an already-open terminal host inherits the host's environment unless the host reloads it itself (Windows Terminal 1.18+ does, the VS Code integrated terminal does not). Until the new values are loaded, tools send the old credentials and get a `401`/`403` from the firewall — never a silent bypass.
+
+**Credential rotation**: redeploy the MDM script with new credentials. `HKCU:\Environment` and `pip.ini` (which contains literal credentials) are both updated in place. The same take-effect rules apply: open windows keep the old key until restarted, SYSTEM deployments switch at the next sign-in.
 
 ---
 
