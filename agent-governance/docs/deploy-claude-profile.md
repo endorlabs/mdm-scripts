@@ -30,6 +30,16 @@ Confirm it's a valid property list before uploading (there's a ready-made sample
 plutil -lint com.anthropic.claudecode.mobileconfig
 ```
 
+Then check its line endings and that the embedded `SessionStart` hook still parses as shell. `plutil -lint` passes a file that has picked up Windows (CRLF) line endings — from a Windows checkout, an editor, or a paste into a web form — but macOS keeps the stray carriage returns when it installs the profile, and the hook command carries real newlines. The profile is generated with a wrapper that strips them at run time, so a CRLF file still works, but treat any non-zero count as a sign the file was altered after rendering and re-render it:
+
+```sh
+grep -c $'\r' com.anthropic.claudecode.mobileconfig      # must print 0
+plutil -extract 'PayloadContent.0.hooks.SessionStart.0.hooks.0.command' raw -o - \
+  com.anthropic.claudecode.mobileconfig | sh -n           # must print nothing
+```
+
+Keep the file as generated: don't open it in an editor, and upload the file itself rather than pasting its contents. Run the same two checks on the copy you download back from the MDM after uploading, if it offers one.
+
 ## 2. Upload to the MDM
 
 **Jamf Pro** — Computers → Configuration Profiles → New; add an **Application & Custom Settings → Upload** payload with the `.mobileconfig`; set the **Scope**; Save. Jamf pushes it and the OS installs it as a managed setting. (If you embed it under a Jamf-owned outer profile, set `--profile-identifier` to that profile's id so the outer identity matches.)
@@ -38,7 +48,14 @@ plutil -lint com.anthropic.claudecode.mobileconfig
 
 ## 3. Verify
 
-Open Claude Code on a target machine and start a session. The `SessionStart` hook installs/updates `endorctl` and begins reporting to your Endor namespace — confirm the activity in the Endor audit log.
+On one test machine that has the profile, confirm the installed managed preference carries the hook intact — this is the exact text Claude Code runs, whatever happened to the file on the way through the MDM:
+
+```sh
+plutil -extract 'hooks.SessionStart.0.hooks.0.command' raw -o - \
+  '/Library/Managed Preferences/com.anthropic.claudecode.plist' | sh -n
+```
+
+Then open Claude Code and start a session. The `SessionStart` hook installs/updates `endorctl` (in the background, so `~/.endorctl/.update-check` appears once the version check has run) and begins reporting to your Endor namespace — confirm the activity in the Endor audit log, then assign the profile to the rest of the fleet.
 
 ## Updating
 

@@ -231,6 +231,23 @@ jobs:
           }
           if ($bad -gt 0) { Write-Error "$bad generated file(s) with parse errors" }
 
+  # The agent-governance suite: bootstrap behavior under a stubbed curl, the
+  # examples/ sync check, embedded-hook syntax, and the CRLF armor on the Claude
+  # profile. The profile cases need plutil, so macOS is the one that matters;
+  # Linux covers the rest (and dash, which macOS lacks by default).
+  agent-governance-tests:
+    name: Agent-governance tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Run agent-governance test suite (offline)
+        run: bash agent-governance/tests/run-tests.sh
+
   # Run package-firewall integration tests on every supported operating system.
   tests:
     name: Tests (${{ matrix.os }})
