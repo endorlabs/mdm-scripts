@@ -50,5 +50,17 @@ foreach ($_name in $_envVars.Keys) {
     }
 }
 Remove-Variable _envVars, _secret, _attrUserEnc, _secretEnc
-Write-Host '[endor] [done] env vars -- take effect in new terminal sessions'
+
+# Tell Explorer to reload its environment so apps launched from now on inherit
+# the new values. Open windows keep their old copy; see Send-EnvironmentChangeBroadcast.
+if ($DryRun) {
+    Write-Host '[dry-run]   broadcast WM_SETTINGCHANGE (Environment)'
+    Write-Host '[endor] [done] env vars -- take effect in new terminal sessions'
+} else {
+    switch (Send-EnvironmentChangeBroadcast) {
+        'sent'   { Write-Host '[endor] [done] env vars -- open a new terminal to pick them up' }
+        'system' { Write-Host '[endor] [done] env vars -- running as SYSTEM: values apply at the user''s next sign-in' }
+        default  { Write-Host "[endor] [done] env vars -- take effect at next sign-in (environment broadcast $_)" }
+    }
+}
 Write-Host ''
