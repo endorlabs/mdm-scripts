@@ -286,8 +286,9 @@ VS Code's direct upstream fallback.
 
 The script applies immediately and installs drift remediation:
 
-- **macOS**: `/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist` watches
-  `/Applications` and invokes a worker after VS Code updater replacements.
+- **macOS**: `/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist` runs a
+  worker when `/Applications` or a user's VS Code update cache changes, and every
+  60 seconds. See [macOS code signing](#macos-code-signing).
 - **Linux**: `endor-vscode-firewall.path` watches `/usr/share/code` and
   `/usr/lib/code`; its oneshot systemd service reapplies the patch.
 
@@ -303,8 +304,63 @@ Supported scope: Microsoft VS Code Stable at
 `/usr/lib/code/resources/app/product.json`. Insiders, VSCodium, Code OSS,
 Snap, Flatpak, and arbitrary portable/tarball installs are excluded.
 
-> On macOS, changing a bundled resource invalidates the app's original
-> code-signature seal. The script does not ad-hoc re-sign VS Code.
+#### macOS code signing
+
+Microsoft's code signature seals `product.json`. Editing it in place makes
+Gatekeeper report "Visual Studio Code is damaged and can't be opened" the first
+time an updated VS Code launches. So the worker never edits the app in place:
+
+1. It copies the app into `/Library/Application Support/Endor Labs/vscode-firewall/`
+   (root only) and checks that the copy is Microsoft's code, changed at most by
+   Endor's `product.json` edit.
+2. It patches the copy, signs the outer app with a certificate unique to the Mac,
+   and swaps it into `/Applications`. Microsoft's original is kept for removal.
+3. When VS Code downloads an update, the worker patches and signs the download
+   before VS Code installs it, so the first session after **Restart to Update**
+   already uses the firewall.
+
+The certificate is self-signed, valid for 10 years and renewed 30 days before it
+expires. Its key is non-exportable and lives in the System keychain. Nothing has to
+trust it, and no MDM profile is needed. The app's designated requirement accepts
+Microsoft's certificate or the Mac's own, so VS Code's updater keeps installing
+Microsoft releases.
+
+The worker leaves alone any app it can't vouch for: another signer, ad-hoc or
+unsigned builds, added or changed files, or nested code not signed by Microsoft.
+It logs a warning and exits non-zero.
+
+What users and admins notice:
+
+- **A keychain prompt after each VS Code update**, and once at the first
+  migration: macOS asks for the login password before VS Code can use its "Code
+  Safe Storage" item. Choose **Always Allow**. **Deny** only hides saved sign-ins
+  (GitHub, Settings Sync) for that session; nothing is deleted, and the next
+  launch asks again.
+- **One privacy prompt at migration**: permissions such as access to Documents
+  are asked for once more after the first migration, not after updates.
+- **A different signer**: VS Code shows `Authority=Endor Labs VS Code Firewall (…)`
+  and `TeamIdentifier=not set`, and is not notarized. EDR, Santa or PPPC rules
+  keyed on Microsoft's Team ID `UBF8T346G9` no longer match it; review them
+  before deploying.
+- **Open sessions** keep running and use the firewall from their next start.
+
+For defense in depth, block `marketplace.visualstudio.com/_apis`,
+`*.gallery.vsassets.io` and `www.vscode-unpkg.net` at your web gateway, so a
+session that is not using the firewall fails closed.
+
+Troubleshooting, as root:
+
+```bash
+/bin/bash "/Library/Application Support/Endor Labs/vscode-firewall/worker.sh" --status
+tail -n 50 "/Library/Logs/Endor Labs/vscode-firewall.log"
+codesign -dvv "/Applications/Visual Studio Code.app"
+```
+
+`endor-remove.sh` swaps Microsoft's original app back in (byte-identical and
+notarized) and deletes the signing identity. If there is no original, for example
+on a Mac first patched in place by an earlier version of this script, it restores
+`product.json` in a re-signed copy, and VS Code's next update replaces that with
+Microsoft's build.
 
 ---
 
