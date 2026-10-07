@@ -19,6 +19,9 @@
 #   Java / Maven:
 #     %USERPROFILE%\.m2\settings.xml
 #
+#   .NET / NuGet:
+#     %APPDATA%\NuGet\NuGet.Config  (sections kept; nuget.org restored if no source is left)
+#
 #   VS Code:
 #     Restores default gallery properties and removes update remediation
 #
@@ -66,6 +69,18 @@ foreach ($_name in $_removeVars) {
     }
 }
 Remove-Variable _removeVars
+
+# Same broadcast as the installer: apps launched from now on no longer see the
+# removed values. Open windows keep their copy until restarted.
+if ($DryRun) {
+    Write-Host '[dry-run]   broadcast WM_SETTINGCHANGE (Environment)'
+} else {
+    switch (Send-EnvironmentChangeBroadcast) {
+        'sent'   { Write-Host '[endor-remove]   environment change broadcast; open a new terminal' }
+        'system' { Write-Host '[endor-remove]   running as SYSTEM: removal applies at the user''s next sign-in' }
+        default  { Write-Host "[endor-remove]   removal applies at next sign-in (environment broadcast $_)" }
+    }
+}
 Write-Host ''
 
 # -- JavaScript config files --
@@ -137,6 +152,12 @@ Write-Host ''
 Write-Host '[endor-remove] -- Maven --------------------------------------------------'
 
 Remove-XmlBlock -FilePath (Join-Path $UserHome '.m2\settings.xml') -DryRun:$DryRun
+Write-Host ''
+
+# -- NuGet config file --
+Write-Host '[endor-remove] -- NuGet / .NET -------------------------------------------'
+
+Remove-NuGetBlocks -FilePath (Join-Path $AppData 'NuGet\NuGet.Config') -DryRun:$DryRun
 Write-Host ''
 
 # -- VS Code extension firewall --
