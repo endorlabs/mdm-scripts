@@ -507,12 +507,14 @@ bundle_complete() {
 }
 
 # bundle_stat <app>: cheap, stat-only identity of the files that change when the bundle does.
+# Times are to the nanosecond: a same-size edit within the second of our own write would
+# otherwise look unchanged.
 bundle_stat() {
   local app="$1" exe f out=""
   exe=$(info_value "$app" CFBundleExecutable)
   for f in "$app" "$app/Contents" "$app/Contents/Info.plist" "$app/Contents/MacOS/${exe:-?}" \
       "$app/Contents/_CodeSignature/CodeResources" "$app/$PRODUCT_REL"; do
-    out="$out$(/usr/bin/stat -f '%d:%i:%m:%c:%z' "$f" 2>/dev/null || echo -),"
+    out="$out$(/usr/bin/stat -f '%d:%i:%Fm:%Fc:%z' "$f" 2>/dev/null || echo -),"
   done
   printf '%s\n' "$out"
 }
