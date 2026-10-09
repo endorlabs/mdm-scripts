@@ -208,6 +208,9 @@ jobs:
           expected_url='https://factory.endorlabs.com/v1/namespaces/ci-smoke/firewall/vscode/_ak/Y2ktc21va2Uta2V5LWlkOmNpLXNtb2tlLXNlY3JldA'
           test -f "$vscode_script"
           grep -qF "$expected_url" "$vscode_script"
+          for key in StartInterval StandardOutPath WatchPaths; do
+            grep -qF "<key>$key</key>" "$vscode_script"
+          done
           for f in "${files[@]}"; do
             bash -n "$f"
             echo "ok: $f"
