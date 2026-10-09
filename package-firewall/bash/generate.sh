@@ -24,6 +24,12 @@
 #                      the generated scripts send Basic Auth credentials.
 #                      US (default): https://factory.endorlabs.com
 #                      EU:           https://factory.eu.endorlabs.com
+#   ENDOR_VSCODE_MACOS_DAEMON
+#                      Optional. 0 (default) or 1. On macOS, endor-vscode.sh and
+#                      endor-all.sh configure VS Code only when this is 1: it
+#                      installs a root LaunchDaemon that changes the VS Code app.
+#                      Read the endor-vscode.sh section of README.md first.
+#                      Linux is not affected.
 #
 # To customise config blocks, edit shared/blocks/*.txt directly.
 # To customise orchestration logic, edit templates/*.sh directly.
@@ -169,6 +175,13 @@ validate_fqdn() {
 }
 validate_fqdn "$FQDN"
 
+# ─── Feature flags ────────────────────────────────────────────────────────────
+VSCODE_MACOS_DAEMON="${ENDOR_VSCODE_MACOS_DAEMON:-0}"
+case "$VSCODE_MACOS_DAEMON" in
+  0|1) ;;
+  *) echo "ERROR: ENDOR_VSCODE_MACOS_DAEMON must be 0 or 1" >&2; exit 1 ;;
+esac
+
 # ─── Compute derived values ────────────────────────────────────────────────────
 # Only machine-independent values are derived here. Attribution values
 # (<console-user>@<machine>) are computed at install time — see credentials_block.
@@ -204,7 +217,8 @@ substitute() {
     -e "s|{{TRUSTED_HOST}}|${TRUSTED_HOST}|g" \
     -e "s|{{MAVEN_REGISTRY_URL}}|${MAVEN_REGISTRY_URL}|g" \
     -e "s|{{NUGET_SOURCE_URL}}|${NUGET_SOURCE_URL}|g" \
-    -e "s|{{VSCODE_SERVICE_URL}}|${VSCODE_SERVICE_URL}|g"
+    -e "s|{{VSCODE_SERVICE_URL}}|${VSCODE_SERVICE_URL}|g" \
+    -e "s|{{VSCODE_MACOS_DAEMON}}|${VSCODE_MACOS_DAEMON}|g"
 }
 
 # inline_common
@@ -495,6 +509,11 @@ printf "   %-24s  %s\n" "endor-vscode.sh" "VS Code extension gallery + update re
 printf "   %-24s  %s\n" "endor-all.sh"    "all of the above (single-script deploy)"
 printf "   %-24s  %s\n" "endor-remove.sh" "offboarding — strips all Endor config"
 echo ""
+if [[ "$VSCODE_MACOS_DAEMON" == "1" ]]; then
+  echo "   VS Code on macOS: enabled (ENDOR_VSCODE_MACOS_DAEMON=1)."
+else
+  echo "   VS Code on macOS: not enabled; set ENDOR_VSCODE_MACOS_DAEMON=1 to enable it."
+fi
 echo "   All scripts accept --dry-run to preview changes without writing anything."
 echo "   Upload to your MDM tool. Each script is self-contained and idempotent."
 echo ""
