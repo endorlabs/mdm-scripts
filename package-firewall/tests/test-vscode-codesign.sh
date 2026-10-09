@@ -18,6 +18,8 @@ KEY_ID="ci-smoke-key-id"
 SECRET="ci-smoke-secret"
 INSTALLER="$ROOT_DIR/package-firewall/bash/out/$NAMESPACE/endor-vscode.sh"
 BUNDLE_ID="com.endorlabs.test.vscode-codesign"
+DEFAULT_SERVICE_URL="https://marketplace.visualstudio.com/_apis/public/gallery"
+DEFAULT_EXTENSION_URL_TEMPLATE="https://www.vscode-unpkg.net/_gallery/{publisher}/{name}/latest"
 
 TMP_DIR=$(cd "$(mktemp -d)" && pwd -P)
 KC="$TMP_DIR/test.keychain-db"
@@ -204,6 +206,12 @@ assert_firewalled() {
   [[ -z "$(find "$app" -xattrname com.apple.quarantine -print -quit)" ]] || fail "the app is still quarantined"
 }
 
+assert_restored() {
+  [[ "$(product_value "$1" serviceUrl)" == "$DEFAULT_SERVICE_URL" ]] || fail "serviceUrl was not restored"
+  [[ "$(product_value "$1" extensionUrlTemplate)" == "$DEFAULT_EXTENSION_URL_TEMPLATE" ]] \
+    || fail "extensionUrlTemplate was not restored"
+}
+
 assert_identity_gone() {
   local ids
   ids=$(security find-identity -p codesigning "$KC")
@@ -296,6 +304,16 @@ grep -qx "$cert" "$state/signing/previous-certs" || fail "the old certificate is
 assert_identity_gone "$cert"
 assert_firewalled "$APP" "$state"
 
+echo "test: removal swaps Microsoft's original back and purge deletes the identity"
+cert=$(cert_of "$state")
+run_worker "$state" --restore || fail "restore failed"
+[[ "$(tree_digest "$APP")" == "$original" ]] || fail "the restored app differs from the original"
+codesign --verify --deep --strict -R "=identifier \"$BUNDLE_ID\" and certificate leaf = H\"$UP_SHA1\"" "$APP" \
+  >/dev/null 2>&1 || fail "the restored app is not upstream-signed"
+run_worker "$state" --purge || fail "purge failed"
+assert_identity_gone "$cert"
+[[ ! -e "$state/signing" && ! -e "$state/pristine" ]] || fail "purge left signing state behind"
+
 echo "test: a legacy app patched in place is repaired, including a stray temp file"
 state="$TMP_DIR/state-legacy"
 build_app "$APP" 1.0.0
@@ -305,6 +323,14 @@ install "$state" || fail "installer failed on a legacy app"
 assert_firewalled "$APP" "$state"
 [[ ! -e "$APP/Contents/Resources/app/product.json.endor.Q1w2E3" ]] || fail "the stray temp file survived"
 [[ ! -e "$state/pristine" ]] || fail "a modified app was kept as an original"
+
+echo "test: removal without an original restores product.json and keeps a valid signature"
+cert=$(cert_of "$state")
+run_worker "$state" --restore || fail "restore without an original failed"
+assert_restored "$APP"
+signed_by "$APP" "$cert" || fail "the restored app is not validly signed"
+run_worker "$state" --purge || fail "purge failed"
+assert_identity_gone "$cert"
 
 echo "test: apps the worker can't vouch for are refused and left byte-for-byte unchanged"
 state="$TMP_DIR/state-refuse"
