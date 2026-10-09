@@ -1,5 +1,6 @@
 # templates/vscode.sh
 # Patches Microsoft VS Code Stable's product.json and installs update remediation.
+# On macOS this runs only when the script was generated with ENDOR_VSCODE_MACOS_DAEMON=1.
 
 echo ""
 echo "[endor] ── VS Code extension firewall ───────────────────────────────────────"
@@ -360,10 +361,15 @@ case "$MODE" in
 esac
 ENDOR_VSCODE_WORKER
 
+# Changing VS Code on macOS has costs that each customer weighs (see bash/README.md), so the
+# macOS daemon is opt-in: ENDOR_VSCODE_MACOS_DAEMON=1 when the script is generated.
+_VSCODE_MACOS_DAEMON='{{VSCODE_MACOS_DAEMON}}'
+_vscode_skip=0
 _vscode_os=$(uname -s)
 case "$_vscode_os" in
   Darwin)
     _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/Library/Application Support/Endor Labs/vscode-firewall}"
+    [[ "$_VSCODE_MACOS_DAEMON" == "1" ]] || _vscode_skip=1
     ;;
   Linux)
     _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/var/lib/endor/vscode-firewall}"
@@ -377,7 +383,17 @@ case "$_vscode_os" in
 esac
 _VSCODE_WORKER_PATH="$_VSCODE_STATE_DIR/worker.sh"
 
-if [[ "${DRY_RUN:-0}" == "1" ]]; then
+if [[ "$_vscode_skip" == "1" ]]; then
+  echo "[endor] skip: the VS Code firewall is not enabled for macOS in this script."
+  echo "[endor]   To enable it, regenerate with ENDOR_VSCODE_MACOS_DAEMON=1 (see bash/README.md)."
+  # An earlier version of this script installed the daemon unconditionally. Leave it running,
+  # because removing it would turn the firewall off, but make the admin decide.
+  if [[ -f /Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist ]]; then
+    echo "[endor] WARNING: a VS Code firewall daemon from an earlier deployment is still installed." >&2
+    echo "[endor]   Regenerate with ENDOR_VSCODE_MACOS_DAEMON=1 to keep it, or run endor-remove.sh to remove it." >&2
+    _ENDOR_WARNED=1
+  fi
+elif [[ "${DRY_RUN:-0}" == "1" ]]; then
   _vscode_tmp_worker=$(mktemp)
   printf '%s\n' "$_VSCODE_WORKER_CONTENT" > "$_vscode_tmp_worker"
   chmod 700 "$_vscode_tmp_worker"
@@ -472,6 +488,6 @@ PATHUNIT
   fi
 fi
 
-echo "[endor] ✓ VS Code extension firewall done"
+[[ "$_vscode_skip" == "1" ]] || echo "[endor] ✓ VS Code extension firewall done"
 unset _vscode_os _VSCODE_STATE_DIR _VSCODE_WORKER_PATH _VSCODE_WORKER_CONTENT
-unset _vscode_tmp_worker _vscode_plist _vscode_service _vscode_path
+unset _vscode_tmp_worker _vscode_plist _vscode_service _vscode_path _VSCODE_MACOS_DAEMON _vscode_skip

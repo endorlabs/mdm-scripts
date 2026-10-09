@@ -20,6 +20,7 @@ generate() {
   ENDOR_NAMESPACE="$NAMESPACE" \
     ENDOR_API_KEY_ID="$KEY_ID" \
     ENDOR_API_SECRET="$secret" \
+    ENDOR_VSCODE_MACOS_DAEMON="${MACOS_DAEMON:-1}" \
     bash "$GENERATOR" >/dev/null
 }
 
@@ -182,5 +183,34 @@ if run_installer "$product" "$state" >/dev/null 2>&1; then
   exit 1
 fi
 cmp -s "$product" "$TMP_DIR/malformed-original.json"
+
+echo "test: without ENDOR_VSCODE_MACOS_DAEMON=1, macOS leaves VS Code alone"
+MACOS_DAEMON=0 generate
+product="$TMP_DIR/opt-out-product.json"
+state="$TMP_DIR/opt-out-state"
+cp "$FIXTURE" "$product"
+rc=0
+output=$(run_installer "$product" "$state" 2>&1) || rc=$?
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  cmp -s "$product" "$FIXTURE"
+  [[ ! -e "$state" ]]
+  grep -qF 'ENDOR_VSCODE_MACOS_DAEMON=1' <<< "$output"
+  # A daemon left by an earlier deployment is reported as a warning.
+  if [[ -f /Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist ]]; then
+    [[ "$rc" -eq 1 ]]
+  else
+    [[ "$rc" -eq 0 ]]
+  fi
+else
+  [[ "$rc" -eq 0 ]]
+  assert_patched "$product"
+fi
+
+echo "test: the generator rejects an invalid ENDOR_VSCODE_MACOS_DAEMON"
+if MACOS_DAEMON=yes generate 2>/dev/null; then
+  echo "expected ENDOR_VSCODE_MACOS_DAEMON=yes to be rejected" >&2
+  exit 1
+fi
+generate
 
 echo "VS Code Bash tests passed"
