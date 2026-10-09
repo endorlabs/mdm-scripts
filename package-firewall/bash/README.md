@@ -291,8 +291,8 @@ The script applies immediately and installs drift remediation:
 - **macOS**, only with `ENDOR_VSCODE_MACOS_DAEMON=1` (see
   [macOS is opt-in](#macos-is-opt-in)):
   `/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist` runs a worker
-  when `/Applications` changes, and every 60 seconds. See
-  [macOS code signing](#macos-code-signing).
+  when `/Applications` or a user's VS Code update cache changes, and every
+  60 seconds. See [macOS code signing](#macos-code-signing).
 - **Linux**: `endor-vscode-firewall.path` watches `/usr/share/code` and
   `/usr/lib/code`; its oneshot systemd service reapplies the patch.
 
@@ -332,10 +332,9 @@ time an updated VS Code launches. So the worker never edits the app in place:
    Endor's `product.json` edit.
 2. It patches the copy, signs the outer app with a certificate unique to the Mac,
    and swaps it into `/Applications`. Microsoft's original is kept for removal.
-3. When VS Code updates itself, its updater installs Microsoft's next release.
-   After **Restart to Update** it relaunches that release at once, so the first
-   session may not use the firewall. The worker then swaps in a signed copy, which
-   VS Code uses from its next start.
+3. When VS Code downloads an update, the worker patches and signs the download
+   before VS Code installs it, so the first session after **Restart to Update**
+   already uses the firewall.
 
 The certificate is self-signed, valid for 10 years and renewed 30 days before it
 expires. Its key is non-exportable and lives in the System keychain. Nothing has to
