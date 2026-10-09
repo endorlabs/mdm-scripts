@@ -99,6 +99,9 @@ Code OSS, Snap, Flatpak, and arbitrary portable/tarball locations are not
 managed. Linux requires systemd and Python 3.
 
 The authenticated gallery URL is stored in `product.json` and must be readable
-by local users so VS Code can consume it. On macOS, changing a resource inside
-the application bundle invalidates the original code-signature seal; the script
-does not ad-hoc re-sign the application.
+by local users so VS Code can consume it. On macOS, Microsoft's code signature
+seals `product.json`, so when the macOS daemon is enabled the script patches a
+copy of the app, signs it with a certificate unique to each Mac, and swaps it
+into place. Users see a keychain prompt after each VS Code update, and the app
+no longer carries Microsoft's Team ID; see
+[bash/README.md](bash/README.md#macos-code-signing).
