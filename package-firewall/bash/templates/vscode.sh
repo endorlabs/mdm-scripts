@@ -19,6 +19,7 @@ for arg in "$@"; do
   case "$arg" in
     --once) MODE="once" ;;
     --restore) MODE="restore" ;;
+    --status) MODE="status" ;;
     --dry-run) DRY_RUN=1 ;;
     *) echo "[endor-vscode] ERROR: unknown argument: $arg" >&2; exit 2 ;;
   esac
@@ -355,9 +356,447 @@ restore_all() {
   return "$status"
 }
 
+status_all() {
+  local file
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    if json_is_desired "$file"; then
+      echo "[endor-vscode] configured: $file"
+    else
+      echo "[endor-vscode] not configured: $file"
+    fi
+  done < <(list_product_files)
+}
+
+# ── macOS: classify the app before changing it ────────────────────────────────
+#
+# Microsoft's signature seals product.json, so an in-place edit makes Gatekeeper call a
+# freshly updated VS Code "damaged". The fix is to patch a clone, sign it with an identity
+# unique to this Mac and swap the whole app into place. Before changing anything, the worker
+# must know what the app in /Applications is: classify_bundle decides without writing, and
+# --status reports it. Until the swap is in place, --once still patches product.json in place.
+#
+# States (classify_bundle), and what the worker does with each once it swaps signed copies:
+#   A   Microsoft-signed, seal intact                       patch, sign, swap; keep the original
+#   B   signed by this Mac and current                      nothing
+#   C   signed by this Mac, but out of date                 patch if needed, re-sign, swap
+#   D   Microsoft-signed, only Endor's product.json edit    patch, sign, swap (legacy installs)
+#   D2  signed by this Mac, product.json changed since      patch, re-sign, swap
+#   E   anything else                                       refuse and leave the app alone
+
+PRODUCT_REL="Contents/Resources/app/product.json"
+UPSTREAM_ANCHOR_DEFAULT='anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = UBF8T346G9'
+CERT_SHA1=""
+RUN_TMP=""
+
+ts() { /bin/date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+redact() { /usr/bin/sed -E 's#/_ak/[^/[:space:]"]+#/_ak/<redacted>#g'; }
+log() { printf '%s [endor-vscode] %s\n' "$(ts)" "$*" | redact; }
+warn() { printf '%s [endor-vscode] WARNING: %s\n' "$(ts)" "$*" | redact >&2; }
+
+is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
+
+info_value() { /usr/bin/plutil -extract "$2" raw -o - "$1/Contents/Info.plist" 2>/dev/null; }
+
+discard() {
+  [[ -n "$1" && "$1" != "/" ]] && /bin/rm -rf "$1"
+  return 0
+}
+
+# Physical path of the configured app. The app itself may not be a symlink.
+resolve_app() {
+  local parent
+  parent=$(cd "$(dirname "$APP_PATH")" 2>/dev/null && pwd -P) || return 1
+  APP="$parent/$(basename "$APP_PATH")"
+}
+
+app_present() { [[ -e "$APP" || -L "$APP" ]]; }
+
+# proc_under <prefix>: a process whose executable path (argv[0]) starts with prefix is running.
+proc_under() {
+  /bin/ps -axo comm= 2>/dev/null \
+    | P="$1" /usr/bin/awk 'index($0, ENVIRON["P"]) == 1 { found = 1 } END { exit !found }'
+}
+app_running() { proc_under "$APP/Contents/MacOS/"; }
+
+# bundle_complete <app>: the files the worker relies on exist and none of the path components
+# it writes through is a symlink.
+bundle_complete() {
+  local app="$1" exe p
+  for p in "$app" "$app/Contents" "$app/Contents/Resources" "$app/Contents/Resources/app"; do
+    [[ -d "$p" && ! -L "$p" ]] || return 1
+  done
+  [[ -f "$app/Contents/Info.plist" && ! -L "$app/Contents/Info.plist" ]] || return 1
+  exe=$(info_value "$app" CFBundleExecutable) || return 1
+  [[ -n "$exe" && "$exe" != */* ]] || return 1
+  [[ -f "$app/Contents/MacOS/$exe" && ! -L "$app/Contents/MacOS/$exe" ]] || return 1
+  [[ -f "$app/$PRODUCT_REL" && ! -L "$app/$PRODUCT_REL" ]] || return 1
+  [[ -f "$app/Contents/_CodeSignature/CodeResources" ]]
+}
+
+jxa_plist() {
+  /usr/bin/osascript -l JavaScript - "$@" <<'JXA'
+ObjC.import('Foundation');
+
+function run(argv) {
+  const dict = $.NSDictionary.dictionaryWithContentsOfFile(argv[1]);
+  if (dict.isNil()) {
+    throw new Error('cannot read plist: ' + argv[1]);
+  }
+  const plist = ObjC.deepUnwrap(dict);
+  if (argv[0] === 'keys') {
+    return Object.keys(plist).sort().join('\n');
+  }
+  if (argv[0] === 'nested') {
+    // Nested code in a seal is a files2 entry that records a cdhash.
+    const files = plist.files2 || {};
+    return Object.keys(files).filter(function (key) {
+      const value = files[key];
+      return value !== null && typeof value === 'object'
+        && Object.prototype.hasOwnProperty.call(value, 'cdhash');
+    }).sort().join('\n');
+  }
+  throw new Error('unknown plist action: ' + argv[0]);
+}
+JXA
+}
+
+req_upstream() { printf 'identifier "%s" and (%s)' "$BUNDLE_ID" "$UPSTREAM_ANCHOR"; }
+req_ours() { printf 'identifier "%s" and certificate leaf = H"%s"' "$BUNDLE_ID" "$1"; }
+designated_requirement() {
+  printf 'designated => identifier "%s" and ((%s) or certificate leaf = H"%s")' \
+    "$BUNDLE_ID" "$UPSTREAM_ANCHOR" "$1"
+}
+designated_of() { /usr/bin/codesign -d -r- "$1" 2>&1 | /usr/bin/sed -n 's/^designated => //p'; }
+
+# cs_verify <path> <requirement> [codesign flags...]: 0 ok, 1 invalid, 3 requirement not met.
+cs_verify() {
+  local path="$1" req="$2"
+  shift 2
+  /usr/bin/codesign --verify --strict "$@" -R "=$req" "$path" >/dev/null 2>&1
+}
+
+# dr_current <app>: the app's designated requirement is exactly the one this worker would embed.
+dr_current() {
+  local want
+  want=$(/usr/bin/csreq -r "=$(designated_requirement "$CERT_SHA1")" -t 2>/dev/null \
+    | /usr/bin/sed -n 's/^designated => //p')
+  [[ -n "$want" && "$want" == "$(designated_of "$1")" ]]
+}
+
+# signer_class <app>: upstream, ours, previous or other. Resources are ignored here; the
+# seal is checked separately so a modified product.json still identifies its signer.
+signer_class() {
+  local app="$1" sha1
+  if cs_verify "$app" "$(req_upstream)" --ignore-resources; then
+    echo upstream
+    return 0
+  fi
+  if [[ -n "$CERT_SHA1" ]] && cs_verify "$app" "$(req_ours "$CERT_SHA1")" --ignore-resources; then
+    echo ours
+    return 0
+  fi
+  if [[ -f "$SIGNING_DIR/previous-certs" ]]; then
+    while IFS= read -r sha1; do
+      [[ "$sha1" =~ ^[0-9a-f]{40}$ ]] || continue
+      if cs_verify "$app" "$(req_ours "$sha1")" --ignore-resources; then
+        echo previous
+        return 0
+      fi
+    done < "$SIGNING_DIR/previous-certs"
+  fi
+  echo other
+}
+
+# seal_status <app>: intact, product-only (product.json modified, plus at most stray temp files
+# from the old in-place patcher) or broken. Any codesign output it does not recognise is broken.
+seal_status() {
+  local app="$1" out rc line product=0 extra=0 stray
+  out=$(/usr/bin/codesign --verify --deep --strict -vvvv "$app" 2>&1)
+  rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    echo intact
+    return 0
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      ""|--*) ;;
+      "$app: a sealed resource is missing or invalid") ;;
+      "file modified: $app/$PRODUCT_REL") product=1 ;;
+      "file added: $app/$PRODUCT_REL.endor."*|"file added: $app/$PRODUCT_REL.endor-restore."*)
+        stray=${line#file added: }
+        [[ -f "$stray" && ! -L "$stray" ]] || extra=1
+        ;;
+      *) extra=1 ;;
+    esac
+  done <<EOF
+$out
+EOF
+  if [[ "$rc" -eq 1 && "$product" -eq 1 && "$extra" -eq 0 ]]; then
+    echo product-only
+  else
+    echo broken
+  fi
+}
+
+# nested_all_upstream <app>: every nested code item the seal records is signed by Microsoft.
+nested_all_upstream() {
+  local app="$1" list rel
+  list=$(jxa_plist nested "$app/Contents/_CodeSignature/CodeResources" 2>/dev/null) || return 1
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    case "$rel" in
+      /*|..|../*|*/../*|*/..) return 1 ;;
+    esac
+    cs_verify "$app/Contents/$rel" "$UPSTREAM_ANCHOR" --deep || return 1
+  done <<EOF
+$list
+EOF
+}
+
+entitlements_extract() {
+  /usr/bin/codesign -d --entitlements - --xml "$1" > "$2" 2>/dev/null
+  if [[ ! -s "$2" ]]; then
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+      '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+      '<plist version="1.0"><dict/></plist>' > "$2"
+  fi
+}
+
+# entitlements_allowed <app>: the main executable's entitlements are all ones a self-signed app
+# may carry. Restricted entitlements need a provisioning profile, and a re-signed app with
+# them would not launch. Leaves the entitlements in $RUN_TMP/entitlements.plist.
+entitlements_allowed() {
+  local keys key
+  ENT_BAD=""
+  entitlements_extract "$1" "$RUN_TMP/entitlements.plist"
+  keys=$(jxa_plist keys "$RUN_TMP/entitlements.plist" 2>/dev/null) || {
+    ENT_BAD="unreadable"
+    return 1
+  }
+  while IFS= read -r key; do
+    case "$key" in
+      ""|com.apple.security.cs.*|com.apple.security.device.*) ;;
+      com.apple.security.personal-information.*|com.apple.security.automation.apple-events) ;;
+      *) ENT_BAD="$ENT_BAD $key" ;;
+    esac
+  done <<EOF
+$keys
+EOF
+  [[ -z "$ENT_BAD" ]]
+}
+
+has_quarantine() {
+  [[ -n "$(/usr/bin/find "$1" -xattrname com.apple.quarantine -print -quit 2>/dev/null)" ]]
+}
+
+# signature_options_current <app>: hardened runtime plus the library-validation exception.
+# Our main executable must load Microsoft-signed frameworks, which library validation forbids.
+# (Output is captured before matching: grep -q in a pipeline fails it under pipefail.)
+signature_options_current() {
+  local info
+  info=$(/usr/bin/codesign -dv "$1" 2>&1)
+  /usr/bin/grep -q '^CodeDirectory .*flags=0x[0-9a-f]*([^)]*runtime' <<< "$info" || return 1
+  entitlements_extract "$1" "$RUN_TMP/current-entitlements.plist"
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.cs.disable-library-validation' \
+    "$RUN_TMP/current-entitlements.plist" 2>/dev/null)" == "true" ]]
+}
+
+# ── Signing identity ──────────────────────────────────────────────────────────
+# A self-signed code-signing certificate, unique to this Mac, with a non-exportable key in the
+# System keychain: the only keychain codesign finds from a LaunchDaemon without touching
+# keychain search lists. Nothing trusts it; Gatekeeper doesn't assess non-quarantined apps
+# that are validly signed but not notarized.
+
+identity_load() {
+  CERT_SHA1=""
+  if [[ -s "$SIGNING_DIR/cert.sha1" ]]; then
+    CERT_SHA1=$(/usr/bin/tr -d '[:space:]' < "$SIGNING_DIR/cert.sha1")
+  fi
+  [[ "$CERT_SHA1" =~ ^[0-9a-f]{40}$ ]] || CERT_SHA1=""
+}
+
+cert_fresh() {
+  /usr/bin/openssl x509 -checkend $((RENEW_DAYS * 86400)) -noout \
+    -in "$SIGNING_DIR/cert.pem" >/dev/null 2>&1
+}
+
+identity_in_keychain() {
+  local ids
+  ids=$(/usr/bin/security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null)
+  /usr/bin/grep -qi -- "$1" <<< "$ids"
+}
+
+identity_usable() {
+  [[ -n "$CERT_SHA1" ]] && cert_fresh && identity_in_keychain "$CERT_SHA1"
+}
+
+# ── Classification ────────────────────────────────────────────────────────────
+
+# classify_bundle <app>: sets CLASS (A B C D D2 E), CLASS_WHY, CLASS_SIGNER and CLASS_VERSION.
+classify_bundle() {
+  local app="$1" id seal
+  CLASS=E
+  CLASS_WHY=""
+  CLASS_SIGNER=other
+  CLASS_VERSION=""
+  if ! bundle_complete "$app"; then
+    CLASS_WHY="the bundle is incomplete or contains an unexpected symlink"
+    return 0
+  fi
+  CLASS_VERSION=$(info_value "$app" CFBundleVersion)
+  id=$(info_value "$app" CFBundleIdentifier)
+  if [[ "$id" != "$BUNDLE_ID" ]]; then
+    CLASS_WHY="bundle identifier is \"$id\""
+    return 0
+  fi
+  if [[ -e "$app/Contents/embedded.provisionprofile" ]]; then
+    CLASS_WHY="the bundle has a provisioning profile"
+    return 0
+  fi
+  if ! json_validate "$app/$PRODUCT_REL"; then
+    CLASS_WHY="product.json is not valid JSON"
+    return 0
+  fi
+  CLASS_SIGNER=$(signer_class "$app")
+  seal=$(seal_status "$app")
+  case "$CLASS_SIGNER:$seal" in
+    upstream:intact) CLASS=A ;;
+    upstream:product-only)
+      if json_is_managed "$app/$PRODUCT_REL"; then
+        CLASS=D
+      else
+        CLASS_WHY="product.json was changed by something other than Endor"
+        return 0
+      fi
+      ;;
+    ours:intact|previous:intact) CLASS=C ;;
+    ours:product-only|previous:product-only) CLASS=D2 ;;
+    other:*)
+      CLASS_WHY="the app is not signed by Microsoft or by this Mac"
+      return 0
+      ;;
+    *)
+      CLASS_WHY="the signature seal is broken by more than product.json"
+      return 0
+      ;;
+  esac
+  if ! nested_all_upstream "$app"; then
+    CLASS=E
+    CLASS_WHY="nested code is not signed by Microsoft"
+    return 0
+  fi
+  if ! entitlements_allowed "$app"; then
+    CLASS=E
+    CLASS_WHY="unexpected entitlements:$ENT_BAD"
+    return 0
+  fi
+  if [[ "$CLASS" == C ]] && bundle_current "$app"; then
+    CLASS=B
+  fi
+}
+
+# bundle_current <app>: a C bundle needs nothing. Otherwise CLASS_WHY says what is stale.
+bundle_current() {
+  local app="$1"
+  if [[ "$CLASS_SIGNER" != ours ]] || ! identity_usable; then
+    CLASS_WHY="the signing certificate is being replaced"
+  elif ! json_is_desired "$app/$PRODUCT_REL"; then
+    CLASS_WHY="product.json does not have the current firewall URL"
+  elif ! dr_current "$app"; then
+    CLASS_WHY="the designated requirement is out of date"
+  elif ! signature_options_current "$app"; then
+    CLASS_WHY="the runtime flag or entitlements are out of date"
+  elif has_quarantine "$app"; then
+    CLASS_WHY="the app is quarantined"
+  else
+    CLASS_WHY=""
+    return 0
+  fi
+  return 1
+}
+
+describe_class() {
+  case "$1" in
+    A) echo "signed by Microsoft and unmodified" ;;
+    B) echo "firewalled and signed by this Mac" ;;
+    C) echo "signed by this Mac, needs updating: $CLASS_WHY" ;;
+    D) echo "signed by Microsoft with product.json patched in place (legacy)" ;;
+    D2) echo "signed by this Mac, but product.json changed since" ;;
+    E) echo "refused: $CLASS_WHY" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# ── Status ────────────────────────────────────────────────────────────────────
+
+darwin_status() {
+  echo "app        : $APP"
+  if app_present; then
+    classify_bundle "$APP"
+    echo "version    : ${CLASS_VERSION:-unknown}"
+    echo "state      : $CLASS ($(describe_class "$CLASS"))"
+    echo "signer     : $CLASS_SIGNER"
+  else
+    echo "state      : not installed"
+  fi
+  if app_running; then echo "running    : yes"; else echo "running    : no"; fi
+  if [[ -n "$CERT_SHA1" ]]; then
+    echo "identity   : $(cat "$SIGNING_DIR/cn" 2>/dev/null) ($CERT_SHA1)"
+    echo "expires    : $(/usr/bin/openssl x509 -enddate -noout -in "$SIGNING_DIR/cert.pem" 2>/dev/null | /usr/bin/sed 's/^notAfter=//')"
+    if identity_in_keychain "$CERT_SHA1"; then echo "keychain   : $KEYCHAIN"; else echo "keychain   : MISSING from $KEYCHAIN"; fi
+  else
+    echo "identity   : none yet"
+  fi
+  return 0
+}
+
+darwin_main() {
+  local name
+  export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+  export LC_ALL=C
+  APP_PATH="${ENDOR_VSCODE_APP:-/Applications/Visual Studio Code.app}"
+  BUNDLE_ID="${ENDOR_VSCODE_BUNDLE_ID:-com.microsoft.VSCode}"
+  UPSTREAM_ANCHOR="${ENDOR_VSCODE_UPSTREAM_ANCHOR:-$UPSTREAM_ANCHOR_DEFAULT}"
+  KEYCHAIN="${ENDOR_VSCODE_KEYCHAIN:-/Library/Keychains/System.keychain}"
+  RENEW_DAYS="${ENDOR_VSCODE_RENEW_DAYS:-30}"
+  STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-}"
+  [[ -n "$STATE_DIR" ]] || STATE_DIR=$(cd "$(dirname "$0")" && pwd -P)
+  SIGNING_DIR="$STATE_DIR/signing"
+
+  if ! is_uint "$RENEW_DAYS"; then
+    echo "[endor-vscode] ERROR: ENDOR_VSCODE_RENEW_DAYS must be a whole number" >&2
+    return 2
+  fi
+  for name in ENDOR_VSCODE_APP ENDOR_VSCODE_BUNDLE_ID ENDOR_VSCODE_UPSTREAM_ANCHOR \
+      ENDOR_VSCODE_KEYCHAIN; do
+    if [[ -n "${!name:-}" ]]; then
+      warn "$name is set; this is meant for tests only"
+    fi
+  done
+  if ! resolve_app; then
+    warn "cannot resolve $APP_PATH"
+    return 1
+  fi
+  RUN_TMP=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/endor-vscode.XXXXXX") || return 1
+  trap 'discard "$RUN_TMP"' EXIT
+  identity_load
+
+  case "$MODE" in
+    status) darwin_status ;;
+  esac
+}
+
+# On macOS, --status reads the app bundle itself. Patching still edits product.json in place.
+if [[ "$(uname -s)" == "Darwin" && -z "${ENDOR_VSCODE_PRODUCT_JSON:-}" && "$MODE" == status ]]; then
+  darwin_main "$@"
+  exit $?
+fi
+
 case "$MODE" in
   once) patch_all ;;
   restore) restore_all ;;
+  status) status_all ;;
 esac
 ENDOR_VSCODE_WORKER
 
