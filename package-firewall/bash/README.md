@@ -93,6 +93,8 @@ Everything else makes `generate.sh` exit non-zero rather than emit registry URLs
 
 `ENDOR_NAMESPACE` is checked separately, against a different rule: letters, digits, dots, hyphens and underscores — underscore is allowed here, and there is no scheme or port. Empty, `.` and `..` are rejected outright, because they would collapse the `out/<namespace>/` path. Names that merely look unusual, such as `.hidden`, `...` or `-rf`, are accepted: they stay inside `out/` and contain no character that could alter the generated scripts.
 
+`ENDOR_VSCODE_MACOS_DAEMON` is optional: `0` (the default) or `1`. On macOS, `endor-vscode.sh` and `endor-all.sh` configure VS Code only when it is `1`. Read [`endor-vscode.sh`](#endor-vscodesh) before turning it on. It has no effect on Linux, and any other value makes `generate.sh` exit non-zero.
+
 Re-running `generate.sh` overwrites the same `out/<namespace>/` directory — no accumulation of stale directories.
 
 ---
@@ -286,7 +288,9 @@ VS Code's direct upstream fallback.
 
 The script applies immediately and installs drift remediation:
 
-- **macOS**: `/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist` watches
+- **macOS**, only with `ENDOR_VSCODE_MACOS_DAEMON=1` (see
+  [macOS is opt-in](#macos-is-opt-in)):
+  `/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist` watches
   `/Applications` and invokes a worker after VS Code updater replacements.
 - **Linux**: `endor-vscode-firewall.path` watches `/usr/share/code` and
   `/usr/lib/code`; its oneshot systemd service reapplies the patch.
@@ -303,8 +307,19 @@ Supported scope: Microsoft VS Code Stable at
 `/usr/lib/code/resources/app/product.json`. Insiders, VSCodium, Code OSS,
 Snap, Flatpak, and arbitrary portable/tarball installs are excluded.
 
-> On macOS, changing a bundled resource invalidates the app's original
-> code-signature seal. The script does not ad-hoc re-sign VS Code.
+#### macOS is opt-in
+
+On macOS the script changes VS Code only if it was generated with
+`ENDOR_VSCODE_MACOS_DAEMON=1`. Without that flag, `endor-vscode.sh` and the VS Code
+part of `endor-all.sh` leave VS Code alone and print how to turn it on. If a daemon
+from an earlier version of this script is still installed, the script leaves it
+running, warns and exits non-zero. To clear the warning, regenerate with the flag
+to keep the daemon, or run `endor-remove.sh` to remove it.
+
+Weigh the costs before turning it on. Changing a bundled resource invalidates
+the app's code-signature seal, and Gatekeeper then reports a VS Code that has not
+been launched since its last update as damaged. The script does not ad-hoc
+re-sign VS Code.
 
 ---
 
