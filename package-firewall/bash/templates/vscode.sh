@@ -383,7 +383,7 @@ status_all() {
 #   4. renames the live app aside and the signed clone into place. App Management blocks
 #      writes inside a launched Microsoft app, but not renaming the whole bundle.
 # The designated requirement accepts Microsoft's certificate or this Mac's, so ShipIt (VS Code's
-# updater) keeps accepting Microsoft releases.
+# updater) keeps accepting Microsoft releases and the staged updates this worker pre-signs.
 #
 # States (classify_bundle):
 #   A   Microsoft-signed, seal intact                       patch, sign, swap; keep the original
@@ -423,12 +423,39 @@ note_once() {
 is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
 info_value() { /usr/bin/plutil -extract "$2" raw -o - "$1/Contents/Info.plist" 2>/dev/null; }
+plist_raw() { /usr/bin/plutil -extract "$2" raw -o - "$1" 2>/dev/null; }
 
 valid_version() { [[ "$1" =~ ^[0-9][0-9A-Za-z.+-]*$ ]]; }
+
+# version_gt <a> <b>: true when the dotted numeric version a is newer than b.
+version_gt() {
+  local a="$1" b="$2" x y
+  while [[ -n "$a" || -n "$b" ]]; do
+    x=${a%%.*}
+    y=${b%%.*}
+    if [[ "$a" == *.* ]]; then a=${a#*.}; else a=""; fi
+    if [[ "$b" == *.* ]]; then b=${b#*.}; else b=""; fi
+    x=${x:-0}
+    y=${y:-0}
+    is_uint "$x" && is_uint "$y" || return 1
+    (( 10#$x > 10#$y )) && return 0
+    (( 10#$x < 10#$y )) && return 1
+  done
+  return 1
+}
 
 discard() {
   [[ -n "$1" && "$1" != "/" ]] && /bin/rm -rf "$1"
   return 0
+}
+
+# in_dir <dir> <command...>: run a command from inside dir after checking that its physical
+# path is dir itself. Used in users' ShipIt caches, so swapping a path component for a
+# symlink can't redirect root's renames.
+in_dir() {
+  local dir="$1"
+  shift
+  ( cd "$dir" 2>/dev/null && [[ "$(pwd -P)" == "$dir" ]] && "$@" )
 }
 
 # move_into_place <src> <dest>: rename, but never into an existing directory.
@@ -1039,11 +1066,17 @@ pristine_ok() {
     && cs_verify "$1" "$(req_upstream)" --deep
 }
 
-# prune_pristine: keep the original only for the installed version.
+# prune_pristine: keep originals only for the installed version and pending updates.
 prune_pristine() {
-  local keep d v
+  local keep d v list owner upd
   [[ "$DRY_RUN" != "1" && -d "$STATE_DIR/pristine" ]] || return 0
   keep=" $(info_value "$APP" CFBundleVersion) "
+  list=$(list_staged_updates)
+  while IFS=$'\t' read -r owner upd <&3; do
+    [[ -n "$upd" ]] && keep="$keep$(info_value "$upd" CFBundleVersion) "
+  done 3<<EOF
+$list
+EOF
   for d in "$STATE_DIR/pristine"/*; do
     [[ -d "$d" ]] || continue
     v=$(basename "$d")
@@ -1183,7 +1216,207 @@ migrate_live() {
   return 0
 }
 
+# ── Staged updates ────────────────────────────────────────────────────────────
+# Squirrel unpacks each update into ~/Library/Caches/<bundle id>.ShipIt/update.XXXX/, records it
+# in ShipItState.plist and installs it once VS Code quits, relaunching about 1.7 s later: too
+# soon to patch afterwards. Once the live app is ours, ShipIt checks updates against our
+# designated requirement, so a copy patched and signed by this Mac installs already firewalled.
+
+# file_url_path <file:///...>: percent-decoded path without a trailing slash.
+file_url_path() {
+  local url="$1"
+  case "$url" in
+    file:///*) ;;
+    *) return 1 ;;
+  esac
+  url=${url#file://}
+  case "$url" in
+    *%*) url=$(printf '%b' "${url//%/\\x}") ;;
+  esac
+  printf '%s\n' "${url%/}"
+}
+
+# list_staged_updates: "<owner uid>\t<update app>" for each user's pending update of this app.
+list_staged_updates() {
+  local dir state owner target upd base
+  for dir in "$USERS_DIR"/*/Library/Caches/"$BUNDLE_ID".ShipIt; do
+    [[ -d "$dir" && ! -L "$dir" ]] || continue
+    dir=$(cd "$dir" 2>/dev/null && pwd -P) || continue
+    state="$dir/ShipItState.plist"
+    [[ -f "$state" && ! -L "$state" ]] || continue
+    owner=$(/usr/bin/stat -f %u "$dir")
+    [[ "$(/usr/bin/stat -f %u "$state")" == "$owner" ]] || continue
+    [[ "$(plist_raw "$state" bundleIdentifier)" == "$BUNDLE_ID" ]] || continue
+    target=$(file_url_path "$(plist_raw "$state" targetBundleURL)") || continue
+    [[ "$target" == "$APP" ]] || continue
+    upd=$(file_url_path "$(plist_raw "$state" updateBundleURL)") || continue
+    case "$upd" in
+      */../*|*/./*|*/..|*/.) continue ;;
+      *.app) ;;
+      *) continue ;;
+    esac
+    base=$(dirname "$upd")
+    [[ "$(dirname "$base")" == "$dir" ]] || continue
+    case "$(basename "$base")" in
+      update.*) ;;
+      *) continue ;;
+    esac
+    [[ -d "$base" && ! -L "$base" ]] || continue
+    [[ "$(/usr/bin/stat -f %u "$base")" == "$owner" ]] || continue
+    printf '%s\t%s\n' "$owner" "$upd"
+  done
+}
+
+staged_seen() {
+  [[ -f "$STATE_DIR/staged-seen" ]] && /usr/bin/grep -qxF -- "$1" "$STATE_DIR/staged-seen"
+}
+
+staged_mark() {
+  [[ "$DRY_RUN" == "1" ]] && return 0
+  {
+    /usr/bin/tail -n 19 "$STATE_DIR/staged-seen" 2>/dev/null
+    printf '%s\n' "$1"
+  } > "$STATE_DIR/staged-seen.tmp" && /bin/mv -f "$STATE_DIR/staged-seen.tmp" "$STATE_DIR/staged-seen"
+}
+
+# release_hold <update dir> <name>: put a held update back where ShipIt expects it.
+release_hold() {
+  in_dir "$1" move_into_place "$2.endor-hold" "$2"
+}
+
+process_staged() {
+  local list owner upd status=0
+  list=$(list_staged_updates)
+  [[ -n "$list" ]] || return 0
+  while IFS=$'\t' read -r owner upd <&3; do
+    [[ -n "$upd" ]] || continue
+    prepatch_staged "$owner" "$upd" || status=1
+  done 3<<EOF
+$list
+EOF
+  return "$status"
+}
+
+prepatch_staged() {
+  local upd="$2" updir name fp version live_version live_dr clone
+  updir=$(dirname "$upd")
+  name=$(basename "$upd")
+  if [[ "$DRY_RUN" != "1" && ! -e "$upd" && -d "$upd.endor-hold" ]] && release_hold "$updir" "$name"; then
+    log "released an update held by an interrupted run: $upd"
+  fi
+  [[ "$LIVE_CLASS" == B && -d "$upd" && ! -L "$upd" ]] || return 0
+  bundle_complete "$upd" || return 0
+  fp=$(bundle_fingerprint "$upd")
+  staged_seen "$fp" && return 0
+  # ShipIt waits for VS Code to quit; with VS Code gone it may be installing right now.
+  if ! app_running; then
+    note_once "an update is staged at $upd; it is prepared while VS Code is running"
+    return 0
+  fi
+  version=$(info_value "$upd" CFBundleVersion)
+  live_version=$(info_value "$APP" CFBundleVersion)
+  if [[ "$(info_value "$upd" CFBundleIdentifier)" != "$BUNDLE_ID" ]] || ! version_gt "$version" "$live_version"; then
+    log "leaving the staged update at $upd alone: not a newer VS Code (staged $version, installed $live_version)"
+    staged_mark "$fp"
+    return 0
+  fi
+  live_dr=$(designated_of "$APP")
+  if [[ "$(signer_class "$upd")" == ours ]] && cs_verify "$upd" "$live_dr" --deep; then
+    staged_mark "$fp"
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "1" ]]; then
+    dry "action : HOLD, PATCH and SIGN the staged VS Code $version update"
+    dry "update : $upd"
+    return 0
+  fi
+  ensure_signing_identity || return 1
+
+  # Hold the update under another name while it is prepared. If VS Code restarts meanwhile,
+  # ShipIt can't find it, retries and then relaunches the installed, firewalled app.
+  if ! in_dir "$updir" /bin/mv "$name" "$name.endor-hold"; then
+    warn "could not hold the staged update at $upd"
+    return 1
+  fi
+  clone="$STATE_DIR/stage/$name"
+  if build_staged_copy "$updir" "$name" "$clone" "$live_dr" \
+      && in_dir "$updir" move_into_place "$clone" "$name"; then
+    in_dir "$updir" retain_pristine "$name.endor-hold" "$version" \
+      || warn "could not keep Microsoft's original VS Code $version"
+    staged_mark "$(bundle_fingerprint "$upd")"
+    log "prepared the staged VS Code $version update: patched and signed by this Mac, so it installs already firewalled"
+    return 0
+  fi
+  discard "$clone"
+  release_hold "$updir" "$name" || warn "could not release the held update at $upd"
+  # Don't retry this update every minute; once installed, the live app is migrated as usual.
+  staged_mark "$fp"
+  return 1
+}
+
+# build_staged_copy <update dir> <name> <clone> <live DR>
+build_staged_copy() {
+  fresh_stage || return 1
+  if ! in_dir "$1" stage_clone "$2.endor-hold" "$3"; then
+    warn "could not copy the staged update $1/$2"
+    return 1
+  fi
+  classify_bundle "$3"
+  if [[ "$CLASS" != A ]]; then
+    warn "refusing the staged update $1/$2: $(describe_class "$CLASS")"
+    return 1
+  fi
+  if ! patch_product_json_in "$3" patch; then
+    warn "could not patch product.json in the staged update $1/$2"
+    return 1
+  fi
+  sign_bundle "$3" && verify_signed "$3" json_is_desired || return 1
+  # ShipIt's own check: the update must satisfy the installed app's designated requirement.
+  if ! cs_verify "$3" "$4" --deep; then
+    warn "the prepared update would not satisfy the installed app's designated requirement"
+    return 1
+  fi
+}
+
 # ── Restore, purge, status ────────────────────────────────────────────────────
+
+restore_staged() {
+  local list owner upd updir name v p status=0
+  list=$(list_staged_updates)
+  while IFS=$'\t' read -r owner upd <&3; do
+    [[ -n "$upd" ]] || continue
+    updir=$(dirname "$upd")
+    name=$(basename "$upd")
+    if [[ "$DRY_RUN" != "1" && ! -e "$upd" && -d "$upd.endor-hold" ]]; then
+      release_hold "$updir" "$name"
+    fi
+    [[ -d "$upd" && ! -L "$upd" ]] || continue
+    case "$(signer_class "$upd")" in
+      ours|previous) ;;
+      *) continue ;;
+    esac
+    v=$(info_value "$upd" CFBundleVersion)
+    p="$STATE_DIR/pristine/$v/$PRISTINE_NAME"
+    if [[ "$DRY_RUN" == "1" ]]; then
+      dry "action : RESTORE Microsoft's staged VS Code $v update at $upd"
+      continue
+    fi
+    if ! in_dir "$updir" /bin/mv "$name" "$name.endor-restore"; then
+      warn "could not move the prepared update at $upd aside"
+      status=1
+      continue
+    fi
+    if valid_version "$v" && pristine_ok "$p" "$v" && in_dir "$updir" move_into_place "$p" "$name"; then
+      log "restored Microsoft's staged VS Code $v update at $upd"
+    else
+      log "removed the prepared VS Code $v update at $upd; VS Code downloads it again"
+    fi
+    in_dir "$updir" /bin/rm -rf "$name.endor-restore"
+  done 3<<EOF
+$list
+EOF
+  return "$status"
+}
 
 restore_live() {
   local p out clone
@@ -1278,11 +1511,12 @@ darwin_purge() {
   discard "$STATE_DIR/stage"
   discard "$STATE_DIR/outgoing"
   discard "$STATE_DIR/pristine"
-  /bin/rm -f "$STATE_DIR/last-good" "$STATE_DIR/last-refused" "$STATE_DIR/last-note"
+  /bin/rm -f "$STATE_DIR/last-good" "$STATE_DIR/last-refused" "$STATE_DIR/last-note" \
+    "$STATE_DIR/staged-seen"
 }
 
 darwin_status() {
-  local d
+  local list owner upd d
   echo "app        : $APP"
   if app_present; then
     classify_bundle "$APP"
@@ -1303,6 +1537,17 @@ darwin_status() {
   for d in "$STATE_DIR/pristine"/*; do
     [[ -d "$d" ]] && echo "original   : VS Code $(basename "$d") kept for removal"
   done
+  list=$(list_staged_updates)
+  while IFS=$'\t' read -r owner upd <&3; do
+    [[ -n "$upd" ]] || continue
+    if [[ -d "$upd" ]]; then
+      echo "staged     : VS Code $(info_value "$upd" CFBundleVersion), signer $(signer_class "$upd"): $upd"
+    elif [[ -d "$upd.endor-hold" ]]; then
+      echo "staged     : held: $upd"
+    fi
+  done 3<<EOF
+$list
+EOF
   if [[ -f "$STATE_DIR/last-refused" ]]; then
     echo "refused    : $(/bin/date -r "$(cut -d' ' -f1 "$STATE_DIR/last-refused")" 2>/dev/null)"
   fi
@@ -1327,6 +1572,7 @@ darwin_main() {
   BUNDLE_ID="${ENDOR_VSCODE_BUNDLE_ID:-com.microsoft.VSCode}"
   UPSTREAM_ANCHOR="${ENDOR_VSCODE_UPSTREAM_ANCHOR:-$UPSTREAM_ANCHOR_DEFAULT}"
   KEYCHAIN="${ENDOR_VSCODE_KEYCHAIN:-/Library/Keychains/System.keychain}"
+  USERS_DIR="${ENDOR_VSCODE_USERS_DIR:-/Users}"
   LOG_FILE="${ENDOR_VSCODE_LOG:-/Library/Logs/Endor Labs/vscode-firewall.log}"
   LOCK_WAIT="${ENDOR_VSCODE_LOCK_WAIT:-120}"
   SETTLE_SECONDS="${ENDOR_VSCODE_SETTLE_SECONDS:-2}"
@@ -1360,7 +1606,7 @@ darwin_main() {
   fi
 
   for name in ENDOR_VSCODE_APP ENDOR_VSCODE_BUNDLE_ID ENDOR_VSCODE_UPSTREAM_ANCHOR \
-      ENDOR_VSCODE_KEYCHAIN; do
+      ENDOR_VSCODE_KEYCHAIN ENDOR_VSCODE_USERS_DIR; do
     if [[ -n "${!name:-}" ]]; then
       warn "$name is set; this is meant for tests only"
     fi
@@ -1386,9 +1632,11 @@ darwin_main() {
     once)
       [[ "$DRY_RUN" == "1" ]] || rotate_log
       process_live || status=1
+      process_staged || status=1
       [[ "$LIVE_CLASS" == B ]] && prune_pristine
       ;;
     restore)
+      restore_staged || status=1
       restore_live || status=1
       ;;
     purge) darwin_purge || status=1 ;;
@@ -1493,6 +1741,18 @@ else
         mkdir -p "$_VSCODE_LOG_DIR"
         touch "$_vscode_log"
         chmod 600 "$_vscode_log"
+        # Watch /Applications for updater replacements and each user's ShipIt cache for staged
+        # updates. A user who has never updated VS Code has no ShipIt cache yet, so watch their
+        # Caches folder instead; StartInterval covers anything the watches miss.
+        _vscode_watch="    <string>/Applications</string>"
+        for _vscode_caches in /Users/*/Library/Caches; do
+          [[ -d "$_vscode_caches" && ! -L "$_vscode_caches" ]] || continue
+          if [[ -d "$_vscode_caches/com.microsoft.VSCode.ShipIt" ]]; then
+            _vscode_caches="$_vscode_caches/com.microsoft.VSCode.ShipIt"
+          fi
+          _vscode_watch="$_vscode_watch
+    <string>$(_vscode_xml "$_vscode_caches")</string>"
+        done
         cat > "$_vscode_plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1510,7 +1770,7 @@ else
   <true/>
   <key>WatchPaths</key>
   <array>
-    <string>/Applications</string>
+$_vscode_watch
   </array>
   <key>StartInterval</key>
   <integer>60</integer>
@@ -1571,5 +1831,5 @@ fi
 [[ "$_vscode_skip" == "1" ]] || echo "[endor] ✓ VS Code extension firewall done"
 unset -f _vscode_run_worker _vscode_xml
 unset _vscode_os _VSCODE_STATE_DIR _VSCODE_WORKER_PATH _VSCODE_WORKER_CONTENT _VSCODE_LOG_DIR
-unset _vscode_tmp_worker _vscode_plist _vscode_service _vscode_path _vscode_log
-unset _VSCODE_MACOS_DAEMON _vscode_skip
+unset _vscode_tmp_worker _vscode_plist _vscode_service _vscode_path _vscode_log _vscode_watch
+unset _vscode_caches _VSCODE_MACOS_DAEMON _vscode_skip

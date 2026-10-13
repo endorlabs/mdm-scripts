@@ -79,6 +79,7 @@ export ENDOR_VSCODE_BUNDLE_ID="$BUNDLE_ID"
 export ENDOR_VSCODE_UPSTREAM_ANCHOR="certificate leaf = H\"$UP_SHA1\""
 export ENDOR_VSCODE_KEYCHAIN="$KC"
 export ENDOR_VSCODE_KEYCHAIN_PASSWORD="$KC_PASS"
+export ENDOR_VSCODE_USERS_DIR="$TMP_DIR/users"
 export ENDOR_VSCODE_LOG="$TMP_DIR/worker.log"
 export ENDOR_VSCODE_SETTLE_SECONDS=0
 export ENDOR_VSCODE_SETTLE_TIMEOUT=0
@@ -86,7 +87,7 @@ export ENDOR_VSCODE_LOCK_WAIT=60
 export ENDOR_VSCODE_SKIP_WATCHER=1
 
 APP="$TMP_DIR/apps/Visual Studio Code.app"
-mkdir -p "$TMP_DIR/apps"
+mkdir -p "$TMP_DIR/apps" "$TMP_DIR/users"
 
 firewall_url() {
   local token
@@ -231,6 +232,19 @@ stop_fakes() {
     wait "$pid" 2>/dev/null || true
   done
   BACKGROUND=()
+}
+
+url_encode_path() { printf 'file://%s/' "$(printf '%s' "$1" | sed 's/%/%25/g; s/ /%20/g')"; }
+
+# stage_update <user> <version> [signer]: a downloaded update as Squirrel leaves it.
+stage_update() {
+  local cache="$TMP_DIR/users/$1/Library/Caches/$BUNDLE_ID.ShipIt"
+  rm -rf "$cache"
+  mkdir -p "$cache/update.Ab12Cd3"
+  STAGED="$cache/update.Ab12Cd3/Visual Studio Code.app"
+  build_app "$STAGED" "$2" "${3:-$UP_SHA1}"
+  printf '{"bundleIdentifier":"%s","launchAfterInstallation":true,"targetBundleURL":"%s","updateBundleURL":"%s","useUpdateBundleName":false}\n' \
+    "$BUNDLE_ID" "$(url_encode_path "$APP")" "$(url_encode_path "$STAGED")" > "$cache/ShipItState.plist"
 }
 
 echo "test: without ENDOR_VSCODE_MACOS_DAEMON=1 the installer leaves the app alone"
@@ -397,5 +411,50 @@ install "$state" --dry-run || fail "dry-run failed"
 grep -q 'SIGN with this Mac' "$TMP_DIR/worker.out" || fail "dry-run did not report the signing action"
 [[ "$(tree_digest "$APP")" == "$digest" ]] || fail "dry-run modified the app"
 [[ ! -e "$state" ]] || fail "dry-run created state"
+
+echo "test: a staged update is pre-patched only while VS Code runs, and restored on removal"
+state="$TMP_DIR/state-staged"
+build_app "$APP" 1.0.0
+install "$state" || fail "installer failed"
+stage_update alice 1.1.0
+staged_original=$(tree_digest "$STAGED")
+run_worker "$state" --once || fail "run with a staged update failed"
+[[ "$(tree_digest "$STAGED")" == "$staged_original" ]] || fail "the update was touched while VS Code was not running"
+fake_process "$APP/Contents/MacOS/Code"
+run_worker "$state" --once || fail "pre-patch run failed"
+assert_firewalled "$STAGED" "$state"
+codesign --verify --deep --strict -R "=$(codesign -d -r- "$APP" 2>&1 | sed -n 's/^designated => //p')" "$STAGED" \
+  >/dev/null 2>&1 || fail "the prepared update does not satisfy the installed app's requirement"
+[[ ! -e "$STAGED.endor-hold" ]] || fail "the held update was left behind"
+[[ -d "$state/pristine/1.1.0/VSCode.bundle-pristine" && -d "$state/pristine/1.0.0/VSCode.bundle-pristine" ]] \
+  || fail "the originals of the installed and staged versions were not both kept"
+before=$(inode "$STAGED")
+run_worker "$state" --once || fail "repeat run failed"
+[[ "$(inode "$STAGED")" == "$before" ]] || fail "a prepared update was prepared again"
+run_worker "$state" --restore || fail "restore with a prepared update failed"
+[[ "$(tree_digest "$STAGED")" == "$staged_original" ]] || fail "the staged update was not restored to upstream's"
+run_worker "$state" --purge || fail "purge failed"
+stop_fakes
+
+echo "test: staged downgrades, attacker builds, and updates for an app that isn't ours are left alone"
+state="$TMP_DIR/state-staged-refuse"
+build_app "$APP" 1.0.0
+install "$state" || fail "installer failed"
+fake_process "$APP/Contents/MacOS/Code"
+for spec in "0.9.0 $UP_SHA1" "1.0.0 $UP_SHA1" "1.2.0 $BAD_SHA1"; do
+  # shellcheck disable=SC2086
+  stage_update bob $spec
+  digest=$(tree_digest "$STAGED")
+  run_worker "$state" --once || true
+  [[ "$(tree_digest "$STAGED")" == "$digest" && ! -e "$STAGED.endor-hold" ]] \
+    || fail "staged update ($spec) was modified"
+done
+build_app "$APP" 1.0.0 "$BAD_SHA1"
+stage_update bob 1.1.0
+digest=$(tree_digest "$STAGED")
+run_worker "$state" --once || true
+[[ "$(tree_digest "$STAGED")" == "$digest" ]] || fail "an update for an app that isn't ours was modified"
+stop_fakes
+run_worker "$state" --purge || fail "purge failed"
 
 echo "VS Code code-signing tests passed"
