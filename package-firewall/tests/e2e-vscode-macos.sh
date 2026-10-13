@@ -87,18 +87,20 @@ pass() { printf 'PASS: %s\n' "$1"; summary "- ✅ $1"; }
 info() { printf 'INFO: %s\n' "$1"; summary "- ℹ️ $1"; }
 fail() { printf 'FAIL: %s: %s\n' "$STEP" "$1" >&2; summary "- ❌ $1"; exit 1; }
 
-# wait_until <seconds> <command...>: poll every 2s until the command succeeds; sets WAITED.
+# wait_until <seconds> <command...>: poll every 2s until the command succeeds; sets WAITED to
+# the seconds it took. Checks can be slow (a deep codesign check of the universal app takes about
+# a minute on an Intel runner), so the limit is wall-clock time.
 wait_until() {
-  local limit="$1"
+  local limit="$1" start=$SECONDS
   shift
-  WAITED=0
   until "$@"; do
+    WAITED=$((SECONDS - start))
     if (( WAITED >= limit )); then
       return 1
     fi
     sleep 2
-    WAITED=$((WAITED + 2))
   done
+  WAITED=$((SECONDS - start))
 }
 
 # ── VS Code ───────────────────────────────────────────────────────────────────
@@ -107,7 +109,7 @@ info_value() { /usr/bin/plutil -extract "$2" raw -o - "$1/Contents/Info.plist" 2
 cs_ok() { /usr/bin/codesign --verify --deep --strict -R "=$2" "$1" >/dev/null 2>&1; }
 cdhash() { /usr/bin/codesign -dvvv "$1" 2>&1 | sed -n 's/^CDHash=//p'; }
 designated_of() { /usr/bin/codesign -d -r- "$1" 2>&1 | sed -n 's/^designated => //p'; }
-lower() { printf '%s' "$1" | tr 'A-F' 'a-f'; }
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 is_firewalled() {
   local url
@@ -186,7 +188,7 @@ extension_host_started() {
 # check_launch <what>: the VS Code just launched runs a window and an extension host and stays up.
 check_launch() {
   local procs
-  wait_until 120 extension_host_started || fail "$1: the extension host did not start within 120s"
+  wait_until 180 extension_host_started || fail "$1: the extension host did not start within 180s"
   sleep 5
   vscode_running || fail "$1: VS Code quit right after starting"
   procs=$(/bin/ps -axo comm=)
@@ -260,7 +262,9 @@ stage_update() {
   mv "$SHIPIT_DIR/ShipItState.plist.tmp" "$SHIPIT_DIR/ShipItState.plist"
 }
 
-staged_prepared() { [[ -d "$STAGED" ]] && cs_ok "$STAGED" "$OURS_REQ" && is_firewalled "$STAGED"; }
+# signed_by_us <app>: quick, without hashing the bundle; check_signed then verifies it fully.
+signed_by_us() { [[ "$(lower "$(designated_of "$1")")" == *"h\"$SHA1\""* ]]; }
+staged_prepared() { [[ -d "$STAGED" ]] && signed_by_us "$STAGED" && is_firewalled "$STAGED"; }
 
 # start_shipit: run the installed app's ShipIt as a launchd job in the user's GUI session, the
 # way Squirrel does. It installs the staged update once VS Code quits.
@@ -389,8 +393,9 @@ check_launch "The re-signed VS Code $OLD"
 
 step "Stage VS Code $NEW as a downloaded update"
 stage_update
-wait_until 240 staged_prepared || fail "the daemon did not prepare the staged update within 240s"
+wait_until 900 staged_prepared || fail "the daemon did not prepare the staged update within 900s"
 pass "the daemon patched and signed the staged update within ${WAITED}s"
+check_signed "$STAGED" "The prepared update"
 cs_ok "$STAGED" "$(designated_of "$APP")" \
   || fail "the prepared update fails the installed app's designated requirement, so ShipIt would reject it"
 pass "the prepared update meets the installed app's designated requirement, which is ShipIt's check"
@@ -400,14 +405,14 @@ pass "Microsoft's original VS Code $NEW is kept for removal"
 step "Restart to Update: ShipIt installs VS Code $NEW"
 start_shipit
 quit_vscode
-wait_until 240 shipit_finished || fail "ShipIt did not finish within 240s"
+wait_until 900 shipit_finished || fail "ShipIt did not finish within 900s"
 grep -q 'Installation completed successfully' "$WORK/shipit.log" \
   || fail "ShipIt did not install the update: $(grep -iE 'error|abort' "$WORK/shipit.log" | tail -n 3)"
 stop_shipit
 [[ "$(info_value "$APP" CFBundleVersion)" == "$NEW_BV" ]] || fail "VS Code $NEW is not installed after ShipIt ran"
 pass "ShipIt installed the prepared VS Code $NEW"
 check_signed "$APP" "The updated VS Code $NEW"
-wait_until 120 live_is B "$NEW_BV" || fail "the worker does not report state B after the update"
+wait_until 600 live_is B "$NEW_BV" || fail "the worker does not report state B after the update"
 pass "the worker reports state B for VS Code $NEW"
 launch_vscode
 check_launch "The updated VS Code $NEW"
@@ -417,8 +422,9 @@ step "Replace the app with a fresh Microsoft copy of VS Code $NEW"
 sudo /bin/mv "$APP" "$WORK/replaced.app" || fail "could not move the installed app away"
 /usr/bin/ditto "$WORK/ms-new.app" "$WORK/ms-new-copy.app"
 sudo /bin/mv "$WORK/ms-new-copy.app" "$APP" || fail "could not put a fresh copy in place"
-wait_until 240 live_is B "$NEW_BV" || fail "the daemon did not migrate the fresh copy within 240s"
+wait_until 900 signed_by_us "$APP" || fail "the daemon did not migrate the fresh copy within 900s"
 pass "the daemon migrated the fresh copy within ${WAITED}s"
+wait_until 600 live_is B "$NEW_BV" || fail "the worker does not report state B after migrating the fresh copy"
 check_signed "$APP" "The migrated VS Code $NEW"
 sudo rm -rf "$WORK/replaced.app"
 
