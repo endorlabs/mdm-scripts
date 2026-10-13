@@ -374,6 +374,12 @@ tail -n 50 "/Library/Logs/Endor Labs/vscode-firewall.log"
 codesign -dvv "/Applications/Visual Studio Code.app"
 ```
 
+`endor-remove.sh` swaps Microsoft's original app back in (byte-identical and
+notarized) and deletes the signing identity. If there is no original, for example
+on a Mac first patched in place by an earlier version of this script, it restores
+`product.json` in a re-signed copy, and VS Code's next update replaces that with
+Microsoft's build.
+
 ---
 
 ## Customising

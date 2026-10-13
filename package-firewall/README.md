@@ -91,7 +91,7 @@ managed properties after VS Code updates:
 Run the script as root/SYSTEM. Restart VS Code after the first deployment if it
 was already open. `endor-remove.*` stops remediation and restores the stable
 default values for the two managed gallery properties without reverting other
-`product.json` changes.
+`product.json` changes. On macOS it swaps Microsoft's original app back in.
 
 Supported scope is Microsoft VS Code Stable installed natively in its standard
 system locations (including Windows User Installer paths). Insiders, VSCodium,

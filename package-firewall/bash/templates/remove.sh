@@ -22,7 +22,8 @@
 #     ~/.nuget/NuGet/NuGet.Config  (sections kept; nuget.org restored if no source is left)
 #
 #   VS Code:
-#     Restores default gallery properties and removes update remediation
+#     Restores default gallery properties and removes update remediation. On macOS this
+#     swaps Microsoft's original app back in and deletes the per-device signing identity.
 #
 #   Shell profiles (env.sh source line):
 #     ~/.zshrc
@@ -191,16 +192,33 @@ case "$_vscode_remove_os" in
     ;;
 esac
 
+# On macOS the worker swaps Microsoft's original app back in (or restores product.json in a
+# re-signed copy), then --purge deletes its signing identity from the System keychain.
+_vscode_run_worker() {
+  if [[ "$_vscode_remove_os" == "Darwin" ]]; then
+    ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" ENDOR_VSCODE_LOCK_WAIT=600 \
+      /bin/bash "$_VSCODE_STATE_DIR/worker.sh" "$@"
+  else
+    ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" "$_VSCODE_STATE_DIR/worker.sh" "$@"
+  fi
+}
+
 _vscode_restore_ok=1
 if [[ -n "$_VSCODE_STATE_DIR" && -x "$_VSCODE_STATE_DIR/worker.sh" ]]; then
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" \
-      "$_VSCODE_STATE_DIR/worker.sh" --restore --dry-run || _vscode_restore_ok=0
+    _vscode_run_worker --restore --dry-run || _vscode_restore_ok=0
   else
-    ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" \
-      "$_VSCODE_STATE_DIR/worker.sh" --restore || _vscode_restore_ok=0
+    _vscode_run_worker --restore || _vscode_restore_ok=0
+    # Workers from before --purge existed never created a signing identity.
+    if [[ "$_vscode_restore_ok" == "1" ]] && grep -q -- '--purge)' "$_VSCODE_STATE_DIR/worker.sh"; then
+      _vscode_run_worker --purge || _vscode_restore_ok=0
+    fi
     if [[ "$_vscode_restore_ok" == "1" ]]; then
       rm -rf "$_VSCODE_STATE_DIR"
+      if [[ "$_vscode_remove_os" == "Darwin" ]]; then
+        rm -f "/Library/Logs/Endor Labs/vscode-firewall.log" "/Library/Logs/Endor Labs/vscode-firewall.log.1"
+        rmdir "/Library/Logs/Endor Labs" 2>/dev/null || true
+      fi
     fi
   fi
 else
@@ -211,6 +229,7 @@ if [[ "$_vscode_restore_ok" != "1" ]]; then
   echo "[endor-remove] WARNING: VS Code restoration was incomplete; managed state was retained." >&2
   _ENDOR_WARNED=1
 fi
+unset -f _vscode_run_worker
 unset _vscode_remove_os _VSCODE_STATE_DIR _vscode_plist _vscode_restore_ok
 
 echo ""

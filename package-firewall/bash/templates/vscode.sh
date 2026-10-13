@@ -22,6 +22,7 @@ for arg in "$@"; do
     --once) MODE="once" ;;
     --restore) MODE="restore" ;;
     --status) MODE="status" ;;
+    --purge) MODE="purge" ;;
     --dry-run) DRY_RUN=1 ;;
     *) echo "[endor-vscode] ERROR: unknown argument: $arg" >&2; exit 2 ;;
   esac
@@ -1031,6 +1032,13 @@ retain_pristine() {
   /bin/mv "$dest.new" "$dest"
 }
 
+pristine_ok() {
+  [[ -d "$1" && ! -L "$1" ]] \
+    && [[ "$(info_value "$1" CFBundleVersion)" == "$2" ]] \
+    && [[ "$(info_value "$1" CFBundleIdentifier)" == "$BUNDLE_ID" ]] \
+    && cs_verify "$1" "$(req_upstream)" --deep
+}
+
 # prune_pristine: keep the original only for the installed version.
 prune_pristine() {
   local keep d v
@@ -1175,7 +1183,103 @@ migrate_live() {
   return 0
 }
 
-# ── Status ────────────────────────────────────────────────────────────────────
+# ── Restore, purge, status ────────────────────────────────────────────────────
+
+restore_live() {
+  local p out clone
+  if ! app_present; then
+    log "Microsoft VS Code Stable not found at $APP; nothing to restore."
+    return 0
+  fi
+  if ! wait_for_quiescence; then
+    warn "VS Code is being updated; run the restore again"
+    return 1
+  fi
+  classify_bundle "$APP"
+  case "$CLASS" in
+    A)
+      log "VS Code $CLASS_VERSION is Microsoft's unmodified build; nothing to restore."
+      return 0
+      ;;
+    E)
+      if bundle_complete "$APP" && json_is_managed "$APP/$PRODUCT_REL"; then
+        warn "cannot restore $APP: $CLASS_WHY"
+        return 1
+      fi
+      log "VS Code at $APP is not managed by Endor; nothing to restore."
+      return 0
+      ;;
+  esac
+
+  p="$STATE_DIR/pristine/$CLASS_VERSION/$PRISTINE_NAME"
+  if [[ "$CLASS" != D ]] && valid_version "$CLASS_VERSION" && pristine_ok "$p" "$CLASS_VERSION"; then
+    if [[ "$DRY_RUN" == "1" ]]; then
+      dry "action : SWAP BACK Microsoft's original VS Code $CLASS_VERSION"
+      return 0
+    fi
+    out=$(outgoing_path) || return 1
+    swap_in "$p" "$out" || return 1
+    discard "$out"
+    log "restored Microsoft's original VS Code $CLASS_VERSION"
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    dry "action : RESTORE the default gallery in a copy of $APP and SWAP it in"
+    return 0
+  fi
+  # Without Microsoft's original: restore product.json in a copy. A copy we signed is signed
+  # again, so it stays valid until VS Code's next update replaces it with Microsoft's build.
+  [[ "$CLASS" == D ]] || ensure_signing_identity || return 1
+  fresh_stage || return 1
+  clone="$STATE_DIR/stage/$(basename "$APP")"
+  if ! stage_clone "$APP" "$clone"; then
+    discard "$clone"
+    return 1
+  fi
+  strip_stray_temps "$clone"
+  if ! patch_product_json_in "$clone" restore; then
+    warn "could not restore product.json in the copy of $APP"
+    discard "$clone"
+    return 1
+  fi
+  if [[ "$CLASS" != D ]] && { ! sign_bundle "$clone" || ! verify_signed "$clone" json_is_restored; }; then
+    discard "$clone"
+    return 1
+  fi
+  out=$(outgoing_path) || return 1
+  if ! swap_in "$clone" "$out"; then
+    discard "$clone"
+    return 1
+  fi
+  discard "$out"
+  if [[ "$CLASS" == D ]]; then
+    log "restored the default gallery in VS Code $CLASS_VERSION"
+  else
+    log "restored the default gallery in VS Code $CLASS_VERSION; it stays signed by this Mac until its next update"
+  fi
+}
+
+darwin_purge() {
+  local sha1
+  if [[ "$DRY_RUN" == "1" ]]; then
+    dry "action : DELETE the signing identity from $KEYCHAIN and the worker's staging state"
+    return 0
+  fi
+  if [[ -d "$SIGNING_DIR" ]]; then
+    for sha1 in $(/bin/cat "$SIGNING_DIR/cert.sha1" "$SIGNING_DIR/previous-certs" 2>/dev/null); do
+      [[ "$sha1" =~ ^[0-9a-f]{40}$ ]] || continue
+      if /usr/bin/security delete-certificate -Z "$sha1" -t "$KEYCHAIN" >/dev/null 2>&1; then
+        log "deleted signing identity $sha1 from $KEYCHAIN"
+      fi
+    done
+  fi
+  discard "$STATE_DIR/signing"
+  discard "$STATE_DIR/stage"
+  discard "$STATE_DIR/outgoing"
+  discard "$STATE_DIR/pristine"
+  /bin/rm -f "$STATE_DIR/last-good" "$STATE_DIR/last-refused" "$STATE_DIR/last-note"
+}
 
 darwin_status() {
   local d
@@ -1285,11 +1389,9 @@ darwin_main() {
       [[ "$LIVE_CLASS" == B ]] && prune_pristine
       ;;
     restore)
-      # Undoing a re-signed app needs more than restore_all's in-place edit; until the worker
-      # can do it, fail without touching the app so removal keeps its state.
-      warn "this worker cannot yet restore a re-signed VS Code; $APP was left as it is"
-      status=1
+      restore_live || status=1
       ;;
+    purge) darwin_purge || status=1 ;;
     status) darwin_status ;;
   esac
   return "$status"
@@ -1304,6 +1406,7 @@ case "$MODE" in
   once) patch_all ;;
   restore) restore_all ;;
   status) status_all ;;
+  purge) : ;;
 esac
 ENDOR_VSCODE_WORKER
 
