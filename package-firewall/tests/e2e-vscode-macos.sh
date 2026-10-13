@@ -300,11 +300,25 @@ shipit_finished() {
   grep -qE 'Installation completed successfully|aborting update|Too many attempts' "$WORK/shipit.log" 2>/dev/null
 }
 
+# save_daemon_logs: the worker's log and launchd's view of the daemon. endor-remove.sh deletes
+# the log, so this runs before removal as well as at the end.
+save_daemon_logs() {
+  if sudo test -f "$WORKER_LOG"; then
+    sudo cat "$WORKER_LOG" > "$ARTIFACTS/worker.log"
+  fi
+  if [[ -e "$DAEMON_PLIST" ]]; then
+    sudo /bin/launchctl print "system/$DAEMON_LABEL" > "$ARTIFACTS/launchd-print.txt" 2>&1 || true
+  fi
+}
+
 collect_artifacts() {
-  sudo cat "$WORKER_LOG" > "$ARTIFACTS/worker.log" 2>/dev/null
+  save_daemon_logs
   if sudo test -f "$WORKER"; then
     worker_status > "$ARTIFACTS/worker-status.txt"
   fi
+  /usr/bin/log show --start "$START_TS" --style compact \
+    --predicate "process == \"launchd\" AND eventMessage CONTAINS \"$DAEMON_LABEL\"" \
+    > "$ARTIFACTS/launchd.log" 2>&1
   cp "$WORK/shipit.log" "$ARTIFACTS/" 2>/dev/null
   if [[ -d "$PROFILE/logs" ]]; then
     cp -R "$PROFILE/logs" "$ARTIFACTS/vscode-logs"
@@ -429,6 +443,7 @@ check_signed "$APP" "The migrated VS Code $NEW"
 sudo rm -rf "$WORK/replaced.app"
 
 step "Remove with endor-remove.sh"
+save_daemon_logs
 if ! sudo /bin/bash "$OUT/endor-remove.sh" > "$ARTIFACTS/remove.log" 2>&1; then
   tail -n 30 "$ARTIFACTS/remove.log" >&2
   fail "endor-remove.sh exited non-zero"
