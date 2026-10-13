@@ -290,8 +290,9 @@ The script applies immediately and installs drift remediation:
 
 - **macOS**, only with `ENDOR_VSCODE_MACOS_DAEMON=1` (see
   [macOS is opt-in](#macos-is-opt-in)):
-  `/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist` watches
-  `/Applications` and invokes a worker after VS Code updater replacements.
+  `/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist` runs a worker
+  when `/Applications` changes, and every 60 seconds. See
+  [macOS code signing](#macos-code-signing).
 - **Linux**: `endor-vscode-firewall.path` watches `/usr/share/code` and
   `/usr/lib/code`; its oneshot systemd service reapplies the patch.
 
@@ -316,10 +317,62 @@ from an earlier version of this script is still installed, the script leaves it
 running, warns and exits non-zero. To clear the warning, regenerate with the flag
 to keep the daemon, or run `endor-remove.sh` to remove it.
 
-Weigh the costs before turning it on. Changing a bundled resource invalidates
-the app's code-signature seal, and Gatekeeper then reports a VS Code that has not
-been launched since its last update as damaged. The script does not ad-hoc
-re-sign VS Code.
+Read [macOS code signing](#macos-code-signing) before turning it on. The daemon
+re-signs VS Code, which changes what users see and what EDR or allowlisting
+rules match.
+
+#### macOS code signing
+
+Microsoft's code signature seals `product.json`. Editing it in place makes
+Gatekeeper report "Visual Studio Code is damaged and can't be opened" the first
+time an updated VS Code launches. So the worker never edits the app in place:
+
+1. It copies the app into `/Library/Application Support/Endor Labs/vscode-firewall/`
+   (root only) and checks that the copy is Microsoft's code, changed at most by
+   Endor's `product.json` edit.
+2. It patches the copy, signs the outer app with a certificate unique to the Mac,
+   and swaps it into `/Applications`. Microsoft's original is kept for removal.
+3. When VS Code updates itself, its updater installs Microsoft's next release.
+   After **Restart to Update** it relaunches that release at once, so the first
+   session may not use the firewall. The worker then swaps in a signed copy, which
+   VS Code uses from its next start.
+
+The certificate is self-signed, valid for 10 years and renewed 30 days before it
+expires. Its key is non-exportable and lives in the System keychain. Nothing has to
+trust it, and no MDM profile is needed. The app's designated requirement accepts
+Microsoft's certificate or the Mac's own, so VS Code's updater keeps installing
+Microsoft releases.
+
+The worker leaves alone any app it can't vouch for: another signer, ad-hoc or
+unsigned builds, added or changed files, or nested code not signed by Microsoft.
+It logs a warning and exits non-zero.
+
+What users and admins notice:
+
+- **A keychain prompt after each VS Code update**, and once at the first
+  migration: macOS asks for the login password before VS Code can use its "Code
+  Safe Storage" item. Choose **Always Allow**. **Deny** only hides saved sign-ins
+  (GitHub, Settings Sync) for that session; nothing is deleted, and the next
+  launch asks again.
+- **One privacy prompt at migration**: permissions such as access to Documents
+  are asked for once more after the first migration, not after updates.
+- **A different signer**: VS Code shows `Authority=Endor Labs VS Code Firewall (…)`
+  and `TeamIdentifier=not set`, and is not notarized. EDR, Santa or PPPC rules
+  keyed on Microsoft's Team ID `UBF8T346G9` no longer match it; review them
+  before deploying.
+- **Open sessions** keep running and use the firewall from their next start.
+
+For defense in depth, block `marketplace.visualstudio.com/_apis`,
+`*.gallery.vsassets.io` and `www.vscode-unpkg.net` at your web gateway, so a
+session that is not using the firewall fails closed.
+
+Troubleshooting, as root:
+
+```bash
+/bin/bash "/Library/Application Support/Endor Labs/vscode-firewall/worker.sh" --status
+tail -n 50 "/Library/Logs/Endor Labs/vscode-firewall.log"
+codesign -dvv "/Applications/Visual Studio Code.app"
+```
 
 ---
 

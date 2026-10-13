@@ -1,6 +1,8 @@
 # templates/vscode.sh
 # Patches Microsoft VS Code Stable's product.json and installs update remediation.
-# On macOS this runs only when the script was generated with ENDOR_VSCODE_MACOS_DAEMON=1.
+# On macOS this runs only when the script was generated with ENDOR_VSCODE_MACOS_DAEMON=1. The
+# worker then patches a clone of the app, re-signs it with a per-device identity and swaps the
+# whole bundle into place, so Gatekeeper keeps accepting it (BUG-1862).
 
 echo ""
 echo "[endor] ── VS Code extension firewall ───────────────────────────────────────"
@@ -368,15 +370,21 @@ status_all() {
   done < <(list_product_files)
 }
 
-# ── macOS: classify the app before changing it ────────────────────────────────
+# ── macOS: patch a clone, sign it with this Mac's identity, swap the whole app ──
 #
 # Microsoft's signature seals product.json, so an in-place edit makes Gatekeeper call a
-# freshly updated VS Code "damaged". The fix is to patch a clone, sign it with an identity
-# unique to this Mac and swap the whole app into place. Before changing anything, the worker
-# must know what the app in /Applications is: classify_bundle decides without writing, and
-# --status reports it. Until the swap is in place, --once still patches product.json in place.
+# freshly updated VS Code "damaged". Instead the worker:
+#   1. classifies the app in /Applications (read-only);
+#   2. APFS-clones it into root-only staging and classifies the clone, which is authoritative
+#      (users can write to the live bundle, but not to the clone);
+#   3. patches product.json, signs only the outer bundle (no --deep) with a self-signed
+#      identity kept in the System keychain, and verifies the result;
+#   4. renames the live app aside and the signed clone into place. App Management blocks
+#      writes inside a launched Microsoft app, but not renaming the whole bundle.
+# The designated requirement accepts Microsoft's certificate or this Mac's, so ShipIt (VS Code's
+# updater) keeps accepting Microsoft releases.
 #
-# States (classify_bundle), and what the worker does with each once it swaps signed copies:
+# States (classify_bundle):
 #   A   Microsoft-signed, seal intact                       patch, sign, swap; keep the original
 #   B   signed by this Mac and current                      nothing
 #   C   signed by this Mac, but out of date                 patch if needed, re-sign, swap
@@ -385,7 +393,12 @@ status_all() {
 #   E   anything else                                       refuse and leave the app alone
 
 PRODUCT_REL="Contents/Resources/app/product.json"
+# Part of the fingerprint: bump it when a release changes what a current bundle looks like.
+WORKER_VERSION=2
 UPSTREAM_ANCHOR_DEFAULT='anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = UBF8T346G9'
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+PRISTINE_NAME="VSCode.bundle-pristine"
+LIVE_CLASS=""
 CERT_SHA1=""
 RUN_TMP=""
 
@@ -393,14 +406,42 @@ ts() { /bin/date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 redact() { /usr/bin/sed -E 's#/_ak/[^/[:space:]"]+#/_ak/<redacted>#g'; }
 log() { printf '%s [endor-vscode] %s\n' "$(ts)" "$*" | redact; }
 warn() { printf '%s [endor-vscode] WARNING: %s\n' "$(ts)" "$*" | redact >&2; }
+dry() { printf '[dry-run]   %s\n' "$*" | redact; }
+
+# note_once <message>: log only when the message differs from the last one noted, so a
+# persistent state (VS Code missing, an update waiting) is not repeated every minute.
+note_once() {
+  local f="$STATE_DIR/last-note"
+  if [[ -f "$f" && "$(cat "$f" 2>/dev/null)" == "$*" ]]; then
+    return 0
+  fi
+  log "$*"
+  [[ "$DRY_RUN" == "1" ]] || printf '%s\n' "$*" > "$f" 2>/dev/null || true
+}
 
 is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
 info_value() { /usr/bin/plutil -extract "$2" raw -o - "$1/Contents/Info.plist" 2>/dev/null; }
 
+valid_version() { [[ "$1" =~ ^[0-9][0-9A-Za-z.+-]*$ ]]; }
+
 discard() {
   [[ -n "$1" && "$1" != "/" ]] && /bin/rm -rf "$1"
   return 0
+}
+
+# move_into_place <src> <dest>: rename, but never into an existing directory.
+move_into_place() {
+  [[ ! -e "$2" && ! -L "$2" ]] && /bin/mv "$1" "$2"
+}
+
+prepare_dir() {
+  /bin/mkdir -p "$STATE_DIR/$1" && /bin/chmod 700 "$STATE_DIR/$1"
+}
+
+fresh_stage() {
+  discard "$STATE_DIR/stage"
+  prepare_dir stage
 }
 
 # Physical path of the configured app. The app itself may not be a symlink.
@@ -418,6 +459,10 @@ proc_under() {
     | P="$1" /usr/bin/awk 'index($0, ENVIRON["P"]) == 1 { found = 1 } END { exit !found }'
 }
 app_running() { proc_under "$APP/Contents/MacOS/"; }
+# ShipIt waits while VS Code runs and installs once it quits; only the install is busy time.
+shipit_installing() {
+  proc_under "$APP/Contents/Frameworks/Squirrel.framework/Resources/ShipIt" && ! app_running
+}
 
 # bundle_complete <app>: the files the worker relies on exist and none of the path components
 # it writes through is a symlink.
@@ -432,6 +477,47 @@ bundle_complete() {
   [[ -f "$app/Contents/MacOS/$exe" && ! -L "$app/Contents/MacOS/$exe" ]] || return 1
   [[ -f "$app/$PRODUCT_REL" && ! -L "$app/$PRODUCT_REL" ]] || return 1
   [[ -f "$app/Contents/_CodeSignature/CodeResources" ]]
+}
+
+# bundle_stat <app>: cheap, stat-only identity of the files that change when the bundle does.
+# Times are to the nanosecond: a same-size edit within the second of our own write would
+# otherwise look unchanged.
+bundle_stat() {
+  local app="$1" exe f out=""
+  exe=$(info_value "$app" CFBundleExecutable)
+  for f in "$app" "$app/Contents" "$app/Contents/Info.plist" "$app/Contents/MacOS/${exe:-?}" \
+      "$app/Contents/_CodeSignature/CodeResources" "$app/$PRODUCT_REL"; do
+    out="$out$(/usr/bin/stat -f '%d:%i:%Fm:%Fc:%z' "$f" 2>/dev/null || echo -),"
+  done
+  printf '%s\n' "$out"
+}
+
+# bundle_fingerprint <app>: bundle_stat plus everything that decides what a current bundle
+# looks like. Equal to last-good means nothing to do.
+bundle_fingerprint() {
+  printf '%s|%s|%s|%s\n' "$(bundle_stat "$1")" "$URL_HASH" "$CERT_SHA1" "$WORKER_VERSION"
+}
+
+# wait_for_quiescence: wait until ShipIt is not installing and the bundle's files stop changing.
+# A bundle that is stable but incomplete is then classified, and refused.
+wait_for_quiescence() {
+  local deadline=$((SECONDS + SETTLE_TIMEOUT)) prev="" cur
+  while :; do
+    if ! shipit_installing; then
+      app_present || return 0
+      cur=$(bundle_stat "$APP")
+      [[ "$cur" == "$prev" ]] && return 0
+      # A first sample always gets a second look, whatever the timeout.
+      if [[ -z "$prev" ]]; then
+        prev=$cur
+        /bin/sleep "$SETTLE_SECONDS"
+        continue
+      fi
+      prev=$cur
+    fi
+    (( SECONDS >= deadline )) && return 1
+    /bin/sleep "$SETTLE_SECONDS"
+  done
 }
 
 jxa_plist() {
@@ -539,6 +625,15 @@ EOF
   fi
 }
 
+strip_stray_temps() {
+  local f
+  for f in "$1/$PRODUCT_REL".endor.* "$1/$PRODUCT_REL".endor-restore.*; do
+    if [[ -f "$f" && ! -L "$f" ]]; then
+      /bin/rm -f "$f"
+    fi
+  done
+}
+
 # nested_all_upstream <app>: every nested code item the seal records is signed by Microsoft.
 nested_all_upstream() {
   local app="$1" list rel
@@ -590,6 +685,11 @@ has_quarantine() {
   [[ -n "$(/usr/bin/find "$1" -xattrname com.apple.quarantine -print -quit 2>/dev/null)" ]]
 }
 
+strip_xattr() {
+  /usr/bin/find "$1" -xattrname "$2" -exec /usr/bin/xattr -d -s "$2" {} + 2>/dev/null
+  [[ -z "$(/usr/bin/find "$1" -xattrname "$2" -print -quit 2>/dev/null)" ]]
+}
+
 # signature_options_current <app>: hardened runtime plus the library-validation exception.
 # Our main executable must load Microsoft-signed frameworks, which library validation forbids.
 # (Output is captured before matching: grep -q in a pipeline fails it under pipefail.)
@@ -629,6 +729,73 @@ identity_in_keychain() {
 
 identity_usable() {
   [[ -n "$CERT_SHA1" ]] && cert_fresh && identity_in_keychain "$CERT_SHA1"
+}
+
+ensure_signing_identity() {
+  identity_load
+  identity_usable && return 0
+  identity_create
+}
+
+identity_create() {
+  local work cn p12pass sha1 old="$CERT_SHA1"
+  prepare_dir signing || return 1
+  work=$(/usr/bin/mktemp -d "$SIGNING_DIR/new.XXXXXX") || return 1
+  cn="Endor Labs VS Code Firewall ($(/usr/bin/openssl rand -hex 4))"
+  if ! (
+    umask 077
+    printf '%s\n' '[req]' 'distinguished_name=dn' 'x509_extensions=v3' 'prompt=no' \
+      'string_mask=utf8only' '[dn]' "CN=$cn" 'O=Endor Labs' '[v3]' \
+      'basicConstraints=critical,CA:FALSE' 'keyUsage=critical,digitalSignature' \
+      'extendedKeyUsage=critical,codeSigning' 'subjectKeyIdentifier=hash' > "$work/req.cnf"
+    /usr/bin/openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days "$CERT_DAYS" \
+      -config "$work/req.cnf" -keyout "$work/key.pem" -out "$work/cert.pem"
+  ) > "$work/openssl.log" 2>&1; then
+    warn "could not create a signing certificate: $(/usr/bin/tr '\n' ' ' < "$work/openssl.log")"
+    discard "$work"
+    return 1
+  fi
+  p12pass=$(/usr/bin/openssl rand -hex 24)
+  # LibreSSL's default PKCS#12 encryption is not accepted by security(1); use the legacy PBE.
+  if ! P12PASS="$p12pass" /usr/bin/openssl pkcs12 -export -inkey "$work/key.pem" \
+      -in "$work/cert.pem" -name "$cn" -passout env:P12PASS \
+      -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -out "$work/id.p12" > "$work/openssl.log" 2>&1; then
+    warn "could not package the signing identity: $(/usr/bin/tr '\n' ' ' < "$work/openssl.log")"
+    discard "$work"
+    return 1
+  fi
+  /bin/rm -f "$work/key.pem"
+  if ! /usr/bin/security import "$work/id.p12" -k "$KEYCHAIN" -f pkcs12 -P "$p12pass" -x \
+      -T /usr/bin/codesign > "$work/import.log" 2>&1; then
+    warn "could not import the signing identity into $KEYCHAIN: $(/usr/bin/tr '\n' ' ' < "$work/import.log")"
+    discard "$work"
+    return 1
+  fi
+  /bin/rm -f "$work/id.p12"
+  # Tests sign from a throwaway user keychain, where codesign needs a key partition list.
+  if [[ -n "${ENDOR_VSCODE_KEYCHAIN_PASSWORD:-}" ]]; then
+    /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s \
+      -k "$ENDOR_VSCODE_KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null 2>&1
+  fi
+  sha1=$(/usr/bin/openssl x509 -in "$work/cert.pem" -noout -fingerprint -sha1 \
+    | /usr/bin/sed 's/^.*=//; s/://g' | /usr/bin/tr 'A-F' 'a-f')
+  if [[ ! "$sha1" =~ ^[0-9a-f]{40}$ ]] || ! identity_in_keychain "$sha1"; then
+    warn "the imported signing identity is not usable from $KEYCHAIN"
+    discard "$work"
+    return 1
+  fi
+
+  /bin/mv -f "$work/cert.pem" "$SIGNING_DIR/cert.pem"
+  printf '%s\n' "$cn" > "$SIGNING_DIR/cn"
+  printf '%s\n' "$sha1" > "$SIGNING_DIR/cert.sha1.tmp" && /bin/mv -f "$SIGNING_DIR/cert.sha1.tmp" "$SIGNING_DIR/cert.sha1"
+  discard "$work"
+  if [[ -n "$old" && "$old" != "$sha1" ]]; then
+    printf '%s\n' "$old" >> "$SIGNING_DIR/previous-certs"
+    /usr/bin/security delete-certificate -Z "$old" -t "$KEYCHAIN" >/dev/null 2>&1 || true
+    log "renewed the signing identity (previous certificate $old)"
+  fi
+  CERT_SHA1=$sha1
+  log "created signing identity \"$cn\" ($sha1) in $KEYCHAIN"
 }
 
 # ── Classification ────────────────────────────────────────────────────────────
@@ -728,9 +895,290 @@ describe_class() {
   esac
 }
 
+# ── Stage, sign, swap ─────────────────────────────────────────────────────────
+
+stage_clone() {
+  /bin/cp -Rpc "$1" "$2" 2>/dev/null && return 0
+  discard "$2"
+  /usr/bin/ditto "$1" "$2"
+}
+
+# patch_product_json_in <app> <patch|restore>: rewrite product.json in place. The edit goes
+# through a temp file outside the bundle and keeps the inode, so the bundle gains no files.
+patch_product_json_in() {
+  local pj="$1/$PRODUCT_REL" tmp="$RUN_TMP/product.json"
+  [[ -f "$pj" && ! -L "$pj" ]] || return 1
+  /bin/rm -f "$tmp"
+  /bin/cp "$pj" "$tmp" || return 1
+  if [[ "$2" == patch ]]; then
+    write_patched_json "$tmp" && json_validate "$tmp" && json_is_desired "$tmp" || return 1
+  else
+    write_restored_json "$tmp" && json_validate "$tmp" && json_is_restored "$tmp" || return 1
+  fi
+  /bin/cat "$tmp" > "$pj"
+}
+
+# sign_bundle <app>: sign only the outer bundle; nested code keeps Microsoft's signatures.
+sign_bundle() {
+  local app="$1" owner
+  owner=$(/usr/bin/stat -f '%u:%g' "$app") || return 1
+  entitlements_allowed "$app" || { warn "unexpected entitlements:$ENT_BAD"; return 1; }
+  /usr/libexec/PlistBuddy -c 'Delete :com.apple.security.cs.disable-library-validation' \
+    "$RUN_TMP/entitlements.plist" >/dev/null 2>&1
+  /usr/libexec/PlistBuddy -c 'Add :com.apple.security.cs.disable-library-validation bool true' \
+    "$RUN_TMP/entitlements.plist" >/dev/null || return 1
+  # Microsoft's stapled notarization ticket names Microsoft's cdhash; it no longer applies.
+  /bin/rm -f "$app/Contents/CodeResources"
+  # codesign --strict refuses Finder metadata on signed files.
+  strip_xattr "$app" com.apple.FinderInfo
+  strip_xattr "$app" com.apple.ResourceFork
+  if ! /usr/bin/codesign --sign "$CERT_SHA1" --keychain "$KEYCHAIN" --force \
+      --identifier "$BUNDLE_ID" --options runtime --entitlements "$RUN_TMP/entitlements.plist" \
+      --requirements "=$(designated_requirement "$CERT_SHA1")" --timestamp=none "$app" \
+      > "$RUN_TMP/codesign.log" 2>&1; then
+    warn "codesign failed: $(/usr/bin/tr '\n' ' ' < "$RUN_TMP/codesign.log")"
+    return 1
+  fi
+  # codesign writes new files as root; give the bundle back to its owner.
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    /usr/sbin/chown -R "$owner" "$app"
+  fi
+  # A validly signed app that is not notarized is only assessed by Gatekeeper when quarantined.
+  strip_xattr "$app" com.apple.quarantine
+}
+
+# verify_signed <app> <json predicate>: the signed copy is exactly what the worker intended.
+verify_signed() {
+  local app="$1" json_check="$2"
+  if ! cs_verify "$app" "$(req_ours "$CERT_SHA1")" --deep; then
+    warn "the signed copy does not verify"
+  elif ! dr_current "$app"; then
+    warn "the signed copy has an unexpected designated requirement"
+  elif ! nested_all_upstream "$app"; then
+    warn "the signed copy has nested code not signed by Microsoft"
+  elif ! "$json_check" "$app/$PRODUCT_REL"; then
+    warn "the signed copy has an unexpected product.json"
+  elif ! signature_options_current "$app"; then
+    warn "the signed copy lacks the runtime flag or the library-validation exception"
+  elif has_quarantine "$app"; then
+    warn "the signed copy is still quarantined"
+  else
+    return 0
+  fi
+  return 1
+}
+
+# swap_in <new.app> <outgoing>: rename the live app aside and the new bundle into its place.
+swap_in() {
+  local new="$1" out="$2"
+  if [[ "$(/usr/bin/stat -f %d "$new")" != "$(/usr/bin/stat -f %d "$(dirname "$APP")")" ]]; then
+    warn "the staging directory is not on the same volume as $APP"
+    return 1
+  fi
+  [[ ! -e "$out" && ! -L "$out" ]] || return 1
+  if ! /bin/mv "$APP" "$out"; then
+    warn "could not move $APP aside"
+    return 1
+  fi
+  if ! move_into_place "$new" "$APP"; then
+    warn "could not move the new bundle into place; rolling back"
+    move_into_place "$out" "$APP" || warn "rollback failed; the previous app is at $out"
+    return 1
+  fi
+  # Tell LaunchServices about the new bundle now. A test app (ENDOR_VSCODE_APP) is not
+  # registered, so it can't become the app that opens for this bundle identifier.
+  if [[ -x "$LSREGISTER" && -z "${ENDOR_VSCODE_APP:-}" ]]; then
+    "$LSREGISTER" -f "$APP" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
+# recover_outgoing: a run that died between its two renames left the app in outgoing/.
+recover_outgoing() {
+  local b
+  for b in "$STATE_DIR/outgoing"/*.bundle-outgoing.*; do
+    [[ -d "$b" && ! -L "$b" ]] || continue
+    if ! app_present && move_into_place "$b" "$APP"; then
+      log "moved back the app an interrupted run had moved aside: $APP"
+    else
+      discard "$b"
+    fi
+  done
+}
+
+outgoing_path() {
+  prepare_dir outgoing || return 1
+  printf '%s/outgoing/%s.bundle-outgoing.%s\n' "$STATE_DIR" "$(basename "$APP" .app)" "$$"
+}
+
+# retain_pristine <bundle> <version>: keep Microsoft's original bytes for removal, under a
+# non-.app name so LaunchServices doesn't register it.
+retain_pristine() {
+  local src="$1" v="$2" dest
+  if ! valid_version "$v"; then
+    discard "$src"
+    return 0
+  fi
+  dest="$STATE_DIR/pristine/$v"
+  prepare_dir pristine || return 1
+  discard "$dest.new"
+  /bin/mkdir -m 700 "$dest.new" || return 1
+  if ! /bin/mv "$src" "$dest.new/$PRISTINE_NAME"; then
+    discard "$dest.new"
+    return 1
+  fi
+  discard "$dest"
+  /bin/mv "$dest.new" "$dest"
+}
+
+# prune_pristine: keep the original only for the installed version.
+prune_pristine() {
+  local keep d v
+  [[ "$DRY_RUN" != "1" && -d "$STATE_DIR/pristine" ]] || return 0
+  keep=" $(info_value "$APP" CFBundleVersion) "
+  for d in "$STATE_DIR/pristine"/*; do
+    [[ -d "$d" ]] || continue
+    v=$(basename "$d")
+    case "$keep" in
+      *" $v "*) ;;
+      *) discard "$d" ;;
+    esac
+  done
+}
+
+record_good() { [[ "$DRY_RUN" == "1" ]] || printf '%s\n' "$1" > "$STATE_DIR/last-good"; }
+record_refused() { [[ "$DRY_RUN" == "1" ]] || printf '%s %s\n' "$(/bin/date +%s)" "$1" > "$STATE_DIR/last-refused"; }
+
+fast_path_ok() {
+  [[ -f "$STATE_DIR/last-good" && "$(cat "$STATE_DIR/last-good" 2>/dev/null)" == "$1" ]] && cert_fresh
+}
+
+# refused_recently <fingerprint>: the same bundle was refused or failed within the last hour.
+refused_recently() {
+  local f="$STATE_DIR/last-refused" t fp
+  [[ -f "$f" ]] || return 1
+  read -r t fp < "$f" || return 1
+  is_uint "$t" && [[ "$fp" == "$1" ]] && (( $(/bin/date +%s) - t < 3600 ))
+}
+
+# ── Live app ──────────────────────────────────────────────────────────────────
+
+process_live() {
+  local fp
+  LIVE_CLASS=""
+  if ! app_present; then
+    note_once "Microsoft VS Code Stable not found at $APP; remediation remains ready for a later install."
+    return 0
+  fi
+  fp=$(bundle_fingerprint "$APP")
+  if fast_path_ok "$fp"; then
+    LIVE_CLASS=B
+    [[ "$DRY_RUN" == "1" ]] && log "already configured: $APP"
+    return 0
+  fi
+  refused_recently "$fp" && return 1
+  if ! wait_for_quiescence; then
+    note_once "deferred: VS Code is being updated or its files are still changing"
+    return 0
+  fi
+  app_present || return 0
+  fp=$(bundle_fingerprint "$APP")
+  classify_bundle "$APP"
+  LIVE_CLASS=$CLASS
+  case "$CLASS" in
+    B)
+      record_good "$fp"
+      note_once "VS Code $CLASS_VERSION is firewalled and signed by this Mac"
+      return 0
+      ;;
+    E)
+      warn "refusing to modify $APP: $CLASS_WHY"
+      record_refused "$fp"
+      return 1
+      ;;
+  esac
+  if migrate_live "$fp"; then
+    return 0
+  fi
+  record_refused "$fp"
+  return 1
+}
+
+# migrate_live <fingerprint>: bring an A, C, D or D2 app to B.
+migrate_live() {
+  local fp="$1" from="$CLASS" why="$CLASS_WHY" version="$CLASS_VERSION" clone out desc
+  desc=$(describe_class "$from")
+  if [[ "$DRY_RUN" == "1" ]]; then
+    dry "action : CLONE, PATCH product.json, SIGN with this Mac's identity, SWAP the app"
+    dry "app    : $APP (VS Code $version, $desc)"
+    [[ -n "$CERT_SHA1" ]] || dry "action : CREATE a code-signing identity in $KEYCHAIN"
+    dry "URL    : $FIREWALL_URL"
+    return 0
+  fi
+  ensure_signing_identity || return 1
+  fresh_stage || return 1
+  clone="$STATE_DIR/stage/$(basename "$APP")"
+  if ! stage_clone "$APP" "$clone"; then
+    warn "could not copy $APP into $STATE_DIR/stage"
+    discard "$clone"
+    return 1
+  fi
+  if [[ "$(bundle_stat "$APP")" != "${fp%%|*}" ]]; then
+    discard "$clone"
+    log "deferred: VS Code changed while it was being copied"
+    LIVE_CLASS=""
+    return 0
+  fi
+  strip_stray_temps "$clone"
+  classify_bundle "$clone"
+  if [[ "$CLASS" != "$from" ]]; then
+    discard "$clone"
+    log "deferred: the copy classified as $CLASS ($CLASS_WHY), the app as $from"
+    LIVE_CLASS=""
+    return 0
+  fi
+  if ! json_is_desired "$clone/$PRODUCT_REL" && ! patch_product_json_in "$clone" patch; then
+    warn "could not patch product.json in the copy of $APP"
+    discard "$clone"
+    return 1
+  fi
+  if ! sign_bundle "$clone" || ! verify_signed "$clone" json_is_desired; then
+    discard "$clone"
+    return 1
+  fi
+  if [[ "$(bundle_stat "$APP")" != "${fp%%|*}" ]] || shipit_installing; then
+    discard "$clone"
+    log "deferred: VS Code changed while the copy was being signed"
+    LIVE_CLASS=""
+    return 0
+  fi
+  out=$(outgoing_path) || return 1
+  if ! swap_in "$clone" "$out"; then
+    discard "$clone"
+    return 1
+  fi
+  if [[ "$from" == A ]]; then
+    retain_pristine "$out" "$version" || warn "could not keep Microsoft's original VS Code $version"
+  else
+    discard "$out"
+  fi
+  LIVE_CLASS=B
+  record_good "$(bundle_fingerprint "$APP")"
+  case "$from" in
+    A) log "VS Code $version: patched, signed by this Mac and swapped in; Microsoft's original is kept for removal" ;;
+    D) log "VS Code $version: repaired a product.json patched in place; signed by this Mac and swapped in" ;;
+    *) log "VS Code $version: re-signed and swapped in ($why)" ;;
+  esac
+  if app_running; then
+    log "VS Code is running; it uses the firewall from its next start"
+  fi
+  return 0
+}
+
 # ── Status ────────────────────────────────────────────────────────────────────
 
 darwin_status() {
+  local d
   echo "app        : $APP"
   if app_present; then
     classify_bundle "$APP"
@@ -748,47 +1196,106 @@ darwin_status() {
   else
     echo "identity   : none yet"
   fi
+  for d in "$STATE_DIR/pristine"/*; do
+    [[ -d "$d" ]] && echo "original   : VS Code $(basename "$d") kept for removal"
+  done
+  if [[ -f "$STATE_DIR/last-refused" ]]; then
+    echo "refused    : $(/bin/date -r "$(cut -d' ' -f1 "$STATE_DIR/last-refused")" 2>/dev/null)"
+  fi
+  return 0
+}
+
+rotate_log() {
+  local size
+  [[ -f "$LOG_FILE" ]] || return 0
+  size=$(/usr/bin/stat -f %z "$LOG_FILE" 2>/dev/null || echo 0)
+  if (( size > 1048576 )); then
+    /bin/mv -f "$LOG_FILE" "$LOG_FILE.1" && : > "$LOG_FILE" && /bin/chmod 600 "$LOG_FILE"
+  fi
   return 0
 }
 
 darwin_main() {
-  local name
+  local name rc status=0
   export PATH=/usr/bin:/bin:/usr/sbin:/sbin
   export LC_ALL=C
   APP_PATH="${ENDOR_VSCODE_APP:-/Applications/Visual Studio Code.app}"
   BUNDLE_ID="${ENDOR_VSCODE_BUNDLE_ID:-com.microsoft.VSCode}"
   UPSTREAM_ANCHOR="${ENDOR_VSCODE_UPSTREAM_ANCHOR:-$UPSTREAM_ANCHOR_DEFAULT}"
   KEYCHAIN="${ENDOR_VSCODE_KEYCHAIN:-/Library/Keychains/System.keychain}"
+  LOG_FILE="${ENDOR_VSCODE_LOG:-/Library/Logs/Endor Labs/vscode-firewall.log}"
+  LOCK_WAIT="${ENDOR_VSCODE_LOCK_WAIT:-120}"
+  SETTLE_SECONDS="${ENDOR_VSCODE_SETTLE_SECONDS:-2}"
+  SETTLE_TIMEOUT="${ENDOR_VSCODE_SETTLE_TIMEOUT:-30}"
+  CERT_DAYS="${ENDOR_VSCODE_CERT_DAYS:-3650}"
   RENEW_DAYS="${ENDOR_VSCODE_RENEW_DAYS:-30}"
   STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-}"
   [[ -n "$STATE_DIR" ]] || STATE_DIR=$(cd "$(dirname "$0")" && pwd -P)
   SIGNING_DIR="$STATE_DIR/signing"
 
-  if ! is_uint "$RENEW_DAYS"; then
-    echo "[endor-vscode] ERROR: ENDOR_VSCODE_RENEW_DAYS must be a whole number" >&2
-    return 2
+  for name in LOCK_WAIT SETTLE_SECONDS SETTLE_TIMEOUT CERT_DAYS RENEW_DAYS; do
+    if ! is_uint "${!name}"; then
+      echo "[endor-vscode] ERROR: ENDOR_VSCODE_$name must be a whole number" >&2
+      return 2
+    fi
+  done
+  # One run at a time: the installer, the LaunchDaemon and removal all go through this lock.
+  if [[ "$MODE" != status && "$DRY_RUN" != "1" && "${ENDOR_VSCODE_LOCK_HELD:-0}" != "1" ]]; then
+    /bin/mkdir -p "$STATE_DIR" && /bin/chmod 700 "$STATE_DIR" || return 1
+    ENDOR_VSCODE_LOCK_HELD=1 /usr/bin/lockf -k -s -t "$LOCK_WAIT" "$STATE_DIR/.lock" \
+      /bin/bash "$0" "$@"
+    rc=$?
+    if [[ "$rc" -eq 75 ]]; then
+      if [[ "$MODE" == once ]]; then
+        log "another run of the worker is still busy; leaving this trigger to it"
+        return 0
+      fi
+      warn "another run of the worker held the lock for ${LOCK_WAIT}s"
+    fi
+    return "$rc"
   fi
+
   for name in ENDOR_VSCODE_APP ENDOR_VSCODE_BUNDLE_ID ENDOR_VSCODE_UPSTREAM_ANCHOR \
       ENDOR_VSCODE_KEYCHAIN; do
     if [[ -n "${!name:-}" ]]; then
       warn "$name is set; this is meant for tests only"
     fi
   done
+  # codesign reports physical paths, and seal_status matches them against these.
+  if [[ -d "$STATE_DIR" ]]; then
+    STATE_DIR=$(cd "$STATE_DIR" && pwd -P)
+    SIGNING_DIR="$STATE_DIR/signing"
+  fi
   if ! resolve_app; then
     warn "cannot resolve $APP_PATH"
     return 1
   fi
+  URL_HASH=$(printf '%s' "$FIREWALL_URL" | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-16)
   RUN_TMP=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/endor-vscode.XXXXXX") || return 1
   trap 'discard "$RUN_TMP"' EXIT
   identity_load
 
+  if [[ "$DRY_RUN" != "1" ]] && [[ "$MODE" == once || "$MODE" == restore ]]; then
+    recover_outgoing
+  fi
   case "$MODE" in
+    once)
+      [[ "$DRY_RUN" == "1" ]] || rotate_log
+      process_live || status=1
+      [[ "$LIVE_CLASS" == B ]] && prune_pristine
+      ;;
+    restore)
+      # Undoing a re-signed app needs more than restore_all's in-place edit; until the worker
+      # can do it, fail without touching the app so removal keeps its state.
+      warn "this worker cannot yet restore a re-signed VS Code; $APP was left as it is"
+      status=1
+      ;;
     status) darwin_status ;;
   esac
+  return "$status"
 }
 
-# On macOS, --status reads the app bundle itself. Patching still edits product.json in place.
-if [[ "$(uname -s)" == "Darwin" && -z "${ENDOR_VSCODE_PRODUCT_JSON:-}" && "$MODE" == status ]]; then
+if [[ "$(uname -s)" == "Darwin" && -z "${ENDOR_VSCODE_PRODUCT_JSON:-}" ]]; then
   darwin_main "$@"
   exit $?
 fi
@@ -808,6 +1315,7 @@ _vscode_os=$(uname -s)
 case "$_vscode_os" in
   Darwin)
     _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/Library/Application Support/Endor Labs/vscode-firewall}"
+    _VSCODE_LOG_DIR="/Library/Logs/Endor Labs"
     [[ "$_VSCODE_MACOS_DAEMON" == "1" ]] || _vscode_skip=1
     ;;
   Linux)
@@ -821,6 +1329,19 @@ case "$_vscode_os" in
     ;;
 esac
 _VSCODE_WORKER_PATH="$_VSCODE_STATE_DIR/worker.sh"
+
+# The worker runs under /bin/bash on macOS: Bash 3.2, whatever PATH the MDM agent has.
+_vscode_run_worker() {
+  if [[ "$_vscode_os" == "Darwin" ]]; then
+    /bin/bash "$@"
+  else
+    "$@"
+  fi
+}
+
+_vscode_xml() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
 
 if [[ "$_vscode_skip" == "1" ]]; then
   echo "[endor] skip: the VS Code firewall is not enabled for macOS in this script."
@@ -837,7 +1358,7 @@ elif [[ "${DRY_RUN:-0}" == "1" ]]; then
   printf '%s\n' "$_VSCODE_WORKER_CONTENT" > "$_vscode_tmp_worker"
   chmod 700 "$_vscode_tmp_worker"
   ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" \
-    "$_vscode_tmp_worker" --once --dry-run || _ENDOR_WARNED=1
+    _vscode_run_worker "$_vscode_tmp_worker" --once --dry-run || _ENDOR_WARNED=1
   rm -f "$_vscode_tmp_worker"
   echo "[dry-run]   action : INSTALL VS Code update remediation"
 else
@@ -852,12 +1373,23 @@ else
     chmod 700 "$_vscode_tmp_worker"
     mv -f "$_vscode_tmp_worker" "$_VSCODE_WORKER_PATH"
 
-    ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" \
-      "$_VSCODE_WORKER_PATH" --once || _ENDOR_WARNED=1
+    # Stop a previous daemon first: older workers edited the app in place.
+    if [[ "$_vscode_os" == "Darwin" && "${ENDOR_VSCODE_SKIP_WATCHER:-0}" != "1" ]]; then
+      /bin/launchctl bootout system/com.endorlabs.vscode-firewall >/dev/null 2>&1 || true
+    fi
+    # Report the current state again, and re-evaluate an app refused earlier.
+    rm -f "$_VSCODE_STATE_DIR/last-note" "$_VSCODE_STATE_DIR/last-refused"
+
+    ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" ENDOR_VSCODE_LOCK_WAIT="${ENDOR_VSCODE_LOCK_WAIT:-600}" \
+      _vscode_run_worker "$_VSCODE_WORKER_PATH" --once || _ENDOR_WARNED=1
 
     if [[ "${ENDOR_VSCODE_SKIP_WATCHER:-0}" != "1" ]]; then
       if [[ "$_vscode_os" == "Darwin" ]]; then
         _vscode_plist="/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist"
+        _vscode_log="$_VSCODE_LOG_DIR/vscode-firewall.log"
+        mkdir -p "$_VSCODE_LOG_DIR"
+        touch "$_vscode_log"
+        chmod 600 "$_vscode_log"
         cat > "$_vscode_plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -867,7 +1399,8 @@ else
   <string>com.endorlabs.vscode-firewall</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$_VSCODE_WORKER_PATH</string>
+    <string>/bin/bash</string>
+    <string>$(_vscode_xml "$_VSCODE_WORKER_PATH")</string>
     <string>--once</string>
   </array>
   <key>RunAtLoad</key>
@@ -876,14 +1409,19 @@ else
   <array>
     <string>/Applications</string>
   </array>
+  <key>StartInterval</key>
+  <integer>60</integer>
   <key>ThrottleInterval</key>
-  <integer>10</integer>
+  <integer>2</integer>
+  <key>StandardOutPath</key>
+  <string>$(_vscode_xml "$_vscode_log")</string>
+  <key>StandardErrorPath</key>
+  <string>$(_vscode_xml "$_vscode_log")</string>
 </dict>
 </plist>
 PLIST
         chown root:wheel "$_vscode_plist"
         chmod 644 "$_vscode_plist"
-        /bin/launchctl bootout system/com.endorlabs.vscode-firewall >/dev/null 2>&1 || true
         if ! /bin/launchctl bootstrap system "$_vscode_plist"; then
           echo "[endor] WARNING: could not load VS Code launchd remediation." >&2
           _ENDOR_WARNED=1
@@ -928,5 +1466,7 @@ PATHUNIT
 fi
 
 [[ "$_vscode_skip" == "1" ]] || echo "[endor] ✓ VS Code extension firewall done"
-unset _vscode_os _VSCODE_STATE_DIR _VSCODE_WORKER_PATH _VSCODE_WORKER_CONTENT
-unset _vscode_tmp_worker _vscode_plist _vscode_service _vscode_path _VSCODE_MACOS_DAEMON _vscode_skip
+unset -f _vscode_run_worker _vscode_xml
+unset _vscode_os _VSCODE_STATE_DIR _VSCODE_WORKER_PATH _VSCODE_WORKER_CONTENT _VSCODE_LOG_DIR
+unset _vscode_tmp_worker _vscode_plist _vscode_service _vscode_path _vscode_log
+unset _VSCODE_MACOS_DAEMON _vscode_skip
