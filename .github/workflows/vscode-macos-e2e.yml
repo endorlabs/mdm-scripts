@@ -1,0 +1,79 @@
+name: VS Code macOS end-to-end
+
+# Runs Microsoft's real VS Code through the macOS firewall daemon on every macOS version and CPU
+# that GitHub hosts: deploy, relaunch, an update installed by VS Code's own updater, and removal.
+# See package-firewall/tests/e2e-vscode-macos.sh. Older macOS versions need a self-hosted runner;
+# run this workflow by hand with its label as the runner input.
+
+on:
+  pull_request:
+    paths:
+      - package-firewall/bash/generate.sh
+      - package-firewall/bash/templates/vscode.sh
+      - package-firewall/bash/templates/remove.sh
+      - package-firewall/tests/e2e-vscode-macos.sh
+      - .github/workflows/vscode-macos-e2e.yml
+  push:
+    branches: [main]
+    paths:
+      - package-firewall/bash/generate.sh
+      - package-firewall/bash/templates/vscode.sh
+      - package-firewall/bash/templates/remove.sh
+      - package-firewall/tests/e2e-vscode-macos.sh
+      - .github/workflows/vscode-macos-e2e.yml
+  schedule:
+    # Weekly, to catch new VS Code releases and runner image updates.
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+    inputs:
+      old_version:
+        description: 'VS Code version to start from (default: newest release of the minor before new_version)'
+        required: false
+        default: ''
+      new_version:
+        description: 'VS Code version to update to (default: latest stable)'
+        required: false
+        default: ''
+      runner:
+        description: 'Run on this runner label only, such as macos-14 or a self-hosted label (default: every GitHub-hosted macOS)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  e2e:
+    name: VS Code e2e (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.runner && format('["{0}"]', inputs.runner) || '["macos-15", "macos-15-intel", "macos-26", "macos-26-intel"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Run the end-to-end test
+        env:
+          ENDOR_E2E_OLD_VERSION: ${{ inputs.old_version }}
+          ENDOR_E2E_NEW_VERSION: ${{ inputs.new_version }}
+          ENDOR_E2E_ARTIFACTS: ${{ runner.temp }}/vscode-e2e-artifacts
+        run: bash package-firewall/tests/e2e-vscode-macos.sh
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vscode-e2e-${{ matrix.os }}
+          path: ${{ runner.temp }}/vscode-e2e-artifacts
+          if-no-files-found: ignore
+          retention-days: 14
