@@ -44,6 +44,18 @@ jobs:
           done < <(find . -name '*.sh' -not -path './.git/*' -not -path '*/out/*' -print0)
           exit "$fail"
 
+      # The VS Code worker is a heredoc inside templates/vscode.sh, so the step above sees it
+      # only as a string. Extract it and lint it as the script the installer writes.
+      - name: shellcheck (VS Code worker)
+        run: |
+          set -euo pipefail
+          worker=$(mktemp)
+          sed -n "/^IFS= read -r -d '' _VSCODE_WORKER_CONTENT/,/^ENDOR_VSCODE_WORKER$/p" \
+            package-firewall/bash/templates/vscode.sh | sed '1d;$d' > "$worker"
+          test -s "$worker"
+          shellcheck --severity=warning "$worker"
+          bash -n "$worker"
+
       - name: bash -n (all shell files, incl. generated examples)
         run: |
           set -uo pipefail
