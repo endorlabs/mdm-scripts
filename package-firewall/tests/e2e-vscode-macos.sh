@@ -243,24 +243,37 @@ runs_above() {
   [[ -n "$n" && "$n" -gt "$1" ]]
 }
 
-# after_timer_tick: let runs from earlier changes finish, then wait for the daemon's next run.
-# With nothing it watches changing, that run comes from its 60-second timer, so for most of a
-# minute afterwards any further run must come from a watched path.
-after_timer_tick() {
-  local r
+# daemon_idle: the daemon is not running now. launchd drops changes to watched paths that
+# arrive while the job runs, so a check that a change starts the daemon makes it while idle.
+daemon_idle() {
+  local s
+  s=$(sudo /bin/launchctl print "system/$DAEMON_LABEL" 2>/dev/null \
+    | awk '!s && $1 == "state" && $2 == "=" { s = $3 } END { print s }')
+  [[ -n "$s" && "$s" != running ]]
+}
+
+# settle: let runs from earlier changes start and finish, then note the run count.
+settle() {
   sleep 5
-  r=$(daemon_runs)
-  wait_until 75 runs_above "$r" || fail "the daemon did not run on its 60-second timer"
+  wait_until 900 daemon_idle || fail "the daemon was still running after 15 minutes"
+  TICK_RUNS=$(daemon_runs)
+}
+
+# after_timer_tick: settle, then wait for the daemon's next run and let it finish. With nothing
+# it watches changing, that run comes from its 60-second timer, so for most of a minute
+# afterwards any further run must come from a watched path.
+after_timer_tick() {
+  settle
+  wait_until 75 runs_above "$TICK_RUNS" || fail "the daemon did not run on its 60-second timer"
+  wait_until 60 daemon_idle || fail "the daemon's timer run did not finish within 60s"
   TICK_RUNS=$(daemon_runs)
 }
 
 # expect_watch_run <what>: the change just made started the daemon within 10s, too soon after
-# after_timer_tick for the timer. Then lets that change's runs finish.
+# after_timer_tick for the timer.
 expect_watch_run() {
   wait_until 10 runs_above "$TICK_RUNS" || fail "$1 did not start the daemon within 10s"
   pass "$1 started the daemon within ${WAITED}s"
-  sleep 5
-  TICK_RUNS=$(daemon_runs)
 }
 
 # watch_paths: the daemon's WatchPaths, one per line.
@@ -509,6 +522,7 @@ step "Replace the app with a fresh Microsoft copy of VS Code $NEW"
 after_timer_tick
 sudo /bin/mv "$APP" "$WORK/replaced.app" || fail "could not move the installed app away"
 expect_watch_run "moving VS Code out of /Applications"
+settle
 sudo /bin/mv "$WORK/ms-new-copy.app" "$APP" || fail "could not put a fresh copy in place"
 expect_watch_run "moving a fresh copy into /Applications"
 wait_until 900 signed_by_us "$APP" || fail "the daemon did not migrate the fresh copy within 900s"
