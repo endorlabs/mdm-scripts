@@ -2,10 +2,13 @@
 # macOS only. End-to-end test of the VS Code firewall daemon (ENDOR_VSCODE_MACOS_DAEMON=1) with
 # Microsoft's real VS Code and VS Code's own updater:
 #   1. deploy endor-vscode.sh over a running Microsoft copy (OLD), then relaunch the re-signed app;
-#   2. stage NEW where VS Code's updater puts a downloaded update, let the daemon prepare it, then
+#   2. check that the daemon stays quiet while nothing it watches changes;
+#   3. stage NEW where VS Code's updater puts a downloaded update, let the daemon prepare it, then
 #      quit VS Code and let ShipIt install it, as "Restart to Update" does;
-#   3. replace the app with a fresh Microsoft copy and let the daemon migrate it;
-#   4. run endor-remove.sh and check that Microsoft's original app is back.
+#   4. replace the app with a fresh Microsoft copy and let the daemon migrate it;
+#   5. run endor-remove.sh and check that Microsoft's original app is back.
+# Steps 3 and 4 also check that each change starts the daemon through its watched paths, not
+# its 60-second timer.
 #
 # It changes the Mac it runs on: it replaces /Applications/Visual Studio Code.app, installs the
 # LaunchDaemon and a signing identity in the System keychain, and runs endor-remove.sh. So it runs
@@ -73,6 +76,7 @@ WAITED=0
 SHA1=""
 OURS_REQ=""
 STAGED=""
+TICK_RUNS=0
 
 # ── Reporting ─────────────────────────────────────────────────────────────────
 
@@ -228,6 +232,46 @@ live_is() {
   grep -q "^state *: $1 " <<< "$s" && grep -q "^version *: $2\$" <<< "$s"
 }
 
+# daemon_runs: how many times launchd has started the daemon since it was loaded.
+daemon_runs() {
+  sudo /bin/launchctl print "system/$DAEMON_LABEL" 2>/dev/null \
+    | awk '!n && $1 == "runs" && $2 == "=" { n = $3 } END { print n }'
+}
+runs_above() {
+  local n
+  n=$(daemon_runs)
+  [[ -n "$n" && "$n" -gt "$1" ]]
+}
+
+# after_timer_tick: let runs from earlier changes finish, then wait for the daemon's next run.
+# With nothing it watches changing, that run comes from its 60-second timer, so for most of a
+# minute afterwards any further run must come from a watched path.
+after_timer_tick() {
+  local r
+  sleep 5
+  r=$(daemon_runs)
+  wait_until 75 runs_above "$r" || fail "the daemon did not run on its 60-second timer"
+  TICK_RUNS=$(daemon_runs)
+}
+
+# expect_watch_run <what>: the change just made started the daemon within 10s, too soon after
+# after_timer_tick for the timer. Then lets that change's runs finish.
+expect_watch_run() {
+  wait_until 10 runs_above "$TICK_RUNS" || fail "$1 did not start the daemon within 10s"
+  pass "$1 started the daemon within ${WAITED}s"
+  sleep 5
+  TICK_RUNS=$(daemon_runs)
+}
+
+# watch_paths: the daemon's WatchPaths, one per line.
+watch_paths() {
+  local i=0 p
+  while p=$(/usr/bin/plutil -extract "WatchPaths.$i" raw -o - "$DAEMON_PLIST" 2>/dev/null); do
+    printf '%s\n' "$p"
+    i=$((i + 1))
+  done
+}
+
 # check_signed <app> <what>: patched and signed by this Mac the way the worker signs.
 check_signed() {
   local dr out
@@ -249,14 +293,17 @@ check_signed() {
 
 file_url() { printf 'file://%s/' "$(printf '%s' "$1" | sed 's/%/%25/g; s/ /%20/g')"; }
 
-# stage_update: put Microsoft's NEW where VS Code's updater (Squirrel) leaves a downloaded update.
-stage_update() {
+# stage_bundle: unpack Microsoft's NEW where VS Code's updater (Squirrel) unpacks a download.
+stage_bundle() {
   local upd
-  mkdir -p "$SHIPIT_DIR"
   upd=$(mktemp -d "$SHIPIT_DIR/update.XXXXXXX")
   STAGED="$upd/Visual Studio Code.app"
   /usr/bin/ditto "$WORK/ms-new.app" "$STAGED"
-  # Squirrel writes the state file last, once the update is unpacked and verified.
+}
+
+# stage_state: record the update for ShipIt. Squirrel writes this last, once the update is
+# unpacked and verified.
+stage_state() {
   printf '{"targetBundleURL":"%s","updateBundleURL":"%s","bundleIdentifier":"%s","launchAfterInstallation":false,"useUpdateBundleName":false}\n' \
     "$(file_url "$APP")" "$(file_url "$STAGED")" "$BUNDLE_ID" > "$SHIPIT_DIR/ShipItState.plist.tmp"
   mv "$SHIPIT_DIR/ShipItState.plist.tmp" "$SHIPIT_DIR/ShipItState.plist"
@@ -385,7 +432,16 @@ if ! sudo /bin/bash "$OUT/endor-vscode.sh" > "$ARTIFACTS/install.log" 2>&1; then
 fi
 pass "endor-vscode.sh succeeded"
 sudo /bin/launchctl print "system/$DAEMON_LABEL" >/dev/null 2>&1 || fail "the LaunchDaemon is not loaded"
+[[ "$(daemon_runs)" =~ ^[0-9]+$ ]] || fail "launchctl print shows no run count for the daemon"
 pass "the LaunchDaemon is loaded"
+watched=$(watch_paths)
+if ! grep -qxF "$APP" <<< "$watched" || ! grep -qxF "$SHIPIT_DIR" <<< "$watched"; then
+  fail "the daemon does not watch VS Code and this user's ShipIt folder: $(tr '\n' ' ' <<< "$watched")"
+fi
+if grep -qxE '/Applications/?|/Users/[^/]+/Library/Caches/?' <<< "$watched"; then
+  fail "the daemon watches a whole folder that changes all the time: $(tr '\n' ' ' <<< "$watched")"
+fi
+pass "the daemon watches only VS Code and each user's ShipIt folder, which need not exist yet"
 SHA1=$(lower "$(sudo cat "$STATE_DIR/signing/cert.sha1" 2>/dev/null)")
 [[ "$SHA1" =~ ^[0-9a-f]{40}$ ]] || fail "the worker recorded no signing identity"
 OURS_REQ="identifier \"$BUNDLE_ID\" and certificate leaf = H\"$SHA1\""
@@ -405,8 +461,24 @@ quit_vscode
 launch_vscode
 check_launch "The re-signed VS Code $OLD"
 
+step "The daemon stays quiet while VS Code is open"
+before=$(daemon_runs)
+sleep 65
+idle_runs=$(( $(daemon_runs) - before ))
+# Its 60-second timer accounts for one or two runs. Watching a busy folder such as a user's
+# Caches would add dozens.
+(( idle_runs <= 3 )) || fail "the daemon ran $idle_runs times in 65s with nothing to do"
+pass "the daemon ran $idle_runs times in 65s with nothing to do"
+
 step "Stage VS Code $NEW as a downloaded update"
-stage_update
+after_timer_tick
+# This user had no ShipIt folder when the daemon was installed.
+mkdir -p "$SHIPIT_DIR"
+expect_watch_run "creating this user's ShipIt folder"
+stage_bundle
+after_timer_tick
+stage_state
+expect_watch_run "recording the staged update for ShipIt"
 wait_until 900 staged_prepared || fail "the daemon did not prepare the staged update within 900s"
 pass "the daemon patched and signed the staged update within ${WAITED}s"
 check_signed "$STAGED" "The prepared update"
@@ -433,9 +505,12 @@ check_launch "The updated VS Code $NEW"
 quit_vscode
 
 step "Replace the app with a fresh Microsoft copy of VS Code $NEW"
-sudo /bin/mv "$APP" "$WORK/replaced.app" || fail "could not move the installed app away"
 /usr/bin/ditto "$WORK/ms-new.app" "$WORK/ms-new-copy.app"
+after_timer_tick
+sudo /bin/mv "$APP" "$WORK/replaced.app" || fail "could not move the installed app away"
+expect_watch_run "moving VS Code out of /Applications"
 sudo /bin/mv "$WORK/ms-new-copy.app" "$APP" || fail "could not put a fresh copy in place"
+expect_watch_run "moving a fresh copy into /Applications"
 wait_until 900 signed_by_us "$APP" || fail "the daemon did not migrate the fresh copy within 900s"
 pass "the daemon migrated the fresh copy within ${WAITED}s"
 wait_until 600 live_is B "$NEW_BV" || fail "the worker does not report state B after migrating the fresh copy"

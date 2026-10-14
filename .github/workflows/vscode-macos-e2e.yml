@@ -58,9 +58,9 @@ jobs:
       matrix:
         os: ${{ fromJSON(inputs.runner && format('["{0}"]', inputs.runner) || '["macos-15", "macos-15-intel", "macos-26", "macos-26-intel"]') }}
     runs-on: ${{ matrix.os }}
-    # Intel runners take about 20 minutes, Apple silicon about 8: each deep codesign check of the
-    # universal app takes about a minute on Intel.
-    timeout-minutes: 45
+    # Intel runners take 25 to 35 minutes, Apple silicon about 15: each deep codesign check of the
+    # universal app takes about a minute on Intel, and the watch checks wait on the daemon's timer.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 

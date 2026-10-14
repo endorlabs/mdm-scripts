@@ -291,8 +291,9 @@ The script applies immediately and installs drift remediation:
 - **macOS**, only with `ENDOR_VSCODE_MACOS_DAEMON=1` (see
   [macOS is opt-in](#macos-is-opt-in)):
   `/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist` runs a worker
-  when `/Applications` or a user's VS Code update cache changes, and every
-  60 seconds. See [macOS code signing](#macos-code-signing).
+  when `/Applications/Visual Studio Code.app` or a user's VS Code update cache
+  (`~/Library/Caches/com.microsoft.VSCode.ShipIt`) changes, and every 60
+  seconds. See [macOS code signing](#macos-code-signing).
 - **Linux**: `endor-vscode-firewall.path` watches `/usr/share/code` and
   `/usr/lib/code`; its oneshot systemd service reapplies the patch.
 

@@ -82,7 +82,7 @@ VS Code cannot fall back to the upstream extension download template. It
 preserves every unrelated `product.json` value and reapplies only those two
 managed properties after VS Code updates:
 
-- macOS: root launchd daemon watching `/Applications` and users' VS Code update
+- macOS: root launchd daemon watching the VS Code app and users' VS Code update
   caches, only when the bash generator runs with `ENDOR_VSCODE_MACOS_DAEMON=1`
   (opt-in; see [bash/README.md](bash/README.md#macos-is-opt-in))
 - Linux: systemd path/service units watching native `code` package locations

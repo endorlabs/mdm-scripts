@@ -1741,17 +1741,17 @@ else
         mkdir -p "$_VSCODE_LOG_DIR"
         touch "$_vscode_log"
         chmod 600 "$_vscode_log"
-        # Watch /Applications for updater replacements and each user's ShipIt cache for staged
-        # updates. A user who has never updated VS Code has no ShipIt cache yet, so watch their
-        # Caches folder instead; StartInterval covers anything the watches miss.
-        _vscode_watch="    <string>/Applications</string>"
+        # launchd starts the job when anything beneath a watched path changes, and when a watched
+        # path that doesn't exist yet is created. So watch only VS Code itself, for updater
+        # replacements, and each user's ShipIt cache, where VS Code's updater stages downloads,
+        # whether or not it exists yet. Watching a user's whole Caches folder ran the worker every
+        # few seconds, and all of /Applications ran it whenever any app changed. StartInterval
+        # covers users added later.
+        _vscode_watch="    <string>/Applications/Visual Studio Code.app</string>"
         for _vscode_caches in /Users/*/Library/Caches; do
           [[ -d "$_vscode_caches" && ! -L "$_vscode_caches" ]] || continue
-          if [[ -d "$_vscode_caches/com.microsoft.VSCode.ShipIt" ]]; then
-            _vscode_caches="$_vscode_caches/com.microsoft.VSCode.ShipIt"
-          fi
           _vscode_watch="$_vscode_watch
-    <string>$(_vscode_xml "$_vscode_caches")</string>"
+    <string>$(_vscode_xml "$_vscode_caches/com.microsoft.VSCode.ShipIt")</string>"
         done
         cat > "$_vscode_plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
