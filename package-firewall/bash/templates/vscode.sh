@@ -526,6 +526,18 @@ bundle_fingerprint() {
   printf '%s|%s|%s|%s\n' "$(bundle_stat "$1")" "$URL_HASH" "$CERT_SHA1" "$WORKER_VERSION"
 }
 
+# watched_state: stat-only snapshot of what the LaunchDaemon watches: the app and each user's
+# ShipIt state file. launchd drops changes that arrive while this job runs, so a run compares
+# the snapshot before and after its work.
+watched_state() {
+  local f
+  if app_present; then bundle_stat "$APP"; else echo absent; fi
+  for f in "$USERS_DIR"/*/Library/Caches/"$BUNDLE_ID".ShipIt/ShipItState.plist; do
+    /usr/bin/stat -f '%N %d:%i:%Fm:%Fc:%z' "$f" 2>/dev/null
+  done
+  return 0
+}
+
 # wait_for_quiescence: wait until ShipIt is not installing and the bundle's files stop changing.
 # A bundle that is stable but incomplete is then classified, and refused.
 wait_for_quiescence() {
@@ -1565,7 +1577,7 @@ rotate_log() {
 }
 
 darwin_main() {
-  local name rc status=0
+  local name rc before status=0
   export PATH=/usr/bin:/bin:/usr/sbin:/sbin
   export LC_ALL=C
   APP_PATH="${ENDOR_VSCODE_APP:-/Applications/Visual Studio Code.app}"
@@ -1631,9 +1643,16 @@ darwin_main() {
   case "$MODE" in
     once)
       [[ "$DRY_RUN" == "1" ]] || rotate_log
-      process_live || status=1
-      process_staged || status=1
-      [[ "$LIVE_CLASS" == B ]] && prune_pristine
+      # Go round again when the app or a staged update changed during the run, because
+      # launchd won't start the job for it. The worker's own swaps count, so a second round
+      # is usually just the fast path. At most three rounds.
+      for _ in 1 2 3; do
+        before=$(watched_state)
+        process_live || status=1
+        process_staged || status=1
+        [[ "$LIVE_CLASS" == B ]] && prune_pristine
+        [[ "$(watched_state)" != "$before" ]] || break
+      done
       ;;
     restore)
       restore_staged || status=1
@@ -1741,17 +1760,17 @@ else
         mkdir -p "$_VSCODE_LOG_DIR"
         touch "$_vscode_log"
         chmod 600 "$_vscode_log"
-        # Watch /Applications for updater replacements and each user's ShipIt cache for staged
-        # updates. A user who has never updated VS Code has no ShipIt cache yet, so watch their
-        # Caches folder instead; StartInterval covers anything the watches miss.
-        _vscode_watch="    <string>/Applications</string>"
+        # launchd starts the job when anything beneath a watched path changes, and when a watched
+        # path that doesn't exist yet is created. So watch only VS Code itself, for updater
+        # replacements, and each user's ShipIt cache, where VS Code's updater stages downloads,
+        # whether or not it exists yet. Watching a user's whole Caches folder ran the worker every
+        # few seconds, and all of /Applications ran it whenever any app changed. StartInterval
+        # covers users added later.
+        _vscode_watch="    <string>/Applications/Visual Studio Code.app</string>"
         for _vscode_caches in /Users/*/Library/Caches; do
           [[ -d "$_vscode_caches" && ! -L "$_vscode_caches" ]] || continue
-          if [[ -d "$_vscode_caches/com.microsoft.VSCode.ShipIt" ]]; then
-            _vscode_caches="$_vscode_caches/com.microsoft.VSCode.ShipIt"
-          fi
           _vscode_watch="$_vscode_watch
-    <string>$(_vscode_xml "$_vscode_caches")</string>"
+    <string>$(_vscode_xml "$_vscode_caches/com.microsoft.VSCode.ShipIt")</string>"
         done
         cat > "$_vscode_plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
