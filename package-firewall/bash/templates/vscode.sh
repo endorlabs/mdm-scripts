@@ -526,6 +526,18 @@ bundle_fingerprint() {
   printf '%s|%s|%s|%s\n' "$(bundle_stat "$1")" "$URL_HASH" "$CERT_SHA1" "$WORKER_VERSION"
 }
 
+# watched_state: stat-only snapshot of what the LaunchDaemon watches: the app and each user's
+# ShipIt state file. launchd drops changes that arrive while this job runs, so a run compares
+# the snapshot before and after its work.
+watched_state() {
+  local f
+  if app_present; then bundle_stat "$APP"; else echo absent; fi
+  for f in "$USERS_DIR"/*/Library/Caches/"$BUNDLE_ID".ShipIt/ShipItState.plist; do
+    /usr/bin/stat -f '%N %d:%i:%Fm:%Fc:%z' "$f" 2>/dev/null
+  done
+  return 0
+}
+
 # wait_for_quiescence: wait until ShipIt is not installing and the bundle's files stop changing.
 # A bundle that is stable but incomplete is then classified, and refused.
 wait_for_quiescence() {
@@ -1565,7 +1577,7 @@ rotate_log() {
 }
 
 darwin_main() {
-  local name rc status=0
+  local name rc before status=0
   export PATH=/usr/bin:/bin:/usr/sbin:/sbin
   export LC_ALL=C
   APP_PATH="${ENDOR_VSCODE_APP:-/Applications/Visual Studio Code.app}"
@@ -1631,9 +1643,16 @@ darwin_main() {
   case "$MODE" in
     once)
       [[ "$DRY_RUN" == "1" ]] || rotate_log
-      process_live || status=1
-      process_staged || status=1
-      [[ "$LIVE_CLASS" == B ]] && prune_pristine
+      # Go round again when the app or a staged update changed during the run, because
+      # launchd won't start the job for it. The worker's own swaps count, so a second round
+      # is usually just the fast path. At most three rounds.
+      for _ in 1 2 3; do
+        before=$(watched_state)
+        process_live || status=1
+        process_staged || status=1
+        [[ "$LIVE_CLASS" == B ]] && prune_pristine
+        [[ "$(watched_state)" != "$before" ]] || break
+      done
       ;;
     restore)
       restore_staged || status=1
