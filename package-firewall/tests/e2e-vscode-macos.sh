@@ -77,6 +77,7 @@ SHA1=""
 OURS_REQ=""
 STAGED=""
 TICK_RUNS=0
+RECORDER_PID=""
 
 # ── Reporting ─────────────────────────────────────────────────────────────────
 
@@ -261,12 +262,49 @@ settle() {
 
 # after_timer_tick: settle, then wait for the daemon's next run and let it finish. With nothing
 # it watches changing, that run comes from its 60-second timer, so for most of a minute
-# afterwards any further run must come from a watched path.
+# afterwards any further run must come from a watched path. A slow run (a full check of the
+# app) leaves less of that minute, so wait for a quick one.
 after_timer_tick() {
-  settle
-  wait_until 75 runs_above "$TICK_RUNS" || fail "the daemon did not run on its 60-second timer"
-  wait_until 60 daemon_idle || fail "the daemon's timer run did not finish within 60s"
-  TICK_RUNS=$(daemon_runs)
+  for _ in 1 2 3; do
+    settle
+    wait_until 75 runs_above "$TICK_RUNS" || fail "the daemon did not run on its 60-second timer"
+    wait_until 300 daemon_idle || fail "the daemon's timer run did not finish within 300s"
+    TICK_RUNS=$(daemon_runs)
+    if (( WAITED <= 15 )); then
+      return 0
+    fi
+    info "a timer run of the daemon took ${WAITED}s, so it checked the app in full"
+  done
+  fail "the daemon's timer runs kept taking more than 15s"
+}
+
+# The parts of the app the worker's fast path compares, one line each.
+bundle_stat_lines() {
+  local exe
+  exe=$(info_value "$APP" CFBundleExecutable)
+  /usr/bin/stat -f '%N ino=%i mtime=%Fm ctime=%Fc size=%z' "$APP" "$APP/Contents" \
+    "$APP/Contents/Info.plist" "$APP/Contents/MacOS/${exe:-Code}" \
+    "$APP/Contents/_CodeSignature/CodeResources" "$APP/$PRODUCT_REL" 2>&1
+  printf 'xattrs on the app: %s\n' "$(/usr/bin/xattr "$APP" 2>/dev/null | tr '\n' ' ')"
+}
+
+# start_stat_recorder: every 5s, log those parts when they change, to show what makes the
+# worker check the app in full.
+start_stat_recorder() {
+  (
+    # The app is briefly absent while the test replaces it; keep recording.
+    set +e
+    prev=""
+    while :; do
+      cur=$(bundle_stat_lines)
+      if [[ "$cur" != "$prev" ]]; then
+        printf '%s\n%s\n\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$cur" >> "$ARTIFACTS/bundle-stat.log"
+        prev=$cur
+      fi
+      sleep 5
+    done
+  ) &
+  RECORDER_PID=$!
 }
 
 # expect_watch_run <what>: the change just made started the daemon within 10s, too soon after
@@ -394,6 +432,9 @@ finish() {
   local rc=$? pid
   set +e
   stop_shipit
+  if [[ -n "$RECORDER_PID" ]]; then
+    kill "$RECORDER_PID" 2>/dev/null
+  fi
   for pid in $(main_pids); do kill -KILL "$pid" 2>/dev/null; done
   collect_artifacts
   # Leave a reusable Mac as it was found when a step failed halfway.
@@ -435,6 +476,7 @@ rm -rf "$SHIPIT_DIR"
 /usr/bin/ditto "$WORK/ms-old.app" "$APP" || fail "could not install VS Code $OLD"
 launch_vscode
 check_launch "Microsoft's VS Code $OLD"
+start_stat_recorder
 
 step "Deploy endor-vscode.sh while VS Code $OLD is running"
 generate || fail "generate.sh failed"
