@@ -1,0 +1,71 @@
+name: VS Code Windows end-to-end
+
+# Runs Microsoft's real VS Code system installer through the Windows firewall watcher: deploy from
+# 32-bit Windows PowerShell, an update installed the way a system install updates, and removal.
+# See package-firewall/tests/e2e-vscode-windows.ps1.
+
+on:
+  pull_request:
+    paths:
+      - package-firewall/powershell/generate.ps1
+      - package-firewall/powershell/templates/vscode.ps1
+      - package-firewall/powershell/templates/remove.ps1
+      - package-firewall/tests/e2e-vscode-windows.ps1
+      - .github/workflows/vscode-windows-e2e.yml
+  push:
+    branches: [main]
+    paths:
+      - package-firewall/powershell/generate.ps1
+      - package-firewall/powershell/templates/vscode.ps1
+      - package-firewall/powershell/templates/remove.ps1
+      - package-firewall/tests/e2e-vscode-windows.ps1
+      - .github/workflows/vscode-windows-e2e.yml
+  schedule:
+    # Weekly, to catch new VS Code releases and runner image updates.
+    - cron: '41 7 * * 1'
+  workflow_dispatch:
+    inputs:
+      old_version:
+        description: 'VS Code version to start from (default: newest release of the minor before new_version)'
+        required: false
+        default: ''
+      new_version:
+        description: 'VS Code version to update to (default: latest stable)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  e2e:
+    name: VS Code e2e (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Run the end-to-end test
+        shell: pwsh
+        env:
+          ENDOR_E2E_OLD_VERSION: ${{ inputs.old_version }}
+          ENDOR_E2E_NEW_VERSION: ${{ inputs.new_version }}
+          ENDOR_E2E_ARTIFACTS: ${{ runner.temp }}/vscode-e2e-artifacts
+        run: ./package-firewall/tests/e2e-vscode-windows.ps1
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vscode-e2e-${{ matrix.os }}
+          path: ${{ runner.temp }}/vscode-e2e-artifacts
+          if-no-files-found: ignore
+          retention-days: 14
