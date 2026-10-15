@@ -115,14 +115,16 @@ function Save-Logs {
 }
 
 try {
-    $releases = @(Invoke-RestMethod -Uri 'https://update.code.visualstudio.com/api/releases/stable' `
-        -MaximumRetryCount 3 -RetryIntervalSec 5)
+    # Invoke-RestMethod returns a JSON array as one object; the cast makes it a list of versions.
+    $releases = [string[]](Invoke-RestMethod -Uri 'https://update.code.visualstudio.com/api/releases/stable' `
+        -MaximumRetryCount 3 -RetryIntervalSec 5) | Where-Object { $_ -match '^\d+\.\d+\.\d+$' }
     $new = if ($env:ENDOR_E2E_NEW_VERSION) { $env:ENDOR_E2E_NEW_VERSION } else { $releases[0] }
     $old = if ($env:ENDOR_E2E_OLD_VERSION) { $env:ENDOR_E2E_OLD_VERSION } else {
         $minor = ($new -split '\.')[0..1] -join '.'
         $releases | Where-Object { (($_ -split '\.')[0..1] -join '.') -ne $minor -and [version]$_ -lt [version]$new } |
             Select-Object -First 1
     }
+    if (-not $new -or -not $old) { Stop-Test "could not choose VS Code versions (new '$new', old '$old')" }
     Write-Host "VS Code $old -> $new"
     $oldSetup = Get-Setup $old
     $newSetup = Get-Setup $new
