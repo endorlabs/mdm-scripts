@@ -2328,11 +2328,59 @@ DPKGHOOK
 fi
 
 # ── The ExtensionGalleryServiceUrl policy ─────────────────────────────────────
-if [[ "$_VSCODE_ENABLE_POLICY" == "1" && -n "$_vscode_policy_kind" ]]; then
-  if [[ "$_vscode_policy_kind" == "profile" ]]; then
-    echo "[endor] note: on macOS, VS Code reads its policy from a configuration profile, which this script doesn't install."
-    echo "[endor]   Deliver ExtensionGalleryServiceUrl with your MDM (see bash/README.md)."
-  elif ! command -v python3 >/dev/null 2>&1; then
+# On macOS, VS Code reads the policy from managed preferences, which only an MDM profile sets in a
+# way users can't override. So there the script doesn't write it: it checks what the profiles set,
+# and reports. Scripts and profiles arrive in any order at enrollment, so no profile yet is only a
+# note. ENDOR_VSCODE_MANAGED_PREFS is for tests.
+# _vscode_managed_policy: one line per managed com.microsoft.VSCode preference file, machine-wide
+# first, then per user: URL, sign-in provider and file, separated by \037.
+_vscode_managed_policy() {
+  local dir="${ENDOR_VSCODE_MANAGED_PREFS:-/Library/Managed Preferences}" file
+  for file in "$dir/com.microsoft.VSCode.plist" "$dir"/*/com.microsoft.VSCode.plist; do
+    [[ -f "$file" ]] || continue
+    printf '%s\037%s\037%s\n' \
+      "$(/usr/bin/plutil -extract ExtensionGalleryServiceUrl raw -o - "$file" 2>/dev/null || true)" \
+      "$(/usr/bin/plutil -extract ExtensionGalleryAuthProvider raw -o - "$file" 2>/dev/null || true)" \
+      "$file"
+  done
+}
+
+_vscode_version=""
+if [[ "$_VSCODE_ENABLE_POLICY" == "1" && "$_vscode_policy_kind" == "profile" ]]; then
+  _vscode_found=0
+  _vscode_others=0
+  while IFS=$'\037' read -r _vscode_url _vscode_auth _vscode_item; do
+    if [[ -z "$_vscode_url" ]]; then
+      continue
+    elif [[ "$_vscode_url" == "$_VSCODE_SERVICE_URL" ]]; then
+      _vscode_found=1
+      if [[ -n "$_VSCODE_POLICY_AUTH" && "$_vscode_auth" != "$_VSCODE_POLICY_AUTH" ]]; then
+        _vscode_warn "$_vscode_item sets ExtensionGalleryAuthProvider to '${_vscode_auth:-github, the default}', not '$_VSCODE_POLICY_AUTH'."
+        echo "[endor]   Upload the endor-vscode.mobileconfig generated with this script." >&2
+      fi
+    elif [[ "$_vscode_url" == *"/firewall/vscode/_ak/"* ]]; then
+      _vscode_others=1
+      _vscode_warn "$_vscode_item sets an Endor ExtensionGalleryServiceUrl with other credentials or for another namespace."
+      echo "[endor]   Upload the endor-vscode.mobileconfig generated with this script, and remove the old profile." >&2
+    else
+      _vscode_others=1
+      _vscode_warn "$_vscode_item sets ExtensionGalleryServiceUrl to another gallery, so VS Code doesn't use the Endor firewall."
+      echo "[endor]   Remove that profile, or put Endor's keys in it instead (see bash/README.md)." >&2
+    fi
+  done < <(_vscode_managed_policy)
+  if [[ "$_vscode_found" == "1" ]]; then
+    _vscode_done=1
+    echo "[endor] VS Code's policy is set by a configuration profile."
+  elif [[ "$_vscode_others" == "0" ]]; then
+    echo "[endor] note: no configuration profile sets VS Code's policy yet. Upload endor-vscode.mobileconfig,"
+    echo "[endor]   generated with this script, to your MDM (see bash/README.md)."
+  fi
+  _vscode_version=$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - \
+    "${ENDOR_VSCODE_APP:-/Applications/Visual Studio Code.app}/Contents/Info.plist" 2>/dev/null || true)
+  _vscode_minimum=1.99
+  _vscode_reader="the ExtensionGalleryServiceUrl policy"
+elif [[ "$_VSCODE_ENABLE_POLICY" == "1" && "$_vscode_policy_kind" == "file" ]]; then
+  if ! command -v python3 >/dev/null 2>&1; then
     _vscode_warn "python3 is required to set VS Code's policy on Linux."
   elif [[ "${DRY_RUN:-0}" != "1" && -z "${ENDOR_VSCODE_POLICY_FILE:-}" && "${EUID:-$(id -u)}" -ne 0 ]]; then
     _vscode_warn "setting VS Code's policy must run as root."
@@ -2342,20 +2390,38 @@ if [[ "$_VSCODE_ENABLE_POLICY" == "1" && -n "$_vscode_policy_kind" ]]; then
     [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" ]] || _vscode_strict=0
     _vscode_policy apply "$_VSCODE_POLICY_FILE" "$_VSCODE_POLICY_STATE_DIR" "$_VSCODE_POLICY_AUTH" \
       "${DRY_RUN:-0}" "$_vscode_strict" || _ENDOR_WARNED=1
-    # An older VS Code ignores the file. The patch, if enabled, covers it until it's updated. It
-    # can't help with the sign-in provider: the editor follows the policy's URL either way.
     _vscode_version=$(_vscode_policy version "$(dirname "$_vscode_product")/package.json" 2>/dev/null || true)
-    if [[ -z "$_vscode_version" ]]; then
-      :
-    elif _vscode_older "$_vscode_version" 1.106; then
-      if [[ "$_VSCODE_ENABLE_PATCH" == "1" ]]; then
-        echo "[endor] note: VS Code $_vscode_version doesn't read $_VSCODE_POLICY_FILE (1.106 and later do); the patch covers it until it's updated."
-      else
-        _vscode_warn "VS Code $_vscode_version doesn't read $_VSCODE_POLICY_FILE; 1.106 and later do."
-      fi
-    elif [[ -n "$_VSCODE_POLICY_AUTH" ]] && _vscode_older "$_vscode_version" 1.137; then
-      _vscode_warn "VS Code $_vscode_version ignores ExtensionGalleryAuthProvider; 1.137 and later read it."
+  fi
+  _vscode_minimum=1.106
+  _vscode_reader="$_VSCODE_POLICY_FILE"
+elif [[ "$_vscode_legacy" == "0" && "$_vscode_policy_kind" == "file" && -f "$_VSCODE_POLICY_FILE" ]] \
+    && grep -q '/firewall/vscode/_ak/' "$_VSCODE_POLICY_FILE"; then
+  # As with the patch: a policy left by an earlier deployment stays until the admin decides.
+  _vscode_warn "VS Code's ExtensionGalleryServiceUrl policy from an earlier deployment is still set in $_VSCODE_POLICY_FILE."
+  echo "[endor]   This script doesn't enable it. Regenerate with ENDOR_VSCODE_ENABLE_POLICY=true to keep it, or run endor-remove.sh to remove it." >&2
+elif [[ "$_vscode_legacy" == "0" && "$_vscode_policy_kind" == "profile" ]]; then
+  while IFS=$'\037' read -r _vscode_url _vscode_auth _vscode_item; do
+    if [[ "$_vscode_url" == *"/firewall/vscode/_ak/"* ]]; then
+      _vscode_warn "a configuration profile still sets VS Code's ExtensionGalleryServiceUrl to the Endor firewall ($_vscode_item)."
+      echo "[endor]   This script doesn't enable the policy. Regenerate with ENDOR_VSCODE_ENABLE_POLICY=true to keep it, or remove the profile in your MDM." >&2
+      break
     fi
+  done < <(_vscode_managed_policy)
+fi
+
+if [[ "$_VSCODE_ENABLE_POLICY" == "1" && -n "$_vscode_policy_kind" ]]; then
+  # An older VS Code ignores the policy. The patch, if enabled, covers it until it's updated. It
+  # can't help with the sign-in provider: the editor follows the policy's URL either way.
+  if [[ -z "$_vscode_version" ]]; then
+    :
+  elif _vscode_older "$_vscode_version" "$_vscode_minimum"; then
+    if [[ "$_VSCODE_ENABLE_PATCH" == "1" ]]; then
+      echo "[endor] note: VS Code $_vscode_version doesn't read $_vscode_reader ($_vscode_minimum and later do); the patch covers it until it's updated."
+    else
+      _vscode_warn "VS Code $_vscode_version doesn't read $_vscode_reader; $_vscode_minimum and later do."
+    fi
+  elif [[ -n "$_VSCODE_POLICY_AUTH" ]] && _vscode_older "$_vscode_version" 1.137; then
+    _vscode_warn "VS Code $_vscode_version ignores ExtensionGalleryAuthProvider; 1.137 and later read it."
   fi
   # Without ENDOR_VSCODE_POLICY_AUTH the script sets no provider, so VS Code's default applies.
   echo "[endor] note: under this policy, VS Code turns the Extensions Marketplace off until the user signs in"
@@ -2364,18 +2430,14 @@ if [[ "$_VSCODE_ENABLE_POLICY" == "1" && -n "$_vscode_policy_kind" ]]; then
     github) echo "[endor]   with a GitHub account that has Copilot Business or Enterprise, or a GitHub Enterprise account (see bash/README.md)." ;;
     *) echo "[endor]   with an account that VS Code's default sign-in provider accepts (see bash/README.md)." ;;
   esac
-elif [[ "$_vscode_legacy" == "0" && "$_vscode_policy_kind" == "file" && -f "$_VSCODE_POLICY_FILE" ]] \
-    && grep -q '/firewall/vscode/_ak/' "$_VSCODE_POLICY_FILE"; then
-  # As with the patch: a policy left by an earlier deployment stays until the admin decides.
-  _vscode_warn "VS Code's ExtensionGalleryServiceUrl policy from an earlier deployment is still set in $_VSCODE_POLICY_FILE."
-  echo "[endor]   This script doesn't enable it. Regenerate with ENDOR_VSCODE_ENABLE_POLICY=true to keep it, or run endor-remove.sh to remove it." >&2
 fi
 
 [[ "$_vscode_done" != "1" ]] || echo "[endor] ✓ VS Code extension firewall done"
-unset -f _vscode_run_worker _vscode_xml _vscode_policy _vscode_warn _vscode_older
+unset -f _vscode_run_worker _vscode_xml _vscode_policy _vscode_warn _vscode_older _vscode_managed_policy
 unset _vscode_os _VSCODE_STATE_DIR _VSCODE_WORKER_PATH _VSCODE_WORKER_CONTENT _VSCODE_LOG_DIR
 unset _vscode_tmp_worker _vscode_plist _vscode_service _vscode_path _vscode_timer _vscode_dpkg_hook
 unset _vscode_log _vscode_watch _vscode_caches _vscode_left _vscode_done _vscode_product
 unset _VSCODE_SERVICE_URL _VSCODE_ENABLE_PATCH _VSCODE_ENABLE_POLICY _VSCODE_POLICY_AUTH _VSCODE_MACOS_DAEMON
 unset _vscode_legacy _VSCODE_POLICY_FILE _VSCODE_POLICY_STATE_DIR _vscode_policy_kind _VSCODE_POLICY_PY
-unset _vscode_strict _vscode_version _vscode_item
+unset _vscode_strict _vscode_version _vscode_item _vscode_found _vscode_others _vscode_url _vscode_auth
+unset _vscode_minimum _vscode_reader
