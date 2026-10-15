@@ -116,6 +116,11 @@ function Save-Logs {
         $task | Get-ScheduledTaskInfo | Format-List | Out-String |
             Set-Content (Join-Path $Artifacts "task-info-$Label.txt")
     }
+    # Which Windows PowerShell processes run, since when, and with what arguments: shows whether the
+    # watcher started, and when.
+    Get-CimInstance Win32_Process -Filter "name='powershell.exe'" -ErrorAction SilentlyContinue |
+        Select-Object ProcessId, ParentProcessId, CreationDate, CommandLine | Format-List | Out-String -Width 4096 |
+        Set-Content (Join-Path $Artifacts "processes-$Label.txt")
 }
 
 try {
@@ -165,13 +170,19 @@ try {
     }
     if ($task.Settings.Priority -ne 4) { Stop-Test "the task runs at priority $($task.Settings.Priority), not 4 (normal)" }
     Write-Pass 'the SYSTEM watcher task is running at normal priority'
-    # Let the watcher finish its first pass and start watching.
-    $deadline = (Get-Date).AddSeconds(30)
+    # Let the watcher finish its first pass and start watching. The installer has already patched,
+    # so a slow start on a busy runner doesn't matter here; the time it took is printed.
+    $watchStarted = Get-Date
+    $deadline = $watchStarted.AddSeconds(120)
     while (-not ((Test-Path -LiteralPath $WorkerLog) -and
             (Get-Content -LiteralPath $WorkerLog -Raw) -match 'watching [1-9][0-9]* install')) {
-        if ((Get-Date) -gt $deadline) { Stop-Test 'the watcher did not start watching within 30s' }
+        if ((Get-Date) -gt $deadline) {
+            Save-Logs 'watch-start'
+            Stop-Test 'the watcher did not start watching within 120s'
+        }
         Start-Sleep -Milliseconds 200
     }
+    Write-Host ("the watcher was watching {0:N1}s after the installer finished" -f ((Get-Date) - $watchStarted).TotalSeconds)
     # VS Code's own policy definitions say where it reads each policy.
     $admx = @(@(Get-Item -LiteralPath $App) + @(Get-ChildItem -LiteralPath $App -Directory) |
         ForEach-Object { Join-Path $_.FullName 'policies\VSCode.admx' } |
