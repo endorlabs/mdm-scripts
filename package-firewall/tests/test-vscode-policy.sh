@@ -90,6 +90,41 @@ PY
 }
 
 file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+
+# plist_value <file> <dotted.path>: a value from a property list, or <none>.
+plist_value() {
+  python3 -I - "$1" "$2" <<'PY'
+import plistlib
+import sys
+with open(sys.argv[1], "rb") as handle:
+    value = plistlib.load(handle)
+for part in sys.argv[2].split("."):
+    if isinstance(value, list):
+        value = value[int(part)]
+    elif isinstance(value, dict) and part in value:
+        value = value[part]
+    else:
+        value = "<none>"
+        break
+print(value)
+PY
+}
+
+# managed_prefs <file> <url> [provider]: what an MDM profile leaves in /Library/Managed Preferences.
+managed_prefs() {
+  python3 -I - "$1" "$2" "${3:-}" <<'PY'
+import os
+import plistlib
+import sys
+path, url, provider = sys.argv[1:4]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+value = {"ExtensionGalleryServiceUrl": url}
+if provider:
+    value["ExtensionGalleryAuthProvider"] = provider
+with open(path, "wb") as handle:
+    plistlib.dump(value, handle)
+PY
+}
 digest() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}' || sha256sum "$1" | awk '{print $1}'; }
 
 expect_rc() {
@@ -293,16 +328,161 @@ if [[ "$(uname -s)" == "Darwin" || "$(id -u)" -ne 0 ]]; then
   PATCH=1 generate
   RC=0
   OUTPUT=$(ENDOR_VSCODE_PRODUCT_JSON="$CASE/app/product.json" ENDOR_VSCODE_STATE_DIR="$CASE/state" \
-    ENDOR_VSCODE_SKIP_WATCHER=1 "$OUT/endor-vscode.sh" 2>&1) || RC=$?
+    ENDOR_VSCODE_MANAGED_PREFS="$CASE/managed" ENDOR_VSCODE_SKIP_WATCHER=1 "$OUT/endor-vscode.sh" 2>&1) || RC=$?
   case "$(uname -s)" in
     Darwin)
-      expect_output "VS Code reads its policy from a configuration profile"
+      expect_rc 0
+      expect_output "no configuration profile sets VS Code's policy yet"
       ;;
     Linux)
       expect_rc 1
       expect_output "setting VS Code's policy must run as root"
       ;;
   esac
+  generate
+fi
+
+echo "test: with the policy, the generator writes a macOS profile and property list"
+UUID_RE='^[0-9A-F]{8}-[0-9A-F]{4}-5[0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$'
+PROFILE="$OUT/endor-vscode.mobileconfig"
+PREFS="$OUT/endor-vscode-policy.plist"
+generate
+for file in "$PROFILE" "$PREFS"; do
+  [[ -f "$file" ]] || fail "$file was not generated"
+  [[ "$(file_mode "$file")" == "600" ]] || fail "$file is not mode 600"
+  if grep -qE '\{\{|<!--' "$file"; then fail "$file has a placeholder or the template's comment"; fi
+  if command -v xmllint >/dev/null 2>&1; then xmllint --noout "$file" || fail "$file is not well-formed XML"; fi
+  if [[ -x /usr/bin/plutil ]]; then /usr/bin/plutil -lint -s "$file" || fail "$file is not a valid property list"; fi
+done
+[[ "$(plist_value "$PROFILE" PayloadType)" == "Configuration" ]] || fail "the profile is not a Configuration"
+[[ "$(plist_value "$PROFILE" PayloadIdentifier)" == "com.endorlabs.package-firewall.vscode" ]] \
+  || fail "the profile's identifier is not stable"
+[[ "$(plist_value "$PROFILE" TargetDeviceType)" == "5" ]] || fail "the profile does not target macOS"
+[[ "$(plist_value "$PROFILE" PayloadContent.0.PayloadType)" == "com.microsoft.VSCode" ]] \
+  || fail "the payload is not for com.microsoft.VSCode"
+[[ "$(plist_value "$PROFILE" PayloadContent.0.ExtensionGalleryServiceUrl)" == "$EXPECTED_URL" ]] \
+  || fail "the profile does not carry the URL"
+[[ "$(plist_value "$PROFILE" PayloadContent.0.ExtensionGalleryAuthProvider)" == "<none>" ]] \
+  || fail "the profile sets a provider without AUTH"
+[[ "$(plist_value "$PREFS" ExtensionGalleryServiceUrl)" == "$EXPECTED_URL" ]] || fail "the plist does not carry the URL"
+profile_uuid=$(plist_value "$PROFILE" PayloadUUID)
+payload_uuid=$(plist_value "$PROFILE" PayloadContent.0.PayloadUUID)
+[[ "$profile_uuid" =~ $UUID_RE && "$payload_uuid" =~ $UUID_RE && "$profile_uuid" != "$payload_uuid" ]] \
+  || fail "the profile's UUIDs are malformed: $profile_uuid $payload_uuid"
+cp "$PROFILE" "$TMP_DIR/profile-before"
+generate
+cmp -s "$PROFILE" "$TMP_DIR/profile-before" || fail "regenerating the same profile changed it"
+AUTH=microsoft generate
+[[ "$(plist_value "$PROFILE" PayloadContent.0.ExtensionGalleryAuthProvider)" == "microsoft" ]] \
+  || fail "the profile does not set AUTH"
+[[ "$(plist_value "$PREFS" ExtensionGalleryAuthProvider)" == "microsoft" ]] || fail "the plist does not set AUTH"
+[[ "$(plist_value "$PROFILE" PayloadUUID)" != "$profile_uuid" ]] || fail "a different profile kept its UUID"
+PATCH=1 POLICY=0 generate
+[[ ! -e "$PROFILE" && ! -e "$PREFS" ]] || fail "the profile was left behind with the policy off"
+generate
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  # install_mac: runs endor-vscode.sh for the current case without the policy file override, so
+  # it checks managed preferences. The patch is on, so a daemon on this Mac doesn't count as a
+  # leftover. Sets RC and OUTPUT.
+  install_mac() {
+    RC=0
+    OUTPUT=$(ENDOR_VSCODE_PRODUCT_JSON="$CASE/app/product.json" \
+      ENDOR_VSCODE_STATE_DIR="$CASE/state" \
+      ENDOR_VSCODE_APP="$CASE/Visual Studio Code.app" \
+      ENDOR_VSCODE_MANAGED_PREFS="$CASE/managed" \
+      ENDOR_VSCODE_SKIP_WATCHER=1 \
+      "$OUT/endor-vscode.sh" 2>&1) || RC=$?
+  }
+  new_mac_case() {
+    new_case "$1"
+    mkdir -p "$CASE/managed" "$CASE/Visual Studio Code.app/Contents"
+    python3 -I -c 'import plistlib, sys; plistlib.dump({"CFBundleShortVersionString": sys.argv[2]}, open(sys.argv[1], "wb"))' \
+      "$CASE/Visual Studio Code.app/Contents/Info.plist" "${2:-1.141.2}"
+  }
+
+  echo "test: macOS: the installer reports the profile that sets the policy"
+  PATCH=1 generate
+  new_mac_case mac-none
+  install_mac
+  expect_rc 0
+  expect_output "no configuration profile sets VS Code's policy yet"
+  # The generated profile, as macOS installs it.
+  new_mac_case mac-generated
+  python3 -I - "$PROFILE" "$CASE/managed/com.microsoft.VSCode.plist" <<'PY'
+import plistlib
+import sys
+with open(sys.argv[1], "rb") as handle:
+    payload = plistlib.load(handle)["PayloadContent"][0]
+with open(sys.argv[2], "wb") as handle:
+    plistlib.dump({k: v for k, v in payload.items() if not k.startswith("Payload")}, handle)
+PY
+  install_mac
+  expect_rc 0
+  expect_output "VS Code's policy is set by a configuration profile."
+  new_mac_case mac-user
+  managed_prefs "$CASE/managed/alice/com.microsoft.VSCode.plist" "$EXPECTED_URL"
+  install_mac
+  expect_rc 0
+  expect_output "VS Code's policy is set by a configuration profile."
+
+  echo "test: macOS: an old credential, another gallery or another provider in a profile is a warning"
+  new_mac_case mac-stale
+  managed_prefs "$CASE/managed/com.microsoft.VSCode.plist" "$(service_url old-secret)"
+  install_mac
+  expect_rc 1
+  expect_output "with other credentials or for another namespace"
+  new_mac_case mac-foreign
+  managed_prefs "$CASE/managed/com.microsoft.VSCode.plist" "https://gallery.example.invalid/_apis/public/gallery"
+  install_mac
+  expect_rc 1
+  expect_output "sets ExtensionGalleryServiceUrl to another gallery"
+  PATCH=1 AUTH=microsoft generate
+  new_mac_case mac-auth
+  managed_prefs "$CASE/managed/com.microsoft.VSCode.plist" "$EXPECTED_URL"
+  install_mac
+  expect_rc 1
+  expect_output "sets ExtensionGalleryAuthProvider to 'github, the default', not 'microsoft'"
+  managed_prefs "$CASE/managed/com.microsoft.VSCode.plist" "$EXPECTED_URL" microsoft
+  install_mac
+  expect_rc 0
+
+  echo "test: macOS: a VS Code too old for the policy is reported"
+  PATCH=1 generate
+  new_mac_case mac-old 1.98.0
+  managed_prefs "$CASE/managed/com.microsoft.VSCode.plist" "$EXPECTED_URL"
+  install_mac
+  expect_rc 0
+  expect_output "VS Code 1.98.0 doesn't read the ExtensionGalleryServiceUrl policy (1.99 and later do); the patch covers it"
+
+  echo "test: macOS: a profile left by an earlier deployment is reported"
+  PATCH=1 POLICY=0 generate
+  new_mac_case mac-leftover
+  managed_prefs "$CASE/managed/com.microsoft.VSCode.plist" "$EXPECTED_URL"
+  install_mac
+  expect_rc 1
+  expect_output "a configuration profile still sets VS Code's ExtensionGalleryServiceUrl"
+
+  echo "test: macOS: endor-remove.sh reports a profile it can't remove"
+  generate
+  section="$TMP_DIR/remove-section-mac.sh"
+  {
+    echo 'set -euo pipefail'
+    echo 'DRY_RUN=0; _ENDOR_WARNED=0'
+    sed -n '/^# >>> endor-vscode-remove$/,/^# <<< endor-vscode-remove$/p' "$OUT/endor-remove.sh"
+    echo 'exit "$_ENDOR_WARNED"'
+  } > "$section"
+  RC=0
+  OUTPUT=$(ENDOR_VSCODE_STATE_DIR="$CASE/state" ENDOR_VSCODE_MANAGED_PREFS="$CASE/managed" \
+    ENDOR_VSCODE_SKIP_WATCHER=1 bash "$section" 2>&1) || RC=$?
+  expect_rc 1
+  expect_output "Remove the profile in your MDM"
+  new_mac_case mac-remove-none
+  RC=0
+  OUTPUT=$(ENDOR_VSCODE_STATE_DIR="$CASE/state" ENDOR_VSCODE_MANAGED_PREFS="$CASE/managed" \
+    ENDOR_VSCODE_SKIP_WATCHER=1 bash "$section" 2>&1) || RC=$?
+  expect_rc 0
+  expect_output "skip (no VS Code configuration profile)"
   generate
 fi
 
