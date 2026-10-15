@@ -125,6 +125,8 @@ function run(argv) {
 JXA
 }
 
+# On Linux, python3 runs isolated (-I), so a module in the current directory can't be imported
+# into a root process.
 json_validate() {
   local file="$1"
   if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -134,7 +136,7 @@ json_validate() {
       echo "[endor-vscode] ERROR: python3 is required to patch product.json on Linux" >&2
       return 1
     }
-    python3 - "$file" <<'PY'
+    python3 -I - "$file" <<'PY'
 import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
@@ -148,7 +150,7 @@ json_service_url() {
   if [[ "$(uname -s)" == "Darwin" ]]; then
     jxa_json service "$file" 2>/dev/null
   else
-    python3 - "$file" <<'PY'
+    python3 -I - "$file" <<'PY'
 import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
@@ -165,7 +167,7 @@ json_has_extension_template() {
     result=$(jxa_json has-template "$file" 2>/dev/null || true)
     [[ "$result" == "true" ]]
   else
-    python3 - "$file" <<'PY'
+    python3 -I - "$file" <<'PY'
 import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
@@ -180,7 +182,7 @@ json_extension_template() {
   if [[ "$(uname -s)" == "Darwin" ]]; then
     jxa_json template "$file" 2>/dev/null
   else
-    python3 - "$file" <<'PY'
+    python3 -I - "$file" <<'PY'
 import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
@@ -216,7 +218,7 @@ write_patched_json() {
   if [[ "$(uname -s)" == "Darwin" ]]; then
     jxa_json patch "$file" "$FIREWALL_URL" >/dev/null
   else
-    python3 - "$file" "$FIREWALL_URL" <<'PY'
+    python3 -I - "$file" "$FIREWALL_URL" <<'PY'
 import json
 import os
 import sys
@@ -242,7 +244,7 @@ write_restored_json() {
   if [[ "$(uname -s)" == "Darwin" ]]; then
     jxa_json restore "$file" "$DEFAULT_SERVICE_URL" "$DEFAULT_EXTENSION_URL_TEMPLATE" >/dev/null
   else
-    python3 - "$file" "$DEFAULT_SERVICE_URL" "$DEFAULT_EXTENSION_URL_TEMPLATE" <<'PY'
+    python3 -I - "$file" "$DEFAULT_SERVICE_URL" "$DEFAULT_EXTENSION_URL_TEMPLATE" <<'PY'
 import json
 import sys
 
@@ -1692,10 +1694,11 @@ case "$_vscode_os" in
     _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/var/lib/endor/vscode-firewall}"
     ;;
   *)
+    # This script runs as a whole, not sourced, so skip the rest rather than return.
     echo "[endor] WARNING: VS Code firewall supports macOS and Linux only in this script." >&2
     _ENDOR_WARNED=1
-    unset _vscode_os _VSCODE_WORKER_CONTENT
-    return 0 2>/dev/null || true
+    _VSCODE_STATE_DIR=""
+    _vscode_skip=unsupported
     ;;
 esac
 _VSCODE_WORKER_PATH="$_VSCODE_STATE_DIR/worker.sh"
@@ -1713,7 +1716,9 @@ _vscode_xml() {
   printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
 
-if [[ "$_vscode_skip" == "1" ]]; then
+if [[ "$_vscode_skip" == "unsupported" ]]; then
+  :
+elif [[ "$_vscode_skip" == "1" ]]; then
   echo "[endor] skip: the VS Code firewall is not enabled for macOS in this script."
   echo "[endor]   To enable it, regenerate with ENDOR_VSCODE_MACOS_DAEMON=1 (see bash/README.md)."
   # An earlier version of this script installed the daemon unconditionally. Leave it running,
@@ -1847,7 +1852,7 @@ PATHUNIT
   fi
 fi
 
-[[ "$_vscode_skip" == "1" ]] || echo "[endor] ✓ VS Code extension firewall done"
+[[ "$_vscode_skip" != "0" ]] || echo "[endor] ✓ VS Code extension firewall done"
 unset -f _vscode_run_worker _vscode_xml
 unset _vscode_os _VSCODE_STATE_DIR _VSCODE_WORKER_PATH _VSCODE_WORKER_CONTENT _VSCODE_LOG_DIR
 unset _vscode_tmp_worker _vscode_plist _vscode_service _vscode_path _vscode_log _vscode_watch

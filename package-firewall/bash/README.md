@@ -118,6 +118,8 @@ Each script in `out/<namespace>/` carries all Endor configuration it needs. The 
 
 Upload the script file. Ensure it runs as **root** — the script detects the logged-in console user internally and writes config files to the correct home directory.
 
+The scripts take one optional argument, `--dry-run`. They ignore the target volume, computer name and user that Jamf Pro passes as `$1`–`$3`, and any script parameters left empty, so `--dry-run` also works as a Jamf parameter.
+
 ---
 
 ## How credentials are stored

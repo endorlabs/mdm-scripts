@@ -122,6 +122,8 @@ Each script in `out/<namespace>/` is **fully self-contained** — no external fi
 
 Upload the script file. Ensure it runs as **SYSTEM** — the script detects the logged-in console user internally via `explorer.exe` and writes config files to the correct user profile.
 
+Intune runs platform scripts in 32-bit PowerShell unless "Run script in 64 bit PowerShell Host" is set to Yes. The scripts work either way: `endor-vscode.ps1` finds the 64-bit VS Code install through `ProgramW6432` as well as `ProgramFiles`.
+
 ---
 
 ## How credentials are stored

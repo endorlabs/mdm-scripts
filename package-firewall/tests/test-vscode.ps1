@@ -16,6 +16,7 @@ New-Item -ItemType Directory -Path $TempDir | Out-Null
 $SavedEnvironment = @{
     ProgramData = $env:ProgramData
     ProgramFiles = $env:ProgramFiles
+    ProgramW6432 = $env:ProgramW6432
     ProgramFilesX86 = ${env:ProgramFiles(x86)}
     SystemDrive = $env:SystemDrive
 }
@@ -155,12 +156,17 @@ try {
         throw 'restoration lost updated product.json data'
     }
 
-    Write-Host 'test: current versioned Windows resource paths are discovered'
+    # ProgramFiles points elsewhere, as it does in 32-bit PowerShell (Intune's default), so the
+    # install is found only through ProgramW6432.
+    Write-Host 'test: current versioned Windows resource paths are discovered from 32-bit PowerShell'
     $versionRoot = Join-Path $TempDir 'fake-program-files'
+    $x86Root = Join-Path $TempDir 'fake-program-files-x86'
+    New-Item -ItemType Directory -Path $x86Root -Force | Out-Null
     $versionedProduct = Join-Path $versionRoot 'Microsoft VS Code\abcdef1234\resources\app\product.json'
     New-Item -ItemType Directory -Path (Split-Path $versionedProduct -Parent) -Force | Out-Null
     Copy-Item $Fixture $versionedProduct
-    $env:ProgramFiles = $versionRoot
+    $env:ProgramFiles = $x86Root
+    $env:ProgramW6432 = $versionRoot
     ${env:ProgramFiles(x86)} = ''
     $env:SystemDrive = $TempDir
     Remove-Item Env:\ENDOR_VSCODE_PRODUCT_JSON -ErrorAction SilentlyContinue
@@ -187,19 +193,23 @@ try {
     $state = Join-Path $TempDir 'malformed-state'
     [IO.File]::WriteAllText($product, '{"extensionsGallery":', [Text.UTF8Encoding]::new($false))
     Copy-Item $product $original
-    $failed = $false
-    try {
-        Invoke-Installer $product $state
-    } catch {
-        $failed = $true
-    }
-    if (-not $failed) { throw 'expected malformed product.json to fail' }
+    # The worker reports the failure and the installer exits 1; it must not throw, or the rest of
+    # the installer (the update remediation task) would never run.
+    $env:ENDOR_VSCODE_PRODUCT_JSON = $product
+    $env:ENDOR_VSCODE_STATE_DIR = $state
+    $env:ENDOR_VSCODE_SKIP_WATCHER = '1'
+    $script = Join-Path $RootDir "package-firewall\powershell\out\$Namespace\endor-vscode.ps1"
+    $global:LASTEXITCODE = 0
+    $output = & $script *>&1 | Out-String
+    if ($LASTEXITCODE -ne 1) { throw "expected malformed product.json to exit 1, got $LASTEXITCODE" }
+    if ($output -notmatch '\[done\] VS Code extension firewall') { throw 'the installer stopped before finishing' }
     Assert-FilesEqual $product $original
 
     Write-Host 'VS Code PowerShell tests passed'
 } finally {
     $env:ProgramData = $SavedEnvironment.ProgramData
     $env:ProgramFiles = $SavedEnvironment.ProgramFiles
+    $env:ProgramW6432 = $SavedEnvironment.ProgramW6432
     ${env:ProgramFiles(x86)} = $SavedEnvironment.ProgramFilesX86
     $env:SystemDrive = $SavedEnvironment.SystemDrive
     Remove-Item Env:\ENDOR_VSCODE_PRODUCT_JSON -ErrorAction SilentlyContinue
