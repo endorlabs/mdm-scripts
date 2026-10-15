@@ -69,6 +69,7 @@ Running either generator produces these scripts in `out/<namespace>/`:
 | `endor-vscode.*` | Configure VS Code by the methods you enable: the `product.json` patch and/or the gallery policy (see [VS Code](#vs-code)) |
 | `endor-all.*` | Configure all package managers (single-script deploy) |
 | `endor-remove.*` | Strip all Endor configuration from a machine |
+| `endor-vscode-disable-patch.*`, `endor-vscode-disable-policy.*` | Turn off one VS Code method, and leave everything else (see [Switching methods](#switching-methods-and-turning-one-off)) |
 | `endor-vscode.mobileconfig`, `endor-vscode-policy.plist` | bash generator, with `ENDOR_VSCODE_ENABLE_POLICY`: VS Code's policy for Macs, as a configuration profile and as a property list, to upload to your MDM |
 
 Each generated script carries all Endor configuration it needs; VS Code's Linux remediation also uses systemd and Python 3 as noted below.
@@ -133,16 +134,45 @@ session that isn't using the firewall fails closed.
 
 `endor-vscode.*` never removes a method that it wasn't generated with, because
 that would turn the firewall off. When it finds one left by an earlier
-deployment, it warns and exits 1, so your MDM reports it. To clear the warning,
-either regenerate with that method's variable to keep it, or remove it with
-`endor-remove.*`, which removes both VS Code methods along with the
-package-manager configuration. Then deploy `endor-vscode.*` generated with the
-methods you want.
+deployment, it warns and exits 1, so your MDM reports it. Each method has its own
+script to turn it off, which both generators write every time:
 
-`endor-remove.*` removes only what Endor set: other `policy.json` keys, other
-registry values and other `product.json` settings stay. It deletes
-`policy.json` or the registry key only if `endor-vscode.*` created it and
-nothing else is left in it.
+| Platform | Turn off the patch | Turn off the policy |
+|---|---|---|
+| macOS | `endor-vscode-disable-patch.sh`: removes the daemon, swaps Microsoft's original app back in, and deletes the signing identity | Remove the profile in your MDM. `endor-vscode-disable-policy.sh` reports whether one is still installed, and warns if it is |
+| Linux | `endor-vscode-disable-patch.sh`: removes the dpkg hook, systemd units and timer, and restores `product.json` | `endor-vscode-disable-policy.sh`: removes Endor's keys from `/etc/vscode/policy.json` |
+| Windows | `endor-vscode-disable-patch.ps1`: removes the scheduled task, and restores `product.json` | `endor-vscode-disable-policy.ps1`: removes Endor's values from `HKLM\SOFTWARE\Policies\Microsoft\VSCode` |
+| Both | Run both scripts, or `endor-remove.*`, which also removes the package-manager configuration | |
+
+The disable scripts run as root or SYSTEM, need no signed-in user, and accept
+`--dry-run` (`-DryRun` on Windows).
+
+To switch, replace the old method before removing it, so the firewall is never
+off:
+
+- **Patch to policy**: deploy `endor-vscode.*` generated with only
+  `ENDOR_VSCODE_ENABLE_POLICY=true` (and, for Macs, upload the profile). Then
+  deploy `endor-vscode-disable-patch.*`.
+- **Policy to patch**: deploy `endor-vscode.*` generated with only
+  `ENDOR_VSCODE_ENABLE_PATCH=true`. Then deploy `endor-vscode-disable-policy.*`,
+  and on Macs remove the profile.
+- **Both to one**: deploy `endor-vscode.*` generated with the method you keep,
+  then the other method's disable script.
+
+Until the old method is gone, the new `endor-vscode.*` warns about it. Make sure
+no older `endor-vscode.*` is still assigned in your MDM: one generated with a
+method turns it on again at its next run.
+
+The disable scripts and `endor-remove.*` remove only what Endor set: other
+`policy.json` keys, other registry values and other `product.json` settings
+stay. They delete `policy.json` or the registry key only if `endor-vscode.*`
+created it and nothing else is left in it.
+
+The patch can be undone only while its worker is still in its state folder
+(`/var/lib/endor/vscode-firewall`, `/Library/Application Support/Endor
+Labs/vscode-firewall` or `%ProgramData%\Endor Labs\vscode-firewall`). If that
+folder was deleted by hand, reinstall VS Code to get Microsoft's `product.json`
+back.
 
 ### Upgrading from scripts generated before these variables
 

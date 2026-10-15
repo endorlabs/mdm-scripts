@@ -446,6 +446,28 @@ try {
         $output = Invoke-InstallerOutput $product (Join-Path $TempDir 'policy-elsewhere-state')
         if ($LASTEXITCODE -ne 1 -or $output -notmatch 'Windows registry setting') { throw "expected a Windows-only warning`n$output" }
     }
+    Write-Host 'test: endor-vscode-disable-patch.ps1 restores product.json and removes the patch'
+    Invoke-Generate
+    $product = Join-Path $TempDir 'disable-product.json'
+    $state = Join-Path $TempDir 'disable-state'
+    Copy-Item $Fixture $product
+    Invoke-Installer $product $state
+    Assert-Patched $product
+    foreach ($method in 'patch', 'policy') {
+        $text = Get-Content -Raw (Join-Path $RootDir "package-firewall\powershell\out\$Namespace\endor-vscode-disable-$method.ps1")
+        if ($text -match '\$(UserHome|AppData|ConsoleUser|UserSID)\b') { throw "endor-vscode-disable-$method.ps1 uses the signed-in user" }
+    }
+    $disable = Join-Path $RootDir "package-firewall\powershell\out\$Namespace\endor-vscode-disable-patch.ps1"
+    $global:LASTEXITCODE = 0
+    $output = & $disable -DryRun *>&1 | Out-String -Width 4096
+    if ($LASTEXITCODE -or $output -notmatch 'Dry run complete') { throw "the disable-patch dry run failed`n$output" }
+    Assert-Patched $product
+    $output = & $disable *>&1 | Out-String -Width 4096
+    if ($LASTEXITCODE -or $output -notmatch 'product.json patch is off') { throw "disable-patch failed`n$output" }
+    Assert-Restored $product
+    Assert-Preserved $product
+    if (Test-Path -LiteralPath $state) { throw "disable-patch left the patch's state" }
+
     Invoke-Generate
     $global:LASTEXITCODE = 0
 

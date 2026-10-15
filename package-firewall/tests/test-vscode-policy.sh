@@ -484,6 +484,91 @@ PY
   generate
 fi
 
+# product_url: the serviceUrl in the case's product.json.
+product_url() {
+  python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["extensionsGallery"]["serviceUrl"])' \
+    "$CASE/app/product.json"
+}
+
+# disable <patch|policy> [--dry-run]: runs endor-vscode-disable-<method>.sh for the current case.
+# Sets RC and OUTPUT.
+disable() {
+  local method="$1"
+  shift
+  RC=0
+  OUTPUT=$(ENDOR_VSCODE_PRODUCT_JSON="$CASE/app/product.json" \
+    ENDOR_VSCODE_STATE_DIR="$CASE/state" \
+    ENDOR_VSCODE_POLICY_FILE="$POLICY_FILE" \
+    ENDOR_VSCODE_POLICY_STATE_DIR="$POLICY_STATE" \
+    ENDOR_VSCODE_SKIP_WATCHER=1 \
+    "$OUT/endor-vscode-disable-$method.sh" "$@" 2>&1) || RC=$?
+}
+
+echo "test: each disable script turns off its own method, and leaves the other"
+PATCH=1 generate
+for method in patch policy; do
+  [[ -x "$OUT/endor-vscode-disable-$method.sh" ]] || fail "endor-vscode-disable-$method.sh was not generated"
+  /bin/bash -n "$OUT/endor-vscode-disable-$method.sh"
+done
+new_case disable
+install
+expect_rc 0
+[[ "$(product_url)" == "$EXPECTED_URL" && "$(policy_value ExtensionGalleryServiceUrl)" == "$EXPECTED_URL" ]] \
+  || fail "the installer did not apply both methods"
+disable policy --dry-run
+expect_rc 0
+expect_output "Dry run complete"
+[[ "$(policy_value ExtensionGalleryServiceUrl)" == "$EXPECTED_URL" ]] || fail "a dry run removed the policy"
+disable policy
+expect_rc 0
+expect_output "The VS Code ExtensionGalleryServiceUrl policy is off."
+[[ ! -e "$POLICY_FILE" ]] || fail "disable-policy left the policy file it created"
+[[ "$(product_url)" == "$EXPECTED_URL" && -x "$CASE/state/worker.sh" ]] || fail "disable-policy touched the patch"
+install
+expect_rc 0
+disable patch
+expect_rc 0
+expect_output "The VS Code product.json patch is off."
+[[ "$(product_url)" == "https://marketplace.visualstudio.com/_apis/public/gallery" ]] \
+  || fail "disable-patch did not restore product.json"
+[[ ! -e "$CASE/state" ]] || fail "disable-patch left the patch's state"
+[[ "$(policy_value ExtensionGalleryServiceUrl)" == "$EXPECTED_URL" ]] || fail "disable-patch touched the policy"
+# With one method off, the installer generated for the other stops warning, unless this machine
+# has a patch of its own.
+POLICY=1 PATCH=0 generate
+install
+if [[ ! -e /Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist \
+    && ! -e /etc/systemd/system/endor-vscode-firewall.path && ! -e /etc/dpkg/dpkg.cfg.d/endor-vscode-firewall ]]; then
+  expect_rc 0
+fi
+generate
+
+echo "test: the VS Code section of endor-remove.sh doesn't use the console user"
+for script in "$OUT/endor-vscode-disable-patch.sh" "$OUT/endor-vscode-disable-policy.sh"; do
+  if grep -nE 'CONSOLE_USER|USER_HOME|USER_GROUP' "$script"; then
+    fail "$script uses the console user"
+  fi
+done
+
+echo "test: the generator refuses a remove template without exactly one marked VS Code section"
+copy="$TMP_DIR/generator-copy"
+mkdir -p "$copy/package-firewall"
+cp -R "$ROOT_DIR/package-firewall/bash" "$ROOT_DIR/package-firewall/shared" "$copy/package-firewall/"
+for broken in missing-end two-starts; do
+  template="$copy/package-firewall/bash/templates/remove.sh"
+  cp "$ROOT_DIR/package-firewall/bash/templates/remove.sh" "$template"
+  case "$broken" in
+    missing-end) sed -i.bak '/^# <<< endor-vscode-remove$/d' "$template" ;;
+    two-starts) printf '# >>> endor-vscode-remove\n' >> "$template" ;;
+  esac
+  if ENDOR_NAMESPACE="$NAMESPACE" ENDOR_API_KEY_ID="$KEY_ID" ENDOR_API_SECRET="$SECRET" \
+      bash "$copy/package-firewall/bash/generate.sh" >/dev/null 2>"$TMP_DIR/broken.err"; then
+    fail "the generator accepted a remove template with $broken"
+  fi
+  grep -q "must mark one non-empty VS Code section" "$TMP_DIR/broken.err" \
+    || fail "the generator gave the wrong error for $broken"
+done
+
 echo "test: the installer and endor-remove.sh carry the same policy program"
 extract() { sed -n "/^IFS= read -r -d '' _VSCODE_POLICY_PY <<'ENDOR_VSCODE_POLICY_PY'/,/^ENDOR_VSCODE_POLICY_PY\$/p" "$1"; }
 installer_program=$(extract "$ROOT_DIR/package-firewall/bash/templates/vscode.sh")

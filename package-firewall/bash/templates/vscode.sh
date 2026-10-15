@@ -2160,7 +2160,8 @@ elif [[ "$_VSCODE_ENABLE_PATCH" != "1" && -n "$_VSCODE_STATE_DIR" ]]; then
   fi
   if [[ -n "$_vscode_left" ]]; then
     _vscode_warn "the VS Code product.json patch from an earlier deployment is still installed ($_vscode_left)."
-    echo "[endor]   This script doesn't enable it. Regenerate with ENDOR_VSCODE_ENABLE_PATCH=true to keep it, or run endor-remove.sh to remove it." >&2
+    echo "[endor]   This script doesn't enable it. Regenerate with ENDOR_VSCODE_ENABLE_PATCH=true to keep it, or run" >&2
+    echo "[endor]   endor-vscode-disable-patch.sh (or endor-remove.sh) to remove it." >&2
   fi
 fi
 
@@ -2398,7 +2399,8 @@ elif [[ "$_vscode_legacy" == "0" && "$_vscode_policy_kind" == "file" && -f "$_VS
     && grep -q '/firewall/vscode/_ak/' "$_VSCODE_POLICY_FILE"; then
   # As with the patch: a policy left by an earlier deployment stays until the admin decides.
   _vscode_warn "VS Code's ExtensionGalleryServiceUrl policy from an earlier deployment is still set in $_VSCODE_POLICY_FILE."
-  echo "[endor]   This script doesn't enable it. Regenerate with ENDOR_VSCODE_ENABLE_POLICY=true to keep it, or run endor-remove.sh to remove it." >&2
+  echo "[endor]   This script doesn't enable it. Regenerate with ENDOR_VSCODE_ENABLE_POLICY=true to keep it, or run" >&2
+  echo "[endor]   endor-vscode-disable-policy.sh (or endor-remove.sh) to remove it." >&2
 elif [[ "$_vscode_legacy" == "0" && "$_vscode_policy_kind" == "profile" ]]; then
   while IFS=$'\037' read -r _vscode_url _vscode_auth _vscode_item; do
     if [[ "$_vscode_url" == *"/firewall/vscode/_ak/"* ]]; then
