@@ -93,9 +93,16 @@ function Get-ProductFiles {
     $files | Select-Object -Unique
 }
 
+# Shares delete access, so a read never stops VS Code's updater deleting an old version folder.
 function Read-ProductJson {
     param([string]$FilePath)
-    Get-Content -LiteralPath $FilePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+    $stream = [System.IO.File]::Open($FilePath, 'Open', 'Read', 'ReadWrite, Delete')
+    try {
+        $reader = [System.IO.StreamReader]::new($stream, [System.Text.UTF8Encoding]::new($false), $true)
+        $reader.ReadToEnd() | ConvertFrom-Json -ErrorAction Stop
+    } finally {
+        $stream.Dispose()
+    }
 }
 
 function Get-ServiceUrl {
@@ -164,11 +171,14 @@ function Write-Utf8NoBom {
     [System.IO.File]::WriteAllText($FilePath, $Content, [System.Text.UTF8Encoding]::new($false))
 }
 
+# After an update, VS Code's updater deletes the old version folder, sometimes during a pass. A
+# file that has gone is skipped, not reported.
 function Invoke-PatchOne {
     param([string]$FilePath)
     try {
         $product = Read-ProductJson $FilePath
     } catch {
+        if (-not (Test-Path -LiteralPath $FilePath)) { return $true }
         Write-Problem "[endor-vscode] refusing to modify invalid JSON: $FilePath : $_"
         return $false
     }
@@ -201,6 +211,7 @@ function Invoke-PatchOne {
         Remove-Item -LiteralPath $replaceBackup -Force -ErrorAction SilentlyContinue
     } catch {
         Remove-Item -LiteralPath $tempPath, $replaceBackup -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $FilePath)) { return $true }
         Write-Problem "[endor-vscode] failed to patch $FilePath : $_"
         return $false
     }
@@ -227,6 +238,7 @@ function Invoke-RestoreOne {
     try {
         $product = Read-ProductJson $FilePath
     } catch {
+        if (-not (Test-Path -LiteralPath $FilePath)) { return $true }
         Write-Problem "[endor-vscode] refusing to modify invalid JSON: $FilePath : $_"
         return $false
     }
@@ -259,6 +271,7 @@ function Invoke-RestoreOne {
         return $true
     } catch {
         Remove-Item -LiteralPath $tempPath, $replaceBackup -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $FilePath)) { return $true }
         Write-Problem "[endor-vscode] failed to restore $FilePath : $_"
         return $false
     }
@@ -468,7 +481,10 @@ if ($DryRun) {
                 -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$_vscodeWorkerPath`" -Mode Watch"
             $taskTrigger = New-ScheduledTaskTrigger -AtStartup
             $taskPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-            $taskSettings = New-ScheduledTaskSettingsSet -RestartCount 999 `
+            # Task Scheduler's default priority, 7, is below normal. While Setup and antivirus keep
+            # the CPUs busy, the worker would then wait about 4 s for Windows' anti-starvation boost,
+            # and could lose the race with Setup starting VS Code. 4 is normal priority.
+            $taskSettings = New-ScheduledTaskSettingsSet -Priority 4 -RestartCount 999 `
                 -RestartInterval (New-TimeSpan -Minutes 1) `
                 -ExecutionTimeLimit ([TimeSpan]::Zero) `
                 -MultipleInstances IgnoreNew

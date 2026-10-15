@@ -151,7 +151,8 @@ try {
     if ($task.Principal.UserId -notin 'SYSTEM', 'NT AUTHORITY\SYSTEM') {
         Stop-Test "the task runs as $($task.Principal.UserId)"
     }
-    Write-Pass 'the SYSTEM watcher task is running'
+    if ($task.Settings.Priority -ne 4) { Stop-Test "the task runs at priority $($task.Settings.Priority), not 4 (normal)" }
+    Write-Pass 'the SYSTEM watcher task is running at normal priority'
     # Let the watcher finish its first pass and start watching.
     $deadline = (Get-Date).AddSeconds(30)
     while (-not ((Test-Path -LiteralPath $WorkerLog) -and
@@ -202,9 +203,12 @@ try {
     if ($product.target -ne 'system' -or $product.win32VersionedUpdate -ne $true -or $newCommit.Length -ne 40) {
         Stop-Test 'the patch lost target, win32VersionedUpdate or commit, which VS Code uses to choose how to update'
     }
-    if ((Get-Content -LiteralPath $WorkerLog -Raw) -notmatch [regex]::Escape($newCommit.Substring(0, 10))) {
+    $workerLog = Get-Content -LiteralPath $WorkerLog -Raw
+    if ($workerLog -notmatch [regex]::Escape($newCommit.Substring(0, 10))) {
         Stop-Test 'the worker log does not record the patch'
     }
+    # The updater deletes the old version folder at the end, often during a pass.
+    if ($workerLog -match 'refusing|failed to') { Stop-Test 'the worker logged a problem during the update (see worker log)' }
     if ((Get-ScheduledTask -TaskName $TaskName).State -ne 'Running') { Stop-Test 'the watcher task stopped' }
     Write-Pass 'the patch kept target and commit, and the watcher is still running'
     Save-Logs 'before-removal'
