@@ -204,6 +204,8 @@ try {
     if ($LASTEXITCODE -ne 1) { throw "expected malformed product.json to exit 1, got $LASTEXITCODE" }
     if ($output -notmatch '\[done\] VS Code extension firewall') { throw 'the installer stopped before finishing' }
     Assert-FilesEqual $product $original
+    # That exit 1 was expected; don't let run-all.ps1 read it as this suite failing.
+    $global:LASTEXITCODE = 0
 
     Write-Host 'VS Code PowerShell tests passed'
 } finally {
