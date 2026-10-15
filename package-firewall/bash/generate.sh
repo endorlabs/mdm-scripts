@@ -24,12 +24,24 @@
 #                      the generated scripts send Basic Auth credentials.
 #                      US (default): https://factory.endorlabs.com
 #                      EU:           https://factory.eu.endorlabs.com
+#   ENDOR_VSCODE_ENABLE_PATCH
+#                      Optional. true or false (default; 1 and 0 also work).
+#                      Patch VS Code's product.json and keep it patched. On
+#                      macOS this installs a root LaunchDaemon that re-signs
+#                      the VS Code app.
+#   ENDOR_VSCODE_ENABLE_POLICY
+#                      Optional. true or false (default; 1 and 0 also work).
+#                      Set VS Code's ExtensionGalleryServiceUrl policy. VS Code
+#                      then turns the Marketplace off for anyone not signed in
+#                      with an eligible account.
+#   ENDOR_VSCODE_POLICY_AUTH
+#                      Optional, with the policy only. github or microsoft:
+#                      the account VS Code asks for (its default is github).
 #   ENDOR_VSCODE_MACOS_DAEMON
-#                      Optional. 0 (default) or 1. On macOS, endor-vscode.sh and
-#                      endor-all.sh configure VS Code only when this is 1: it
-#                      installs a root LaunchDaemon that changes the VS Code app.
-#                      Read the endor-vscode.sh section of README.md first.
-#                      Linux is not affected.
+#                      Deprecated alias for ENDOR_VSCODE_ENABLE_PATCH.
+#                      With neither VS Code flag, endor-vscode.sh and endor-all.sh
+#                      leave VS Code alone. Read the endor-vscode.sh section of
+#                      README.md first.
 #
 # To customise config blocks, edit shared/blocks/*.txt directly.
 # To customise orchestration logic, edit templates/*.sh directly.
@@ -176,11 +188,47 @@ validate_fqdn() {
 validate_fqdn "$FQDN"
 
 # ─── Feature flags ────────────────────────────────────────────────────────────
-VSCODE_MACOS_DAEMON="${ENDOR_VSCODE_MACOS_DAEMON:-0}"
-case "$VSCODE_MACOS_DAEMON" in
-  0|1) ;;
-  *) echo "ERROR: ENDOR_VSCODE_MACOS_DAEMON must be 0 or 1" >&2; exit 1 ;;
+# flag_value <name> <value>: prints 1 or 0. Accepts true, false, 1 and 0 in any case; empty is 0.
+# Runs in $( ), so the caller exits on failure.
+flag_value() {
+  local LC_ALL=C value shown
+  value=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+  case "$value" in
+    1|true) echo 1 ;;
+    ""|0|false) echo 0 ;;
+    *)
+      shown="${2//[![:print:]]/?}"
+      echo "ERROR: $1 must be true, false, 1 or 0. got: ${shown}" >&2
+      return 1 ;;
+  esac
+}
+VSCODE_ENABLE_PATCH=$(flag_value ENDOR_VSCODE_ENABLE_PATCH "${ENDOR_VSCODE_ENABLE_PATCH:-}") || exit 1
+VSCODE_ENABLE_POLICY=$(flag_value ENDOR_VSCODE_ENABLE_POLICY "${ENDOR_VSCODE_ENABLE_POLICY:-}") || exit 1
+# The macOS daemon flag came first, and now means ENDOR_VSCODE_ENABLE_PATCH. Set to 1, it turns on
+# the patch everywhere, as scripts generated with it had: they patched Linux too. Set to 0, it now
+# turns the Linux patch off as well, which scripts generated with it didn't, so say so.
+if [[ -n "${ENDOR_VSCODE_MACOS_DAEMON:-}" ]]; then
+  VSCODE_MACOS_DAEMON=$(flag_value ENDOR_VSCODE_MACOS_DAEMON "$ENDOR_VSCODE_MACOS_DAEMON") || exit 1
+  echo "WARNING: ENDOR_VSCODE_MACOS_DAEMON is deprecated; use ENDOR_VSCODE_ENABLE_PATCH, which it now means." >&2
+  if [[ "$VSCODE_MACOS_DAEMON" == "0" && -z "${ENDOR_VSCODE_ENABLE_PATCH:-}" ]]; then
+    echo "WARNING: so ENDOR_VSCODE_MACOS_DAEMON=0 no longer patches Linux either. To keep patching Linux," >&2
+    echo "         set ENDOR_VSCODE_ENABLE_PATCH=true and deploy endor-vscode.sh to Linux machines only." >&2
+  fi
+  if [[ -n "${ENDOR_VSCODE_ENABLE_PATCH:-}" && "$VSCODE_MACOS_DAEMON" != "$VSCODE_ENABLE_PATCH" ]]; then
+    echo "ERROR: ENDOR_VSCODE_MACOS_DAEMON and ENDOR_VSCODE_ENABLE_PATCH disagree; set only ENDOR_VSCODE_ENABLE_PATCH" >&2
+    exit 1
+  fi
+  VSCODE_ENABLE_PATCH="$VSCODE_MACOS_DAEMON"
+fi
+VSCODE_POLICY_AUTH=$(printf '%s' "${ENDOR_VSCODE_POLICY_AUTH:-}" | tr '[:upper:]' '[:lower:]')
+case "$VSCODE_POLICY_AUTH" in
+  ""|github|microsoft) ;;
+  *) echo "ERROR: ENDOR_VSCODE_POLICY_AUTH must be github or microsoft" >&2; exit 1 ;;
 esac
+if [[ -n "$VSCODE_POLICY_AUTH" && "$VSCODE_ENABLE_POLICY" != "1" ]]; then
+  echo "ERROR: ENDOR_VSCODE_POLICY_AUTH applies only with ENDOR_VSCODE_ENABLE_POLICY=true" >&2
+  exit 1
+fi
 
 # ─── Compute derived values ────────────────────────────────────────────────────
 # Only machine-independent values are derived here. Attribution values
@@ -218,7 +266,10 @@ substitute() {
     -e "s|{{MAVEN_REGISTRY_URL}}|${MAVEN_REGISTRY_URL}|g" \
     -e "s|{{NUGET_SOURCE_URL}}|${NUGET_SOURCE_URL}|g" \
     -e "s|{{VSCODE_SERVICE_URL}}|${VSCODE_SERVICE_URL}|g" \
-    -e "s|{{VSCODE_MACOS_DAEMON}}|${VSCODE_MACOS_DAEMON}|g"
+    -e "s|{{VSCODE_ENABLE_PATCH}}|${VSCODE_ENABLE_PATCH}|g" \
+    -e "s|{{VSCODE_ENABLE_POLICY}}|${VSCODE_ENABLE_POLICY}|g" \
+    -e "s|{{VSCODE_POLICY_AUTH}}|${VSCODE_POLICY_AUTH}|g" \
+    -e "s|{{VSCODE_MACOS_DAEMON}}|${VSCODE_ENABLE_PATCH}|g"
 }
 
 # inline_common
@@ -494,7 +545,11 @@ build_remove_script "$OUT_DIR/endor-remove.sh"
   substitute < "$TMPL_DIR/vscode.sh"
   echo ""
   echo "echo \"\""
-  echo "echo \"[endor] ✓ All package managers and VS Code configured for ${ENDOR_NAMESPACE}.\""
+  if [[ "$VSCODE_ENABLE_PATCH" == "0" && "$VSCODE_ENABLE_POLICY" == "0" ]]; then
+    echo "echo \"[endor] ✓ All package managers configured for ${ENDOR_NAMESPACE}. VS Code: not enabled.\""
+  else
+    echo "echo \"[endor] ✓ All package managers and VS Code configured for ${ENDOR_NAMESPACE}.\""
+  fi
   echo ""
   script_footer
 } > "$OUT_DIR/endor-all.sh"
@@ -513,10 +568,18 @@ printf "   %-24s  %s\n" "endor-vscode.sh" "VS Code extension gallery + update re
 printf "   %-24s  %s\n" "endor-all.sh"    "all of the above (single-script deploy)"
 printf "   %-24s  %s\n" "endor-remove.sh" "offboarding — strips all Endor config"
 echo ""
-if [[ "$VSCODE_MACOS_DAEMON" == "1" ]]; then
-  echo "   VS Code on macOS: enabled (ENDOR_VSCODE_MACOS_DAEMON=1)."
+if [[ "$VSCODE_ENABLE_PATCH" == "0" && "$VSCODE_ENABLE_POLICY" == "0" ]]; then
+  echo "WARNING: VS Code: no method enabled, so endor-vscode.sh and endor-all.sh leave VS Code alone." >&2
+  echo "         Set ENDOR_VSCODE_ENABLE_PATCH=true and/or ENDOR_VSCODE_ENABLE_POLICY=true (see README.md)." >&2
 else
-  echo "   VS Code on macOS: not enabled; set ENDOR_VSCODE_MACOS_DAEMON=1 to enable it."
+  printf "   VS Code: product.json patch %s, policy %s.\n" \
+    "$([[ "$VSCODE_ENABLE_PATCH" == "1" ]] && echo on || echo off)" \
+    "$([[ "$VSCODE_ENABLE_POLICY" == "1" ]] && echo "on${VSCODE_POLICY_AUTH:+ (sign-in: $VSCODE_POLICY_AUTH)}" || echo off)"
+  if [[ "$VSCODE_ENABLE_POLICY" == "1" ]]; then
+    echo "   With the policy, VS Code turns the Extensions Marketplace off for anyone not signed in"
+    echo "   with an eligible account. See README.md before deploying."
+    echo "   On macOS the policy needs a configuration profile from your MDM; see README.md."
+  fi
 fi
 echo "   All scripts accept --dry-run to preview changes without writing anything."
 echo "   Upload to your MDM tool. Each script is self-contained and idempotent."

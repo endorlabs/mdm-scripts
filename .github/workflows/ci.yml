@@ -219,6 +219,17 @@ jobs:
             bash -n "$f"
             echo "ok: $f"
           done
+          # Both VS Code methods, with a sign-in provider.
+          ENDOR_NAMESPACE=ci-smoke-policy ENDOR_VSCODE_ENABLE_PATCH=true ENDOR_VSCODE_ENABLE_POLICY=true \
+            ENDOR_VSCODE_POLICY_AUTH=microsoft bash package-firewall/bash/generate.sh
+          policy_script=package-firewall/bash/out/ci-smoke-policy/endor-vscode.sh
+          for line in "_VSCODE_ENABLE_PATCH='1'" "_VSCODE_ENABLE_POLICY='1'" "_VSCODE_POLICY_AUTH='microsoft'"; do
+            grep -qxF "$line" "$policy_script"
+          done
+          grep -qxF '# >>> endor-vscode-remove' package-firewall/bash/out/ci-smoke-policy/endor-remove.sh
+          for f in package-firewall/bash/out/ci-smoke-policy/*.sh; do
+            bash -n "$f"
+          done
 
       - name: Generate PowerShell scripts and parse-check output
         shell: pwsh
@@ -249,6 +260,24 @@ jobs:
             }
           }
           if ($bad -gt 0) { Write-Error "$bad generated file(s) with parse errors" }
+          # Both VS Code methods, with a sign-in provider.
+          $env:ENDOR_NAMESPACE = 'ci-smoke-policy'
+          $env:ENDOR_VSCODE_ENABLE_PATCH = 'true'
+          $env:ENDOR_VSCODE_ENABLE_POLICY = 'true'
+          $env:ENDOR_VSCODE_POLICY_AUTH = 'microsoft'
+          & ./package-firewall/powershell/generate.ps1
+          $policyScript = Get-Content -Raw 'package-firewall/powershell/out/ci-smoke-policy/endor-vscode.ps1'
+          foreach ($line in "`$_vscodeEnablePatch = '1'", "`$_vscodeEnablePolicy = '1'", "`$_vscodePolicyAuth = 'microsoft'") {
+            if (-not $policyScript.Contains($line)) { Write-Error "generated endor-vscode.ps1 lacks: $line" }
+          }
+          if (-not (Get-Content -Raw 'package-firewall/powershell/out/ci-smoke-policy/endor-remove.ps1').Contains('# >>> endor-vscode-remove')) {
+            Write-Error 'generated endor-remove.ps1 has no VS Code section markers'
+          }
+          foreach ($f in Get-ChildItem 'package-firewall/powershell/out/ci-smoke-policy' -Filter *.ps1) {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { Write-Error "PARSE ERROR: $($f.FullName): $($errors[0].Message)" }
+          }
 
   # The agent-governance suite: bootstrap behavior under a stubbed curl, the
   # examples/ sync check, embedded-hook syntax, and the CRLF armor on the Claude
@@ -306,10 +335,13 @@ jobs:
           }
 
       # Intune runs scripts in 32-bit Windows PowerShell 5.1 unless told otherwise, where
-      # ProgramFiles is the x86 folder. Run the VS Code suite there too.
+      # ProgramFiles is the x86 folder and the registry is the 32-bit view. Run the VS Code suites
+      # there too.
       - name: Run the VS Code PowerShell tests in 32-bit Windows PowerShell
         shell: pwsh
         run: |
-          & "$env:SystemRoot\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" -NoProfile `
-            -ExecutionPolicy Bypass -File package-firewall/tests/test-vscode.ps1
-          exit $LASTEXITCODE
+          foreach ($suite in 'test-vscode.ps1', 'test-vscode-policy.ps1') {
+            & "$env:SystemRoot\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" -NoProfile `
+              -ExecutionPolicy Bypass -File "package-firewall/tests/$suite"
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          }

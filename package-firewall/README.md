@@ -74,17 +74,95 @@ Each generated script carries all Endor configuration it needs; VS Code's Linux 
 
 > **Security**: add `out/` to `.gitignore`. Generated scripts contain API credentials in plaintext.
 
-## VS Code update remediation
+## VS Code
 
-`endor-vscode.*` sets `extensionsGallery.serviceUrl` to the authenticated
-`/firewall/vscode/_ak/<token>` endpoint and removes `extensionUrlTemplate`, so
-VS Code cannot fall back to the upstream extension download template. It
-preserves every unrelated `product.json` value and reapplies only those two
-managed properties after VS Code updates:
+`endor-vscode.*` routes Microsoft VS Code Stable's extension gallery through the
+firewall, by one or both of two methods. **Neither is on by default**: choose
+with these generator variables. Values are `true`, `false`, `1` or `0`, in any
+case.
+
+| Variable | Method |
+|---|---|
+| `ENDOR_VSCODE_ENABLE_PATCH=true` | **Patch**: set `extensionsGallery.serviceUrl` in VS Code's `product.json` to the authenticated `/firewall/vscode/_ak/<token>` URL, remove `extensionUrlTemplate`, and keep it that way across VS Code updates |
+| `ENDOR_VSCODE_ENABLE_POLICY=true` | **Policy**: set VS Code's `ExtensionGalleryServiceUrl` enterprise policy to the same URL |
+| `ENDOR_VSCODE_POLICY_AUTH=github` or `microsoft` | Optional, with the policy only: the account VS Code asks users to sign in with. VS Code's default is `github` |
+
+`ENDOR_VSCODE_MACOS_DAEMON`, from earlier versions of the bash generator, still
+works as a deprecated name for `ENDOR_VSCODE_ENABLE_PATCH`. So
+`ENDOR_VSCODE_MACOS_DAEMON=0`, which used to leave Linux patched, now turns the
+patch off everywhere; `generate.sh` warns about it.
+
+> [!IMPORTANT]
+> **The policy turns the Extensions Marketplace off for anyone who isn't signed
+> in with an eligible account.** Once `ExtensionGalleryServiceUrl` is set, VS
+> Code shows extensions only after the user signs in, and it doesn't fall back to
+> `product.json`. Eligible accounts:
+>
+> - with the default GitHub sign-in: a GitHub account with a Copilot Business or
+>   Enterprise seat (trials count), or a GitHub Enterprise account (GHE.com, or an
+>   Enterprise Managed User);
+> - with `ENDOR_VSCODE_POLICY_AUTH=microsoft` (VS Code 1.137 or later): any
+>   Microsoft Entra ID work or school account. Personal Microsoft accounts are
+>   rejected.
+>
+> Enabling the patch as well doesn't change this. VS Code follows the policy; the
+> patch then only keeps `code --install-extension` covered.
+
+### Choosing a method
+
+| | Patch | Policy |
+|---|---|---|
+| Covers | The editor and `code --install-extension` | The editor only. `code --install-extension` ignores the policy |
+| Sign-in | Not needed | Required: an eligible account, above |
+| Where it lives | `product.json` in each VS Code install | Linux: `/etc/vscode/policy.json`. Windows: `HKLM\SOFTWARE\Policies\Microsoft\VSCode`. macOS: a configuration profile from your MDM |
+| What keeps it applied | A watcher reapplies it after every VS Code update (below) | Nothing needs to: updates don't touch it |
+| macOS | The daemon re-signs VS Code with a certificate unique to each Mac. Users see a keychain prompt after each update, and the app no longer carries Microsoft's Team ID ([details](bash/README.md#macos-code-signing)) | VS Code is left as Microsoft shipped it. Deliver the policy with an MDM profile: users can't override managed preferences, but can override any other kind |
+| VS Code versions | All | 1.99 or later; 1.106 or later on Linux; 1.137 or later for `ENDOR_VSCODE_POLICY_AUTH` |
+| Credential | Readable by local users in `product.json` | Readable by local users in `policy.json`, the registry or managed preferences |
+
+Both at once isn't a fallback: the editor follows the policy, and the command
+line follows `product.json`. For users without an eligible account, adding the
+policy turns off a Marketplace that the patch alone would have left working.
+
+Whichever you choose, also block `marketplace.visualstudio.com/_apis`,
+`*.gallery.vsassets.io` and `www.vscode-unpkg.net` at your web gateway, so a
+session that isn't using the firewall fails closed.
+
+### Switching methods, and turning one off
+
+`endor-vscode.*` never removes a method that it wasn't generated with, because
+that would turn the firewall off. When it finds one left by an earlier
+deployment, it warns and exits 1, so your MDM reports it. To clear the warning,
+either regenerate with that method's variable to keep it, or remove it with
+`endor-remove.*`, which removes both VS Code methods along with the
+package-manager configuration. Then deploy `endor-vscode.*` generated with the
+methods you want.
+
+`endor-remove.*` removes only what Endor set: other `policy.json` keys, other
+registry values and other `product.json` settings stay. It deletes
+`policy.json` or the registry key only if `endor-vscode.*` created it and
+nothing else is left in it.
+
+### Upgrading from scripts generated before these variables
+
+Before, generating without any VS Code variable patched VS Code on Linux and
+Windows, and on macOS only with `ENDOR_VSCODE_MACOS_DAEMON=1`. Now it configures
+nothing: `generate.*` warns, and the script prints a skip line. Scripts already
+deployed keep working until you replace them. To keep patching, regenerate with
+`ENDOR_VSCODE_ENABLE_PATCH=true`. In the bash script that also turns on the
+macOS daemon; to patch Linux only, deploy `endor-vscode.sh` to Linux machines
+only.
+
+Scripts from generators that predate these variables, such as the one on
+docs.endorlabs.com, behave as before.
+
+### Patch: update remediation
+
+The patch preserves every unrelated `product.json` value and reapplies only the
+two managed properties after VS Code updates:
 
 - macOS: root launchd daemon watching the VS Code app and users' VS Code update
-  caches, only when the bash generator runs with `ENDOR_VSCODE_MACOS_DAEMON=1`
-  (opt-in; see [bash/README.md](bash/README.md#macos-is-opt-in))
+  caches
 - Linux: a dpkg hook (Debian, Ubuntu), a systemd path unit and a 1-minute
   timer, so a package upgrade is patched before apt or dpkg returns, and
   within a minute on RPM systems
@@ -98,12 +176,4 @@ default values for the two managed gallery properties without reverting other
 Supported scope is Microsoft VS Code Stable installed natively in its standard
 system locations (including Windows User Installer paths). Insiders, VSCodium,
 Code OSS, Snap, Flatpak, and arbitrary portable/tarball locations are not
-managed. Linux requires systemd and Python 3.
-
-The authenticated gallery URL is stored in `product.json` and must be readable
-by local users so VS Code can consume it. On macOS, Microsoft's code signature
-seals `product.json`, so when the macOS daemon is enabled the script patches a
-copy of the app, signs it with a certificate unique to each Mac, and swaps it
-into place. Users see a keychain prompt after each VS Code update, and the app
-no longer carries Microsoft's Team ID; see
-[bash/README.md](bash/README.md#macos-code-signing).
+managed. On Linux the patch requires systemd and Python 3, and the policy Python 3.
