@@ -172,8 +172,10 @@ try {
                 $product = Join-Path $dir.FullName 'resources\app\product.json'
                 if (-not (Test-Path -LiteralPath $product)) { continue }
                 if (-not $seen) { $seen = [DateTime]::UtcNow }
+                # Setup and the worker hold the file open while they write it. -ErrorAction Stop makes
+                # that sharing violation catchable, so this poll retries instead of failing the job.
                 try {
-                    $url = [string](Get-Content -LiteralPath $product -Raw | ConvertFrom-Json).extensionsGallery.serviceUrl
+                    $url = [string](Get-Content -LiteralPath $product -Raw -ErrorAction Stop | ConvertFrom-Json).extensionsGallery.serviceUrl
                     if ($url.StartsWith($Prefix)) {
                         return [PSCustomObject]@{ Seen = $seen; Patched = [DateTime]::UtcNow; Path = $product }
                     }
