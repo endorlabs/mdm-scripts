@@ -58,6 +58,8 @@
 #   endor-vscode.sh   — VS Code:    extension gallery firewall + update watcher
 #   endor-all.sh      — All of the above (single-script MDM deploy)
 #   endor-remove.sh   — Offboarding: strips Endor config from all files
+#   endor-vscode-disable-patch.sh, endor-vscode-disable-policy.sh
+#                     — Turn off one VS Code method, and leave everything else
 #   endor-vscode.mobileconfig, endor-vscode-policy.plist
 #                     — With ENDOR_VSCODE_ENABLE_POLICY: VS Code's policy for macOS, as a
 #                       configuration profile and as a plain property list, for the MDM
@@ -281,7 +283,8 @@ substitute() {
     -e "s|{{VSCODE_ENABLE_PATCH}}|${VSCODE_ENABLE_PATCH}|g" \
     -e "s|{{VSCODE_ENABLE_POLICY}}|${VSCODE_ENABLE_POLICY}|g" \
     -e "s|{{VSCODE_POLICY_AUTH}}|${VSCODE_POLICY_AUTH}|g" \
-    -e "s|{{VSCODE_MACOS_DAEMON}}|${VSCODE_ENABLE_PATCH}|g"
+    -e "s|{{VSCODE_MACOS_DAEMON}}|${VSCODE_ENABLE_PATCH}|g" \
+    -e "s|{{VSCODE_REMOVE_SCOPE}}|all|g"
 }
 
 # inline_common
@@ -526,6 +529,50 @@ build_system_script \
 # ─── Generate remove script ───────────────────────────────────────────────────
 build_remove_script "$OUT_DIR/endor-remove.sh"
 
+# ─── Generate the VS Code disable scripts ─────────────────────────────────────
+# Each turns off one VS Code method, whichever the scripts were generated with, so admins can
+# switch methods without endor-remove.sh, which also removes the package-manager configuration.
+# They are the VS Code section of templates/remove.sh with its scope filled in, so that section
+# must be marked exactly once.
+VSCODE_REMOVE_START='^# >>> endor-vscode-remove$'
+VSCODE_REMOVE_END='^# <<< endor-vscode-remove$'
+if [[ "$(grep -c "$VSCODE_REMOVE_START" "$TMPL_DIR/remove.sh" || true)" != "1" \
+    || "$(grep -c "$VSCODE_REMOVE_END" "$TMPL_DIR/remove.sh" || true)" != "1" \
+    || "$(sed -n "/$VSCODE_REMOVE_START/,/$VSCODE_REMOVE_END/p" "$TMPL_DIR/remove.sh" | wc -l)" -lt 3 ]]; then
+  echo "ERROR: templates/remove.sh must mark one non-empty VS Code section with" >&2
+  echo "       '# >>> endor-vscode-remove' and '# <<< endor-vscode-remove'." >&2
+  exit 1
+fi
+
+# build_vscode_disable_script <scope> <output> <description> <what is off> <its flag>
+build_vscode_disable_script() {
+  local scope="$1" output="$2" description="$3" what="$4" flag="$5"
+  {
+    system_script_header "$output" "$description"
+    sed -n "/$VSCODE_REMOVE_START/,/$VSCODE_REMOVE_END/p" "$TMPL_DIR/remove.sh" \
+      | sed "s|{{VSCODE_REMOVE_SCOPE}}|${scope}|g" | substitute
+    echo ""
+    echo 'echo ""'
+    echo 'if [[ "${DRY_RUN:-0}" == "1" ]]; then'
+    echo '  echo "[endor] ✓ Dry run complete — nothing changed."'
+    echo 'elif [[ "$_ENDOR_WARNED" -eq 0 ]]; then'
+    echo "  echo \"[endor] ✓ ${what} is off.\""
+    echo "  echo \"[endor]   An endor-vscode.sh generated with ${flag} turns it on again: replace it in your MDM\""
+    echo '  echo "[endor]   with one generated without it."'
+    echo 'fi'
+    echo ""
+    script_footer
+  } > "$output"
+  chmod 700 "$output"
+}
+
+build_vscode_disable_script patch "$OUT_DIR/endor-vscode-disable-patch.sh" \
+  "Turns off the Endor VS Code product.json patch and its update remediation, and restores Microsoft's gallery settings." \
+  "The VS Code product.json patch" ENDOR_VSCODE_ENABLE_PATCH
+build_vscode_disable_script policy "$OUT_DIR/endor-vscode-disable-policy.sh" \
+  "Removes the Endor VS Code ExtensionGalleryServiceUrl policy. On macOS, reports a configuration profile, which only the MDM can remove." \
+  "The VS Code ExtensionGalleryServiceUrl policy" ENDOR_VSCODE_ENABLE_POLICY
+
 # ─── Generate combined all.sh ─────────────────────────────────────────────────
 {
   script_header "$OUT_DIR/endor-all.sh" \
@@ -662,18 +709,20 @@ fi
 echo ""
 echo "✓  Generated → $OUT_DIR"
 echo ""
-printf "   %-24s  %s\n" "endor-js.sh"     "npm · pnpm · yarn classic · yarn 2+ · bun"
-printf "   %-24s  %s\n" "endor-python.sh" "pip · uv · poetry"
-printf "   %-24s  %s\n" "endor-go.sh"     "go modules (GOPROXY)"
-printf "   %-24s  %s\n" "endor-maven.sh"  "maven (~/.m2/settings.xml)"
-printf "   %-24s  %s\n" "endor-nuget.sh"  "nuget / dotnet (~/.nuget/NuGet/NuGet.Config)"
-printf "   %-24s  %s\n" "endor-ruby.sh"   "bundler (~/.bundle/config) · gem (~/.gemrc)"
-printf "   %-24s  %s\n" "endor-vscode.sh" "VS Code extension gallery + update remediation"
-printf "   %-24s  %s\n" "endor-all.sh"    "all of the above (single-script deploy)"
-printf "   %-24s  %s\n" "endor-remove.sh" "offboarding — strips all Endor config"
+printf "   %-31s  %s\n" "endor-js.sh"     "npm · pnpm · yarn classic · yarn 2+ · bun"
+printf "   %-31s  %s\n" "endor-python.sh" "pip · uv · poetry"
+printf "   %-31s  %s\n" "endor-go.sh"     "go modules (GOPROXY)"
+printf "   %-31s  %s\n" "endor-maven.sh"  "maven (~/.m2/settings.xml)"
+printf "   %-31s  %s\n" "endor-nuget.sh"  "nuget / dotnet (~/.nuget/NuGet/NuGet.Config)"
+printf "   %-31s  %s\n" "endor-ruby.sh"   "bundler (~/.bundle/config) · gem (~/.gemrc)"
+printf "   %-31s  %s\n" "endor-vscode.sh" "VS Code extension gallery + update remediation"
+printf "   %-31s  %s\n" "endor-all.sh"    "all of the above (single-script deploy)"
+printf "   %-31s  %s\n" "endor-remove.sh" "offboarding — strips all Endor config"
+printf "   %-31s  %s\n" "endor-vscode-disable-patch.sh" "turns off the VS Code product.json patch only"
+printf "   %-31s  %s\n" "endor-vscode-disable-policy.sh" "turns off the VS Code policy only"
 if [[ "$VSCODE_ENABLE_POLICY" == "1" ]]; then
-  printf "   %-24s  %s\n" "endor-vscode.mobileconfig" "VS Code policy for macOS: upload to your MDM"
-  printf "   %-24s  %s\n" "endor-vscode-policy.plist" "the same keys, for MDMs that take a preference file"
+  printf "   %-31s  %s\n" "endor-vscode.mobileconfig" "VS Code policy for macOS: upload to your MDM"
+  printf "   %-31s  %s\n" "endor-vscode-policy.plist" "the same keys, for MDMs that take a preference file"
 fi
 echo ""
 if [[ "$VSCODE_ENABLE_PATCH" == "0" && "$VSCODE_ENABLE_POLICY" == "0" ]]; then

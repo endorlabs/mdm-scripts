@@ -130,6 +130,7 @@ Each script in `out/<namespace>/` is **fully self-contained** — no external fi
 | `endor-ruby.ps1` | Team uses Ruby (Bundler, gem) only |
 | `endor-vscode.ps1` | Team uses Microsoft VS Code Stable extensions |
 | `endor-all.ps1` | Team uses multiple ecosystems — single-script deploy |
+| `endor-vscode-disable-patch.ps1`, `endor-vscode-disable-policy.ps1` | Turning off one VS Code method, for example when switching to the other. They run as SYSTEM and need no signed-in user |
 
 
 
@@ -386,8 +387,10 @@ by hand can still be installed.
 turn the firewall off. If the patch (the scheduled task, the worker, or an Endor
 URL in a `product.json`) or the policy (an Endor URL in the registry) is still in
 place from an earlier deployment, the script leaves it, warns and exits 1. To
-clear the warning, regenerate with that method's variable to keep it, or run
-`endor-remove.ps1` to remove it.
+clear the warning, regenerate with that method's variable to keep it, or remove
+it with `endor-vscode-disable-patch.ps1` or `endor-vscode-disable-policy.ps1`.
+See [Switching methods](../README.md#switching-methods-and-turning-one-off) for
+the order that keeps the firewall on.
 
 ---
 
@@ -470,6 +473,9 @@ Deploy `endor-remove.ps1` to strip all Endor configuration from a machine. It:
 - Stops and removes the VS Code scheduled task, then restores the stable defaults for the two managed gallery properties
 - Removes Endor's values from `HKLM\SOFTWARE\Policies\Microsoft\VSCode`, and the key if `endor-vscode.ps1` created it and nothing else is in it. If the machine has no record of setting the URL, it warns: Group Policy or Intune may set it again
 - Deletes config files that are empty after block removal
+
+To remove only one VS Code method, deploy `endor-vscode-disable-patch.ps1` or
+`endor-vscode-disable-policy.ps1` instead.
 
 ```powershell
 .\endor-remove.ps1 -DryRun   # preview first
