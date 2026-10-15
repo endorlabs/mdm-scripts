@@ -176,13 +176,18 @@ case "$_vscode_remove_os" in
   Linux)
     _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/var/lib/endor/vscode-firewall}"
     if [[ "${DRY_RUN:-0}" == "1" ]]; then
+      echo "[dry-run]   action : DELETE /etc/dpkg/dpkg.cfg.d/endor-vscode-firewall"
       echo "[dry-run]   action : DISABLE and DELETE endor-vscode-firewall systemd units"
     elif [[ "${ENDOR_VSCODE_SKIP_WATCHER:-0}" != "1" ]]; then
+      # The dpkg hook goes first, so no package install patches VS Code again during removal.
+      rm -f /etc/dpkg/dpkg.cfg.d/endor-vscode-firewall
       if command -v systemctl >/dev/null 2>&1; then
-        systemctl disable --now endor-vscode-firewall.path >/dev/null 2>&1 || true
+        systemctl disable --now endor-vscode-firewall.path endor-vscode-firewall.timer >/dev/null 2>&1 || true
+        systemctl stop endor-vscode-firewall.service >/dev/null 2>&1 || true
       fi
       rm -f \
         /etc/systemd/system/endor-vscode-firewall.path \
+        /etc/systemd/system/endor-vscode-firewall.timer \
         /etc/systemd/system/endor-vscode-firewall.service
       command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload || true
     fi

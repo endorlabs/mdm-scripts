@@ -40,12 +40,9 @@ list_product_files() {
         && printf '%s\n' "/Applications/Visual Studio Code.app/Contents/Resources/app/product.json"
       ;;
     Linux)
-      local candidate
-      for candidate in \
-        "/usr/share/code/resources/app/product.json" \
-        "/usr/lib/code/resources/app/product.json"; do
-        [[ -f "$candidate" ]] && printf '%s\n' "$candidate"
-      done
+      # Microsoft's .deb and .rpm both install here.
+      [[ -f "/usr/share/code/resources/app/product.json" ]] \
+        && printf '%s\n' "/usr/share/code/resources/app/product.json"
       ;;
   esac
 }
@@ -371,6 +368,122 @@ status_all() {
       echo "[endor-vscode] not configured: $file"
     fi
   done < <(list_product_files)
+}
+
+# ── Linux, and the plain-file path tests use: patch product.json in place ─────
+#
+# dpkg unpacks a new VS Code as <file>.dpkg-new, and rpm as <file>;<hex>, and both rename every
+# file into place at the end. The path unit starts the worker on the first temporary file, so the
+# worker waits for those to go before patching. systemd doesn't watch while the service runs,
+# so --once checks again before exiting, in case product.json changed meanwhile.
+
+# The folders product.json lives in, whether or not it exists right now.
+list_product_dirs() {
+  if [[ -n "${ENDOR_VSCODE_PRODUCT_JSON:-}" ]]; then
+    dirname "$ENDOR_VSCODE_PRODUCT_JSON"
+  elif [[ "$(uname -s)" == "Linux" ]]; then
+    echo "/usr/share/code/resources/app"
+  fi
+}
+
+# GNU stat on Linux; BSD stat on macOS, where only the tests take this path.
+if stat -c %i / >/dev/null 2>&1; then
+  file_ctime() { stat -c %Z "$1" 2>/dev/null; }
+  file_state() { stat -c '%n %i %Z %s' "$@" 2>/dev/null; }
+else
+  file_ctime() { stat -f %c "$1" 2>/dev/null; }
+  file_state() { stat -f '%N %i %c %z' "$@" 2>/dev/null; }
+fi
+
+# True while a package manager is unpacking into a product folder. A temporary file older than
+# SETTLE_TIMEOUT is left over from an interrupted run, not one in progress.
+package_unpacking() {
+  local dir file now changed
+  now=$(date +%s)
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    for file in "$dir"/*.dpkg-new "$dir"/*\;*; do
+      [[ -e "$file" ]] || continue
+      changed=$(file_ctime "$file") || continue
+      (( now - changed < SETTLE_TIMEOUT )) && return 0
+    done
+  done < <(list_product_dirs)
+  return 1
+}
+
+wait_for_package_manager() {
+  local deadline=$((SECONDS + SETTLE_TIMEOUT)) waited=0
+  while package_unpacking; do
+    if (( SECONDS >= deadline )); then
+      echo "[endor-vscode] WARNING: a package manager was still unpacking VS Code after ${SETTLE_TIMEOUT}s; patching what is there" >&2
+      return 1
+    fi
+    waited=1
+    sleep 1
+  done
+  [[ "$waited" == "0" ]] || echo "[endor-vscode] waited for the package manager to finish unpacking VS Code"
+  return 0
+}
+
+product_state() {
+  local dir
+  while IFS= read -r dir; do
+    file_state "$dir" "$dir/product.json"
+  done < <(list_product_dirs)
+  return 0
+}
+
+generic_once() {
+  local before status=0
+  # Go round again when product.json changed during the pass. The worker's own patch counts, so
+  # a second round is usually just "already configured". At most three rounds.
+  for _ in 1 2 3; do
+    wait_for_package_manager || true
+    before=$(product_state)
+    patch_all
+    status=$?
+    [[ "$(product_state)" != "$before" ]] || break
+  done
+  return "$status"
+}
+
+generic_main() {
+  local name rc
+  STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-}"
+  [[ -n "$STATE_DIR" ]] || STATE_DIR=$(cd "$(dirname "$0")" && pwd -P)
+  LOCK_WAIT="${ENDOR_VSCODE_LOCK_WAIT:-120}"
+  SETTLE_TIMEOUT="${ENDOR_VSCODE_SETTLE_TIMEOUT:-300}"
+  for name in LOCK_WAIT SETTLE_TIMEOUT; do
+    if ! [[ "${!name}" =~ ^[0-9]+$ ]]; then
+      echo "[endor-vscode] ERROR: ENDOR_VSCODE_$name must be a whole number" >&2
+      return 2
+    fi
+  done
+
+  # One run at a time: the path unit, the timer, the dpkg hook, the installer and removal all go
+  # through this lock. A --once that gets it late still runs, because the dpkg hook needs a pass
+  # after dpkg has renamed the new files into place.
+  if [[ "$MODE" == once || "$MODE" == restore ]] && [[ "$DRY_RUN" != "1" ]] \
+      && [[ "${ENDOR_VSCODE_LOCK_HELD:-0}" != "1" ]] && command -v flock >/dev/null 2>&1; then
+    ENDOR_VSCODE_LOCK_HELD=1 flock -E 75 -w "$LOCK_WAIT" "$STATE_DIR/.lock" "$BASH" "$0" "$@"
+    rc=$?
+    if [[ "$rc" -eq 75 ]]; then
+      if [[ "$MODE" == once ]]; then
+        echo "[endor-vscode] another run of the worker is still busy; leaving this trigger to it"
+        return 0
+      fi
+      echo "[endor-vscode] ERROR: another run of the worker held the lock for ${LOCK_WAIT}s" >&2
+      return 1
+    fi
+    return "$rc"
+  fi
+
+  case "$MODE" in
+    once) generic_once ;;
+    restore) restore_all ;;
+    status) status_all ;;
+    purge) : ;;
+  esac
 }
 
 # ── macOS: patch a clone, sign it with this Mac's identity, swap the whole app ──
@@ -1671,12 +1784,8 @@ if [[ "$(uname -s)" == "Darwin" && -z "${ENDOR_VSCODE_PRODUCT_JSON:-}" ]]; then
   exit $?
 fi
 
-case "$MODE" in
-  once) patch_all ;;
-  restore) restore_all ;;
-  status) status_all ;;
-  purge) : ;;
-esac
+generic_main "$@"
+exit $?
 ENDOR_VSCODE_WORKER
 
 # Changing VS Code on macOS has costs that each customer weighs (see bash/README.md), so the
@@ -1814,8 +1923,16 @@ PLIST
           _ENDOR_WARNED=1
         fi
       else
+        # Three triggers, all running the worker, which takes a lock so only one runs at a time:
+        #   - the path unit, when dpkg or rpm starts writing VS Code (the worker waits for it to
+        #     finish);
+        #   - a timer every minute, for changes the path unit missed while the worker ran;
+        #   - on Debian and Ubuntu, a dpkg hook after every dpkg run, so VS Code is patched before
+        #     apt, unattended-upgrades or dpkg -i returns.
         _vscode_service="/etc/systemd/system/endor-vscode-firewall.service"
         _vscode_path="/etc/systemd/system/endor-vscode-firewall.path"
+        _vscode_timer="/etc/systemd/system/endor-vscode-firewall.timer"
+        _vscode_dpkg_hook="/etc/dpkg/dpkg.cfg.d/endor-vscode-firewall"
         cat > "$_vscode_service" <<SERVICE
 [Unit]
 Description=Reapply Endor VS Code Extension Firewall
@@ -1830,16 +1947,43 @@ Description=Watch Microsoft VS Code product.json for updates
 
 [Path]
 PathChanged=/usr/share/code/resources/app
-PathChanged=/usr/lib/code/resources/app
 Unit=endor-vscode-firewall.service
 
 [Install]
 WantedBy=multi-user.target
 PATHUNIT
-        chmod 644 "$_vscode_service" "$_vscode_path"
+        cat > "$_vscode_timer" <<TIMERUNIT
+[Unit]
+Description=Reapply Endor VS Code Extension Firewall every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=1min
+Unit=endor-vscode-firewall.service
+
+[Install]
+WantedBy=timers.target
+TIMERUNIT
+        chmod 644 "$_vscode_service" "$_vscode_path" "$_vscode_timer"
+        if [[ -d /etc/dpkg/dpkg.cfg.d ]]; then
+          if [[ "$_VSCODE_WORKER_PATH" == *[\'\"]* ]]; then
+            echo "[endor] WARNING: not installing the dpkg hook: the worker path contains a quote." >&2
+            _ENDOR_WARNED=1
+          else
+            # dpkg runs this with sh -c after each run that installs or removes packages. The lock
+            # wait covers a path-triggered run still waiting for dpkg to finish.
+            cat > "$_vscode_dpkg_hook" <<DPKGHOOK
+# Endor Package Firewall: patch VS Code's product.json as soon as dpkg has installed it.
+post-invoke="if [ -x '$_VSCODE_WORKER_PATH' ]; then ENDOR_VSCODE_LOCK_WAIT=900 '$_VSCODE_WORKER_PATH' --once >/dev/null 2>&1; fi; true"
+DPKGHOOK
+            chmod 644 "$_vscode_dpkg_hook"
+          fi
+        fi
         if command -v systemctl >/dev/null 2>&1; then
           systemctl daemon-reload
-          if ! systemctl enable --now endor-vscode-firewall.path; then
+          # restart, not just enable --now, so a path unit from an earlier version re-reads its paths.
+          if ! systemctl enable endor-vscode-firewall.path endor-vscode-firewall.timer >/dev/null 2>&1 \
+              || ! systemctl restart endor-vscode-firewall.path endor-vscode-firewall.timer; then
             echo "[endor] WARNING: could not enable VS Code systemd remediation." >&2
             _ENDOR_WARNED=1
           fi
@@ -1855,5 +1999,6 @@ fi
 [[ "$_vscode_skip" != "0" ]] || echo "[endor] ✓ VS Code extension firewall done"
 unset -f _vscode_run_worker _vscode_xml
 unset _vscode_os _VSCODE_STATE_DIR _VSCODE_WORKER_PATH _VSCODE_WORKER_CONTENT _VSCODE_LOG_DIR
-unset _vscode_tmp_worker _vscode_plist _vscode_service _vscode_path _vscode_log _vscode_watch
+unset _vscode_tmp_worker _vscode_plist _vscode_service _vscode_path _vscode_timer _vscode_dpkg_hook
+unset _vscode_log _vscode_watch
 unset _vscode_caches _VSCODE_MACOS_DAEMON _vscode_skip

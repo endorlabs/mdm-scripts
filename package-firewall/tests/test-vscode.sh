@@ -143,6 +143,72 @@ cp "$FIXTURE" "$product"
 assert_patched "$product"
 [[ ! -e "$TMP_DIR/planted-imported" ]]
 
+# dpkg unpacks a new VS Code as product.json.dpkg-new and renames it at the end; rpm uses
+# product.json;<hex>. A run started meanwhile must patch the new file, not the old one.
+for temp_name in "product.json.dpkg-new" "product.json;5f3e2a1b"; do
+  echo "test: a run waits for the package manager to put $temp_name in place, then patches it"
+  dir="$TMP_DIR/unpack-$RANDOM"
+  mkdir -p "$dir"
+  product="$dir/product.json"
+  state="$dir-state"
+  cp "$FIXTURE" "$product"
+  sed 's/fixture-v1/fixture-v2/' "$FIXTURE" > "$dir/$temp_name"
+  run_installer "$product" "$state" > "$dir.out" 2>&1 &
+  pid=$!
+  sleep 3
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "the run did not wait for the package manager" >&2
+    cat "$dir.out" >&2
+    exit 1
+  fi
+  mv -f "$dir/$temp_name" "$product"
+  wait "$pid"
+  assert_patched "$product"
+  grep -q '"fixture-v2"' "$product"
+  grep -q "waited for the package manager" "$dir.out"
+done
+
+echo "test: a package manager that never finishes delays the patch by ENDOR_VSCODE_SETTLE_TIMEOUT at most"
+dir="$TMP_DIR/stuck-unpack"
+mkdir -p "$dir"
+product="$dir/product.json"
+cp "$FIXTURE" "$product"
+cp "$FIXTURE" "$product.dpkg-new"
+started=$SECONDS
+ENDOR_VSCODE_SETTLE_TIMEOUT=2 run_installer "$product" "$dir-state" >/dev/null 2>&1
+(( SECONDS - started <= 8 ))
+assert_patched "$product"
+[[ -e "$product.dpkg-new" ]]
+
+if command -v flock >/dev/null 2>&1; then
+  echo "test: runs that overlap take turns"
+  dir="$TMP_DIR/overlap"
+  mkdir -p "$dir"
+  product="$dir/product.json"
+  state="$dir-state"
+  cp "$FIXTURE" "$product"
+  run_installer "$product" "$state" >/dev/null
+  cp "$FIXTURE" "$product"
+  sed 's/fixture-v1/fixture-v2/' "$FIXTURE" > "$product.dpkg-new"
+  ENDOR_VSCODE_PRODUCT_JSON="$product" "$state/worker.sh" --once >/dev/null 2>&1 &
+  first=$!
+  sleep 1
+  ENDOR_VSCODE_PRODUCT_JSON="$product" "$state/worker.sh" --once >/dev/null 2>&1 &
+  second=$!
+  sleep 2
+  mv -f "$product.dpkg-new" "$product"
+  wait "$first"
+  wait "$second"
+  assert_patched "$product"
+  grep -q '"fixture-v2"' "$product"
+  for leftover in "$dir"/*.endor.*; do
+    if [[ -e "$leftover" ]]; then
+      echo "overlapping runs left a temporary file behind: $leftover" >&2
+      exit 1
+    fi
+  done
+fi
+
 echo "test: credential rotation preserves valid product.json modifications"
 product="$TMP_DIR/rotation-product.json"
 state="$TMP_DIR/rotation-state"
