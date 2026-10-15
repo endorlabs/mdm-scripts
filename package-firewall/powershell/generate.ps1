@@ -58,6 +58,8 @@
 #   endor-vscode.ps1   — VS Code:    extension gallery firewall + update watcher
 #   endor-all.ps1      — All of the above (single-script MDM deploy)
 #   endor-remove.ps1   — Offboarding: strips Endor config + registry env vars
+#   endor-vscode-disable-patch.ps1, endor-vscode-disable-policy.ps1
+#                      — Turn off one VS Code method, and leave everything else
 #
 # All scripts accept -DryRun: prints what would change without writing anything.
 # All scripts are idempotent — safe to re-push on MDM check-in cycles.
@@ -224,6 +226,7 @@ function Invoke-Substitute {
     $r = $r.Replace('{{VSCODE_ENABLE_PATCH}}',  $VSCODE_ENABLE_PATCH)
     $r = $r.Replace('{{VSCODE_ENABLE_POLICY}}', $VSCODE_ENABLE_POLICY)
     $r = $r.Replace('{{VSCODE_POLICY_AUTH}}',   $VSCODE_POLICY_AUTH)
+    $r = $r.Replace('{{VSCODE_REMOVE_SCOPE}}',  'all')
     $r
 }
 
@@ -382,6 +385,55 @@ Build-SystemScript `
 # -- Generate remove script ----------------------------------------------------
 Build-RemoveScript (Join-Path $OutDir 'endor-remove.ps1')
 
+# -- Generate the VS Code disable scripts --------------------------------------
+# Each turns off one VS Code method, whichever the scripts were generated with, so admins can
+# switch methods without endor-remove.ps1, which also removes the package-manager configuration.
+# They are the VS Code section of templates/remove.ps1 with its scope filled in, so that section
+# must be marked exactly once. Mirrors generate.sh.
+$_removeTemplate = Get-Content (Join-Path $TmplDir 'remove.ps1') -Raw -Encoding UTF8
+$_vscodeSections = [regex]::Matches($_removeTemplate,
+    '(?ms)^# >>> endor-vscode-remove\r?$.*?^# <<< endor-vscode-remove\r?$')
+if ($_vscodeSections.Count -ne 1 -or
+        ([regex]::Matches($_removeTemplate, '(?m)^# >>> endor-vscode-remove\r?$')).Count -ne 1 -or
+        ([regex]::Matches($_removeTemplate, '(?m)^# <<< endor-vscode-remove\r?$')).Count -ne 1 -or
+        ($_vscodeSections[0].Value -split "`n").Count -lt 3) {
+    Write-Error ("templates/remove.ps1 must mark one non-empty VS Code section with " +
+                 "'# >>> endor-vscode-remove' and '# <<< endor-vscode-remove'.")
+    exit 1
+}
+
+# Build-VSCodeDisableScript <scope> <outputpath> <description> <what is off> <its flag>
+function Build-VSCodeDisableScript {
+    param([string]$Scope, [string]$OutputPath, [string]$Description, [string]$What, [string]$Flag)
+    $name = Split-Path $OutputPath -Leaf
+    $closing = @"
+
+Write-Host ''
+if (`$DryRun) {
+    Write-Host '[endor] [done] Dry run complete -- nothing changed.'
+} elseif (-not `$EndorWarned) {
+    Write-Host '[endor] [done] $What is off.'
+    Write-Host '[endor]   An endor-vscode.ps1 generated with $Flag turns it on again: replace it in your MDM'
+    Write-Host '[endor]   with one generated without it.'
+}
+"@
+    $parts = @(
+        (Get-SystemScriptHeader -ScriptName $name -Description $Description),
+        (Invoke-Substitute $_vscodeSections[0].Value.Replace('{{VSCODE_REMOVE_SCOPE}}', $Scope)),
+        $closing,
+        $ScriptFooter
+    )
+    Set-Content -Path $OutputPath -Value ($parts -join "`n") -Encoding UTF8
+}
+
+Build-VSCodeDisableScript 'patch' (Join-Path $OutDir 'endor-vscode-disable-patch.ps1') `
+    'Turns off the Endor VS Code product.json patch and its scheduled task, and restores Microsoft''s gallery settings.' `
+    'The VS Code product.json patch' 'ENDOR_VSCODE_ENABLE_PATCH'
+Build-VSCodeDisableScript 'policy' (Join-Path $OutDir 'endor-vscode-disable-policy.ps1') `
+    'Removes the Endor VS Code ExtensionGalleryServiceUrl policy from HKLM.' `
+    'The VS Code ExtensionGalleryServiceUrl policy' 'ENDOR_VSCODE_ENABLE_POLICY'
+Remove-Variable _removeTemplate, _vscodeSections
+
 # -- Generate combined all.ps1 -------------------------------------------------
 $_allName  = 'endor-all.ps1'
 $_allParts = @(
@@ -423,14 +475,16 @@ Remove-Variable -Name _allName, _allParts
 Write-Host ''
 Write-Host "OK  Generated -> $OutDir"
 Write-Host ''
-Write-Host ('   {0,-24}  {1}' -f 'endor-js.ps1',     'npm . pnpm . yarn classic . yarn 2+ . bun')
-Write-Host ('   {0,-24}  {1}' -f 'endor-python.ps1', 'pip . uv . poetry')
-Write-Host ('   {0,-24}  {1}' -f 'endor-go.ps1',     'go modules (GOPROXY)')
-Write-Host ('   {0,-24}  {1}' -f 'endor-maven.ps1',  'maven (~\.m2\settings.xml)')
-Write-Host ('   {0,-24}  {1}' -f 'endor-nuget.ps1',  'nuget / dotnet (%APPDATA%\NuGet\NuGet.Config)')
-Write-Host ('   {0,-24}  {1}' -f 'endor-vscode.ps1', 'VS Code extension gallery + update remediation')
-Write-Host ('   {0,-24}  {1}' -f 'endor-all.ps1',    'all of the above (single-script deploy)')
-Write-Host ('   {0,-24}  {1}' -f 'endor-remove.ps1', 'offboarding -- strips all Endor config + registry env vars')
+Write-Host ('   {0,-31}  {1}' -f 'endor-js.ps1',     'npm . pnpm . yarn classic . yarn 2+ . bun')
+Write-Host ('   {0,-31}  {1}' -f 'endor-python.ps1', 'pip . uv . poetry')
+Write-Host ('   {0,-31}  {1}' -f 'endor-go.ps1',     'go modules (GOPROXY)')
+Write-Host ('   {0,-31}  {1}' -f 'endor-maven.ps1',  'maven (~\.m2\settings.xml)')
+Write-Host ('   {0,-31}  {1}' -f 'endor-nuget.ps1',  'nuget / dotnet (%APPDATA%\NuGet\NuGet.Config)')
+Write-Host ('   {0,-31}  {1}' -f 'endor-vscode.ps1', 'VS Code extension gallery + update remediation')
+Write-Host ('   {0,-31}  {1}' -f 'endor-all.ps1',    'all of the above (single-script deploy)')
+Write-Host ('   {0,-31}  {1}' -f 'endor-remove.ps1', 'offboarding -- strips all Endor config + registry env vars')
+Write-Host ('   {0,-31}  {1}' -f 'endor-vscode-disable-patch.ps1', 'turns off the VS Code product.json patch only')
+Write-Host ('   {0,-31}  {1}' -f 'endor-vscode-disable-policy.ps1', 'turns off the VS Code policy only')
 Write-Host ''
 if ($VSCODE_ENABLE_PATCH -eq '0' -and $VSCODE_ENABLE_POLICY -eq '0') {
     Write-Warning 'VS Code: no method enabled, so endor-vscode.ps1 and endor-all.ps1 leave VS Code alone.'

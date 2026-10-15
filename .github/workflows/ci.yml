@@ -227,6 +227,10 @@ jobs:
             grep -qxF "$line" "$policy_script"
           done
           grep -qxF '# >>> endor-vscode-remove' package-firewall/bash/out/ci-smoke-policy/endor-remove.sh
+          for method in patch policy; do
+            test -x "package-firewall/bash/out/ci-smoke-policy/endor-vscode-disable-$method.sh"
+            grep -qxF "_vscode_remove_scope='$method'" "package-firewall/bash/out/ci-smoke-policy/endor-vscode-disable-$method.sh"
+          done
           # The macOS profile and property list: well-formed, readable as plists, owner-only.
           for f in package-firewall/bash/out/ci-smoke-policy/endor-vscode.mobileconfig \
               package-firewall/bash/out/ci-smoke-policy/endor-vscode-policy.plist; do
@@ -279,6 +283,12 @@ jobs:
           }
           if (-not (Get-Content -Raw 'package-firewall/powershell/out/ci-smoke-policy/endor-remove.ps1').Contains('# >>> endor-vscode-remove')) {
             Write-Error 'generated endor-remove.ps1 has no VS Code section markers'
+          }
+          foreach ($method in 'patch', 'policy') {
+            $disable = "package-firewall/powershell/out/ci-smoke-policy/endor-vscode-disable-$method.ps1"
+            if (-not (Get-Content -Raw $disable).Contains("`$_vscodeRemoveScope = '$method'")) {
+              Write-Error "generated $disable is missing or has the wrong scope"
+            }
           }
           foreach ($f in Get-ChildItem 'package-firewall/powershell/out/ci-smoke-policy' -Filter *.ps1) {
             $tokens = $null; $errors = $null

@@ -162,83 +162,90 @@ remove_nuget_blocks "$USER_HOME/.nuget/NuGet/NuGet.Config" "$CONSOLE_USER" "$USE
 
 # >>> endor-vscode-remove
 # ── VS Code extension firewall ────────────────────────────────────────────────
-# Removes both methods: the product.json patch and the ExtensionGalleryServiceUrl policy. This
-# section stands on its own, and doesn't use the console user.
+# Removes the VS Code methods in scope: the product.json patch, the ExtensionGalleryServiceUrl
+# policy, or both. endor-remove.sh removes both, and generate.sh builds
+# endor-vscode-disable-patch.sh and endor-vscode-disable-policy.sh from this section with the
+# scope filled in. So the section stands on its own, and doesn't use the console user.
+_vscode_remove_scope='{{VSCODE_REMOVE_SCOPE}}'
+case "$_vscode_remove_scope" in patch|policy) ;; *) _vscode_remove_scope=all ;; esac
 echo ""
 echo "[endor-remove] ── VS Code extensions ───────────────────────────────────────"
 
 _vscode_remove_os=$(uname -s)
-case "$_vscode_remove_os" in
-  Darwin)
-    _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/Library/Application Support/Endor Labs/vscode-firewall}"
-    _vscode_plist="/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist"
-    if [[ "${DRY_RUN:-0}" == "1" ]]; then
-      echo "[dry-run]   action : UNLOAD and DELETE $_vscode_plist"
-    elif [[ "${ENDOR_VSCODE_SKIP_WATCHER:-0}" != "1" ]]; then
-      /bin/launchctl bootout system/com.endorlabs.vscode-firewall >/dev/null 2>&1 || true
-      rm -f "$_vscode_plist"
-    fi
-    ;;
-  Linux)
-    _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/var/lib/endor/vscode-firewall}"
-    if [[ "${DRY_RUN:-0}" == "1" ]]; then
-      echo "[dry-run]   action : DELETE /etc/dpkg/dpkg.cfg.d/endor-vscode-firewall"
-      echo "[dry-run]   action : DISABLE and DELETE endor-vscode-firewall systemd units"
-    elif [[ "${ENDOR_VSCODE_SKIP_WATCHER:-0}" != "1" ]]; then
-      # The dpkg hook goes first, so no package install patches VS Code again during removal.
-      rm -f /etc/dpkg/dpkg.cfg.d/endor-vscode-firewall
-      if command -v systemctl >/dev/null 2>&1; then
-        systemctl disable --now endor-vscode-firewall.path endor-vscode-firewall.timer >/dev/null 2>&1 || true
-        systemctl stop endor-vscode-firewall.service >/dev/null 2>&1 || true
+if [[ "$_vscode_remove_scope" != "policy" ]]; then
+  case "$_vscode_remove_os" in
+    Darwin)
+      _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/Library/Application Support/Endor Labs/vscode-firewall}"
+      _vscode_plist="/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist"
+      if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        echo "[dry-run]   action : UNLOAD and DELETE $_vscode_plist"
+      elif [[ "${ENDOR_VSCODE_SKIP_WATCHER:-0}" != "1" ]]; then
+        /bin/launchctl bootout system/com.endorlabs.vscode-firewall >/dev/null 2>&1 || true
+        rm -f "$_vscode_plist"
       fi
-      rm -f \
-        /etc/systemd/system/endor-vscode-firewall.path \
-        /etc/systemd/system/endor-vscode-firewall.timer \
-        /etc/systemd/system/endor-vscode-firewall.service
-      command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload || true
-    fi
-    ;;
-  *)
-    _VSCODE_STATE_DIR=""
-    ;;
-esac
+      ;;
+    Linux)
+      _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/var/lib/endor/vscode-firewall}"
+      if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        echo "[dry-run]   action : DELETE /etc/dpkg/dpkg.cfg.d/endor-vscode-firewall"
+        echo "[dry-run]   action : DISABLE and DELETE endor-vscode-firewall systemd units"
+      elif [[ "${ENDOR_VSCODE_SKIP_WATCHER:-0}" != "1" ]]; then
+        # The dpkg hook goes first, so no package install patches VS Code again during removal.
+        rm -f /etc/dpkg/dpkg.cfg.d/endor-vscode-firewall
+        if command -v systemctl >/dev/null 2>&1; then
+          systemctl disable --now endor-vscode-firewall.path endor-vscode-firewall.timer >/dev/null 2>&1 || true
+          systemctl stop endor-vscode-firewall.service >/dev/null 2>&1 || true
+        fi
+        rm -f \
+          /etc/systemd/system/endor-vscode-firewall.path \
+          /etc/systemd/system/endor-vscode-firewall.timer \
+          /etc/systemd/system/endor-vscode-firewall.service
+        command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload || true
+      fi
+      ;;
+    *)
+      _VSCODE_STATE_DIR=""
+      ;;
+  esac
 
-# On macOS the worker swaps Microsoft's original app back in (or restores product.json in a
-# re-signed copy), then --purge deletes its signing identity from the System keychain.
-_vscode_run_worker() {
-  if [[ "$_vscode_remove_os" == "Darwin" ]]; then
-    ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" ENDOR_VSCODE_LOCK_WAIT=600 \
-      /bin/bash "$_VSCODE_STATE_DIR/worker.sh" "$@"
-  else
-    ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" "$_VSCODE_STATE_DIR/worker.sh" "$@"
-  fi
-}
-
-_vscode_restore_ok=1
-if [[ -n "$_VSCODE_STATE_DIR" && -x "$_VSCODE_STATE_DIR/worker.sh" ]]; then
-  if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    _vscode_run_worker --restore --dry-run || _vscode_restore_ok=0
-  else
-    _vscode_run_worker --restore || _vscode_restore_ok=0
-    # Workers from before --purge existed never created a signing identity.
-    if [[ "$_vscode_restore_ok" == "1" ]] && grep -q -- '--purge)' "$_VSCODE_STATE_DIR/worker.sh"; then
-      _vscode_run_worker --purge || _vscode_restore_ok=0
+  # On macOS the worker swaps Microsoft's original app back in (or restores product.json in a
+  # re-signed copy), then --purge deletes its signing identity from the System keychain.
+  _vscode_run_worker() {
+    if [[ "$_vscode_remove_os" == "Darwin" ]]; then
+      ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" ENDOR_VSCODE_LOCK_WAIT=600 \
+        /bin/bash "$_VSCODE_STATE_DIR/worker.sh" "$@"
+    else
+      ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" "$_VSCODE_STATE_DIR/worker.sh" "$@"
     fi
-    if [[ "$_vscode_restore_ok" == "1" ]]; then
-      rm -rf "$_VSCODE_STATE_DIR"
-      if [[ "$_vscode_remove_os" == "Darwin" ]]; then
-        rm -f "/Library/Logs/Endor Labs/vscode-firewall.log" "/Library/Logs/Endor Labs/vscode-firewall.log.1"
-        rmdir "/Library/Logs/Endor Labs" 2>/dev/null || true
+  }
+
+  _vscode_restore_ok=1
+  if [[ -n "$_VSCODE_STATE_DIR" && -x "$_VSCODE_STATE_DIR/worker.sh" ]]; then
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+      _vscode_run_worker --restore --dry-run || _vscode_restore_ok=0
+    else
+      _vscode_run_worker --restore || _vscode_restore_ok=0
+      # Workers from before --purge existed never created a signing identity.
+      if [[ "$_vscode_restore_ok" == "1" ]] && grep -q -- '--purge)' "$_VSCODE_STATE_DIR/worker.sh"; then
+        _vscode_run_worker --purge || _vscode_restore_ok=0
+      fi
+      if [[ "$_vscode_restore_ok" == "1" ]]; then
+        rm -rf "$_VSCODE_STATE_DIR"
+        # The daemon's log belongs to the real state folder, not to one a test points at.
+        if [[ "$_vscode_remove_os" == "Darwin" && -z "${ENDOR_VSCODE_STATE_DIR:-}" ]]; then
+          rm -f "/Library/Logs/Endor Labs/vscode-firewall.log" "/Library/Logs/Endor Labs/vscode-firewall.log.1"
+          rmdir "/Library/Logs/Endor Labs" 2>/dev/null || true
+        fi
       fi
     fi
+  else
+    echo "[endor-remove] skip (no VS Code managed state)"
   fi
-else
-  echo "[endor-remove] skip (no VS Code managed state)"
-fi
 
-if [[ "$_vscode_restore_ok" != "1" ]]; then
-  echo "[endor-remove] WARNING: VS Code restoration was incomplete; managed state was retained." >&2
-  _ENDOR_WARNED=1
+  if [[ "$_vscode_restore_ok" != "1" ]]; then
+    echo "[endor-remove] WARNING: VS Code restoration was incomplete; managed state was retained." >&2
+    _ENDOR_WARNED=1
+  fi
 fi
 
 # The policy, in /etc/vscode/policy.json on Linux: only Endor's keys go, and the file too if this
@@ -472,44 +479,46 @@ def main(argv):
 
 sys.exit(main(sys.argv))
 ENDOR_VSCODE_POLICY_PY
-_vscode_policy_file="${ENDOR_VSCODE_POLICY_FILE:-/etc/vscode/policy.json}"
-_vscode_policy_state="${ENDOR_VSCODE_POLICY_STATE_DIR:-/var/lib/endor/vscode-policy}"
-if [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" && "$_vscode_remove_os" == "Darwin" ]]; then
-  # On macOS the policy comes from a configuration profile, which only the MDM can remove.
-  # ENDOR_VSCODE_MANAGED_PREFS is for tests, as in the installer.
-  _vscode_managed="${ENDOR_VSCODE_MANAGED_PREFS:-/Library/Managed Preferences}"
-  _vscode_profile_left=""
-  for _vscode_file in "$_vscode_managed/com.microsoft.VSCode.plist" "$_vscode_managed"/*/com.microsoft.VSCode.plist; do
-    [[ -f "$_vscode_file" ]] || continue
-    case "$(/usr/bin/plutil -extract ExtensionGalleryServiceUrl raw -o - "$_vscode_file" 2>/dev/null || true)" in
-      */firewall/vscode/_ak/*) _vscode_profile_left="$_vscode_file"; break ;;
-    esac
-  done
-  if [[ -n "$_vscode_profile_left" ]]; then
-    echo "[endor-remove] WARNING: a configuration profile sets VS Code's ExtensionGalleryServiceUrl ($_vscode_profile_left)." >&2
-    echo "[endor-remove]   Remove the profile in your MDM; this script can't." >&2
+if [[ "$_vscode_remove_scope" != "patch" ]]; then
+  _vscode_policy_file="${ENDOR_VSCODE_POLICY_FILE:-/etc/vscode/policy.json}"
+  _vscode_policy_state="${ENDOR_VSCODE_POLICY_STATE_DIR:-/var/lib/endor/vscode-policy}"
+  if [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" && "$_vscode_remove_os" == "Darwin" ]]; then
+    # On macOS the policy comes from a configuration profile, which only the MDM can remove.
+    # ENDOR_VSCODE_MANAGED_PREFS is for tests, as in the installer.
+    _vscode_managed="${ENDOR_VSCODE_MANAGED_PREFS:-/Library/Managed Preferences}"
+    _vscode_profile_left=""
+    for _vscode_file in "$_vscode_managed/com.microsoft.VSCode.plist" "$_vscode_managed"/*/com.microsoft.VSCode.plist; do
+      [[ -f "$_vscode_file" ]] || continue
+      case "$(/usr/bin/plutil -extract ExtensionGalleryServiceUrl raw -o - "$_vscode_file" 2>/dev/null || true)" in
+        */firewall/vscode/_ak/*) _vscode_profile_left="$_vscode_file"; break ;;
+      esac
+    done
+    if [[ -n "$_vscode_profile_left" ]]; then
+      echo "[endor-remove] WARNING: a configuration profile sets VS Code's ExtensionGalleryServiceUrl ($_vscode_profile_left)." >&2
+      echo "[endor-remove]   Remove the profile in your MDM; this script can't." >&2
+      _ENDOR_WARNED=1
+    else
+      echo "[endor-remove] skip (no VS Code configuration profile)"
+    fi
+  elif [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" && "$_vscode_remove_os" != "Linux" ]]; then
+    :
+  elif [[ ! -e "$_vscode_policy_file" && ! -e "$_vscode_policy_state" ]]; then
+    echo "[endor-remove] skip (no VS Code policy file)"
+  elif ! command -v python3 >/dev/null 2>&1; then
+    echo "[endor-remove] WARNING: python3 is required to remove VS Code's policy from $_vscode_policy_file." >&2
     _ENDOR_WARNED=1
   else
-    echo "[endor-remove] skip (no VS Code configuration profile)"
-  fi
-elif [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" && "$_vscode_remove_os" != "Linux" ]]; then
-  :
-elif [[ ! -e "$_vscode_policy_file" && ! -e "$_vscode_policy_state" ]]; then
-  echo "[endor-remove] skip (no VS Code policy file)"
-elif ! command -v python3 >/dev/null 2>&1; then
-  echo "[endor-remove] WARNING: python3 is required to remove VS Code's policy from $_vscode_policy_file." >&2
-  _ENDOR_WARNED=1
-else
-  _vscode_strict=1
-  [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" ]] || _vscode_strict=0
-  if ! python3 -I -c "$_VSCODE_POLICY_PY" remove "$_vscode_policy_file" "$_vscode_policy_state" \
-      "${DRY_RUN:-0}" "$_vscode_strict"; then
-    echo "[endor-remove] WARNING: VS Code's policy was not removed from $_vscode_policy_file." >&2
-    _ENDOR_WARNED=1
+    _vscode_strict=1
+    [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" ]] || _vscode_strict=0
+    if ! python3 -I -c "$_VSCODE_POLICY_PY" remove "$_vscode_policy_file" "$_vscode_policy_state" \
+        "${DRY_RUN:-0}" "$_vscode_strict"; then
+      echo "[endor-remove] WARNING: VS Code's policy was not removed from $_vscode_policy_file." >&2
+      _ENDOR_WARNED=1
+    fi
   fi
 fi
 unset -f _vscode_run_worker
-unset _vscode_remove_os _VSCODE_STATE_DIR _vscode_plist _vscode_restore_ok
+unset _vscode_remove_os _VSCODE_STATE_DIR _vscode_plist _vscode_restore_ok _vscode_remove_scope
 unset _VSCODE_POLICY_PY _vscode_policy_file _vscode_policy_state _vscode_strict
 unset _vscode_managed _vscode_profile_left _vscode_file
 # <<< endor-vscode-remove
