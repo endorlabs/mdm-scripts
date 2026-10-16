@@ -1,0 +1,74 @@
+name: VS Code macOS policy end-to-end
+
+# Runs Microsoft's real VS Code with the ExtensionGalleryServiceUrl policy from the generated
+# configuration profile, installed where an MDM puts it. See
+# package-firewall/tests/e2e-vscode-macos-policy.sh. Nothing is re-signed, so Apple silicon
+# runners are enough.
+
+on:
+  pull_request:
+    paths:
+      - package-firewall/bash/generate.sh
+      - package-firewall/bash/templates/vscode.sh
+      - package-firewall/bash/templates/remove.sh
+      - package-firewall/shared/vscode/**
+      - package-firewall/tests/e2e-vscode-macos-policy.sh
+      - .github/workflows/vscode-macos-policy-e2e.yml
+  push:
+    branches: [main]
+    paths:
+      - package-firewall/bash/generate.sh
+      - package-firewall/bash/templates/vscode.sh
+      - package-firewall/bash/templates/remove.sh
+      - package-firewall/shared/vscode/**
+      - package-firewall/tests/e2e-vscode-macos-policy.sh
+      - .github/workflows/vscode-macos-policy-e2e.yml
+  schedule:
+    # Weekly, to catch VS Code releases that change how the policy is read.
+    - cron: '17 8 * * 1'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'VS Code version to test (default: latest stable)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  e2e:
+    name: VS Code policy e2e (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Through fromJSON, as in vscode-macos-e2e.yml, because CI's actionlint (1.7.7) predates
+        # the macos-26 label.
+        os: ${{ fromJSON('["macos-15", "macos-26"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Run the end-to-end test
+        env:
+          ENDOR_E2E_VERSION: ${{ inputs.version }}
+          ENDOR_E2E_ARTIFACTS: ${{ runner.temp }}/vscode-policy-e2e-artifacts
+        run: bash package-firewall/tests/e2e-vscode-macos-policy.sh
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vscode-policy-e2e-${{ matrix.os }}
+          path: ${{ runner.temp }}/vscode-policy-e2e-artifacts
+          if-no-files-found: ignore
+          retention-days: 14
