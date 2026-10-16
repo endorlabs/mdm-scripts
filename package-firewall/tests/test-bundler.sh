@@ -39,7 +39,9 @@ warn()   { warn_if_bundle_mirror_conflict "$1" "$MIRROR_URL"; }
 sha()      { shasum -a 256 "$1" | awk '{print $1}'; }
 markers()  { grep -cF "$ENDOR_BLOCK_START" "$1" || true; }
 keycount() { grep -cF "$2: " "$1" || true; }            # lines setting <key>
-mode()     { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1" 2>/dev/null; }
+# GNU stat (Linux) takes -c; BSD stat (macOS) takes -f. GNU `stat -f` is "file system" mode and
+# would print fs info to stdout while failing, so detect the flavour instead of falling through.
+mode()     { if stat --version >/dev/null 2>&1; then stat -c %a "$1"; else stat -f %Lp "$1"; fi; }
 # bundle_get <file> <setting> — what Bundler resolves with <file> as its global config
 bundle_get() {
   ( cd "$TMP_DIR" && BUNDLE_USER_CONFIG="$1" BUNDLE_DISABLE_VERSION_CHECK=1 HOME="$TMP_DIR" \
