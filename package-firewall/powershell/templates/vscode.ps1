@@ -532,7 +532,7 @@ if (-not $_vscodeSkip -and $_vscodeEnablePatch -eq '0') {
     }
     if ($_vscodeLeft) {
         Write-Warning "[endor] the VS Code product.json patch from an earlier deployment is still installed ($_vscodeLeft)."
-        Write-Warning "[endor]   This script doesn't enable it. Regenerate with ENDOR_VSCODE_ENABLE_PATCH=true to keep it, or run endor-remove.ps1 to remove it."
+        Write-Warning "[endor]   This script doesn't enable it. Regenerate with ENDOR_VSCODE_ENABLE_PATCH=true to keep it, or run endor-vscode-disable-patch.ps1 (or endor-remove.ps1) to remove it."
         $EndorWarned = $true
     }
 }
@@ -704,7 +704,7 @@ if (-not $_vscodeSkip -and $_vscodeEnablePolicy -eq '1') {
         $_vscodeKey = $_vscodeBase.OpenSubKey($_vscodePolicyKey)
         if ($_vscodeKey -and [string]$_vscodeKey.GetValue('ExtensionGalleryServiceUrl') -like '*/firewall/vscode/_ak/*') {
             Write-Warning "[endor] VS Code's ExtensionGalleryServiceUrl policy from an earlier deployment is still set in $_vscodePolicyName."
-            Write-Warning "[endor]   This script doesn't enable it. Regenerate with ENDOR_VSCODE_ENABLE_POLICY=true to keep it, or run endor-remove.ps1 to remove it."
+            Write-Warning "[endor]   This script doesn't enable it. Regenerate with ENDOR_VSCODE_ENABLE_POLICY=true to keep it, or run endor-vscode-disable-policy.ps1 (or endor-remove.ps1) to remove it."
             $EndorWarned = $true
         }
         if ($_vscodeKey) { $_vscodeKey.Dispose() }
