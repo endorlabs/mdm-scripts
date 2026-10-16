@@ -38,6 +38,7 @@
 #   endor-go.ps1       — Go:         go modules (GOPROXY -> %APPDATA%\go\env)
 #   endor-maven.ps1    — Maven:      Maven (settings.xml -> %USERPROFILE%\.m2\settings.xml)
 #   endor-nuget.ps1    — .NET:       NuGet / dotnet (NuGet.Config -> %APPDATA%\NuGet\NuGet.Config)
+#   endor-ruby.ps1     — Ruby:       Bundler (mirror -> %USERPROFILE%\.bundle\config) . gem (source -> %USERPROFILE%\.gemrc)
 #   endor-vscode.ps1   — VS Code:    extension gallery firewall + update watcher
 #   endor-all.ps1      — All of the above (single-script MDM deploy)
 #   endor-remove.ps1   — Offboarding: strips Endor config + registry env vars
@@ -150,7 +151,10 @@ $NPM_REGISTRY_HOST = "$FQDN_HOST/v1/namespaces/$ENDOR_NAMESPACE/firewall/npm/"
 $PYPI_URL          = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/pypi/simple/"
 $MAVEN_REGISTRY_URL = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/maven/"
 $NUGET_SOURCE_URL   = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/nuget/v3/index.json"
-$VSCODE_TOKEN = [System.Convert]::ToBase64String(
+$GEM_MIRROR_URL     = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/gem/"
+# Bundler keys credentials by host name: upper-case, '.' -> '__', '-' -> '___', no port. Mirrors generate.sh.
+$BUNDLE_HOST_KEY    = $TRUSTED_HOST.ToUpperInvariant().Replace('-', '___').Replace('.', '__')
+$VSCODE_TOKEN =[System.Convert]::ToBase64String(
     [System.Text.Encoding]::UTF8.GetBytes("${ENDOR_API_KEY_ID}:${ENDOR_API_SECRET}")
 ).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 $VSCODE_SERVICE_URL = "$FQDN/v1/namespaces/$ENDOR_NAMESPACE/firewall/vscode/_ak/$VSCODE_TOKEN"
@@ -178,6 +182,8 @@ function Invoke-Substitute {
     $r = $r.Replace('{{TRUSTED_HOST}}',       $TRUSTED_HOST)
     $r = $r.Replace('{{MAVEN_REGISTRY_URL}}', $MAVEN_REGISTRY_URL)
     $r = $r.Replace('{{NUGET_SOURCE_URL}}',   $NUGET_SOURCE_URL)
+    $r = $r.Replace('{{GEM_MIRROR_URL}}',     $GEM_MIRROR_URL)
+    $r = $r.Replace('{{BUNDLE_HOST_KEY}}',    $BUNDLE_HOST_KEY)
     $r = $r.Replace('{{VSCODE_SERVICE_URL}}',  $VSCODE_SERVICE_URL)
     $r
 }
@@ -207,6 +213,8 @@ function Get-AllBlocks {
         (Get-BlockAssignment 'NUGET_SOURCES_BLOCK'  (Join-Path $SharedBlocksDir 'nugetconfig_sources.txt')),
         (Get-BlockAssignment 'NUGET_CREDENTIALS_BLOCK' (Join-Path $SharedBlocksDir 'nugetconfig_credentials.txt')),
         (Get-BlockAssignment 'NUGET_SOURCEMAPPING_BLOCK' (Join-Path $SharedBlocksDir 'nugetconfig_sourcemapping.txt')),
+        (Get-BlockAssignment 'BUNDLE_BLOCK'         (Join-Path $SharedBlocksDir 'bundleconfig.txt')),
+        (Get-BlockAssignment 'GEMRC_BLOCK'          (Join-Path $SharedBlocksDir 'gemrc.txt')),
         '# --',
         ''
     ) -join "`n"
@@ -329,6 +337,11 @@ Build-Script `
     (Join-Path $OutDir  'endor-nuget.ps1') `
     'Configures NuGet / .NET (%APPDATA%\NuGet\NuGet.Config) for Endor Package Firewall.'
 
+Build-Script `
+    (Join-Path $TmplDir 'ruby.ps1') `
+    (Join-Path $OutDir  'endor-ruby.ps1') `
+    'Configures Ruby -- Bundler (%USERPROFILE%\.bundle\config) and gem (%USERPROFILE%\.gemrc) -- for Endor Package Firewall.'
+
 Build-SystemScript `
     (Join-Path $TmplDir 'vscode.ps1') `
     (Join-Path $OutDir  'endor-vscode.ps1') `
@@ -360,6 +373,9 @@ $_allParts = @(
     '# == NuGet / .NET =======================================================',
     (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'nuget.ps1') -Raw -Encoding UTF8)),
     '',
+    '# == Ruby ===============================================================',
+    (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'ruby.ps1') -Raw -Encoding UTF8)),
+    '',
     '# == VS Code extensions ==================================================',
     (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'vscode.ps1') -Raw -Encoding UTF8)),
     '',
@@ -379,6 +395,7 @@ Write-Host ('   {0,-24}  {1}' -f 'endor-python.ps1', 'pip . uv . poetry')
 Write-Host ('   {0,-24}  {1}' -f 'endor-go.ps1',     'go modules (GOPROXY)')
 Write-Host ('   {0,-24}  {1}' -f 'endor-maven.ps1',  'maven (~\.m2\settings.xml)')
 Write-Host ('   {0,-24}  {1}' -f 'endor-nuget.ps1',  'nuget / dotnet (%APPDATA%\NuGet\NuGet.Config)')
+Write-Host ('   {0,-24}  {1}' -f 'endor-ruby.ps1',   'bundler (%USERPROFILE%\.bundle\config) . gem (%USERPROFILE%\.gemrc)')
 Write-Host ('   {0,-24}  {1}' -f 'endor-vscode.ps1', 'VS Code extension gallery + update remediation')
 Write-Host ('   {0,-24}  {1}' -f 'endor-all.ps1',    'all of the above (single-script deploy)')
 Write-Host ('   {0,-24}  {1}' -f 'endor-remove.ps1', 'offboarding -- strips all Endor config + registry env vars')
