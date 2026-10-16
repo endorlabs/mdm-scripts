@@ -11,12 +11,40 @@ param(
     [switch]$DryRun
 )
 
-# Failures to patch or restore one file are reported with Write-Error -ErrorAction Continue, so
-# they don't end the run (or the watcher loop) and the caller sees the exit code instead.
 $ErrorActionPreference = 'Stop'
 $FirewallUrl = '{{VSCODE_SERVICE_URL}}'
 $DefaultServiceUrl = 'https://marketplace.visualstudio.com/_apis/public/gallery'
 $DefaultExtensionUrlTemplate = 'https://www.vscode-unpkg.net/_gallery/{publisher}/{name}/latest'
+# Watch mode logs what it changes, and what goes wrong, next to the worker.
+$LogPath = $null
+
+function Write-Log {
+    param([string]$Message)
+    if (-not $LogPath) { return }
+    try {
+        $log = Get-Item -LiteralPath $LogPath -ErrorAction SilentlyContinue
+        if ($log -and $log.Length -gt 1MB) {
+            Move-Item -LiteralPath $LogPath -Destination "$LogPath.1" -Force
+        }
+        [System.IO.File]::AppendAllText($LogPath,
+            ('{0:yyyy-MM-ddTHH:mm:ss.fffZ} {1}{2}' -f [DateTime]::UtcNow, $Message, [Environment]::NewLine))
+    } catch {
+    }
+}
+
+function Write-Change {
+    param([string]$Message)
+    Write-Host $Message
+    Write-Log $Message
+}
+
+# Failures to patch or restore one file don't end the run, or the watcher loop: the caller sees
+# the exit code instead.
+function Write-Problem {
+    param([string]$Message)
+    Write-Log $Message
+    Write-Error $Message -ErrorAction Continue
+}
 
 function Get-InstallRoots {
     $roots = [System.Collections.Generic.List[string]]::new()
@@ -65,9 +93,16 @@ function Get-ProductFiles {
     $files | Select-Object -Unique
 }
 
+# Shares delete access, so a read never stops VS Code's updater deleting an old version folder.
 function Read-ProductJson {
     param([string]$FilePath)
-    Get-Content -LiteralPath $FilePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+    $stream = [System.IO.File]::Open($FilePath, 'Open', 'Read', 'ReadWrite, Delete')
+    try {
+        $reader = [System.IO.StreamReader]::new($stream, [System.Text.UTF8Encoding]::new($false), $true)
+        $reader.ReadToEnd() | ConvertFrom-Json -ErrorAction Stop
+    } finally {
+        $stream.Dispose()
+    }
 }
 
 function Get-ServiceUrl {
@@ -136,12 +171,15 @@ function Write-Utf8NoBom {
     [System.IO.File]::WriteAllText($FilePath, $Content, [System.Text.UTF8Encoding]::new($false))
 }
 
+# After an update, VS Code's updater deletes the old version folder, sometimes during a pass. A
+# file that has gone is skipped, not reported.
 function Invoke-PatchOne {
     param([string]$FilePath)
     try {
         $product = Read-ProductJson $FilePath
     } catch {
-        Write-Error "[endor-vscode] refusing to modify invalid JSON: $FilePath : $_" -ErrorAction Continue
+        if (-not (Test-Path -LiteralPath $FilePath)) { return $true }
+        Write-Problem "[endor-vscode] refusing to modify invalid JSON: $FilePath : $_"
         return $false
     }
 
@@ -173,11 +211,12 @@ function Invoke-PatchOne {
         Remove-Item -LiteralPath $replaceBackup -Force -ErrorAction SilentlyContinue
     } catch {
         Remove-Item -LiteralPath $tempPath, $replaceBackup -Force -ErrorAction SilentlyContinue
-        Write-Error "[endor-vscode] failed to patch $FilePath : $_" -ErrorAction Continue
+        if (-not (Test-Path -LiteralPath $FilePath)) { return $true }
+        Write-Problem "[endor-vscode] failed to patch $FilePath : $_"
         return $false
     }
 
-    Write-Host "[endor-vscode] configured: $FilePath"
+    Write-Change "[endor-vscode] configured: $FilePath"
     $true
 }
 
@@ -199,7 +238,8 @@ function Invoke-RestoreOne {
     try {
         $product = Read-ProductJson $FilePath
     } catch {
-        Write-Error "[endor-vscode] refusing to modify invalid JSON: $FilePath : $_" -ErrorAction Continue
+        if (-not (Test-Path -LiteralPath $FilePath)) { return $true }
+        Write-Problem "[endor-vscode] refusing to modify invalid JSON: $FilePath : $_"
         return $false
     }
 
@@ -227,11 +267,12 @@ function Invoke-RestoreOne {
         [System.IO.File]::Replace($tempPath, $FilePath, $replaceBackup, $true)
         if ($acl) { Set-Acl -LiteralPath $FilePath -AclObject $acl }
         Remove-Item -LiteralPath $replaceBackup -Force -ErrorAction SilentlyContinue
-        Write-Host "[endor-vscode] restored default gallery settings: $FilePath"
+        Write-Change "[endor-vscode] restored default gallery settings: $FilePath"
         return $true
     } catch {
         Remove-Item -LiteralPath $tempPath, $replaceBackup -Force -ErrorAction SilentlyContinue
-        Write-Error "[endor-vscode] failed to restore $FilePath : $_" -ErrorAction Continue
+        if (-not (Test-Path -LiteralPath $FilePath)) { return $true }
+        Write-Problem "[endor-vscode] failed to restore $FilePath : $_"
         return $false
     }
 }
@@ -249,30 +290,133 @@ function Invoke-RestoreAll {
     $ok
 }
 
-function Watch-Products {
-    while ($true) {
-        $signal = [System.Threading.AutoResetEvent]::new($false)
-        $watchers = [System.Collections.Generic.List[System.IO.FileSystemWatcher]]::new()
-        foreach ($root in @(Get-InstallRoots)) {
-            try {
-                $watcher = [System.IO.FileSystemWatcher]::new($root)
-                $watcher.IncludeSubdirectories = $true
-                $watcher.NotifyFilter = [IO.NotifyFilters]'FileName, DirectoryName, LastWrite'
-                $watcher.add_Changed({ param($sender, $eventArgs) [void]$signal.Set() })
-                $watcher.add_Created({ param($sender, $eventArgs) [void]$signal.Set() })
-                $watcher.add_Deleted({ param($sender, $eventArgs) [void]$signal.Set() })
-                $watcher.add_Renamed({ param($sender, $eventArgs) [void]$signal.Set() })
-                $watcher.EnableRaisingEvents = $true
-                $watchers.Add($watcher)
-            } catch {
-                Write-Warning "[endor-vscode] could not watch $root : $_"
-            }
+# Folders in which a new install's 'Microsoft VS Code' folder appears.
+function Get-InstallParents {
+    $parents = [System.Collections.Generic.List[string]]::new()
+    foreach ($programFiles in @($env:ProgramW6432, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ($programFiles -and (Test-Path -LiteralPath $programFiles) -and -not $parents.Contains($programFiles)) {
+            $parents.Add($programFiles)
         }
-        [void]$signal.WaitOne([TimeSpan]::FromMinutes(1))
-        Start-Sleep -Seconds 2
-        foreach ($watcher in $watchers) { $watcher.Dispose() }
-        $signal.Dispose()
-        $null = Invoke-PatchAll
+    }
+    $usersRoot = Join-Path $env:SystemDrive 'Users'
+    if (Test-Path -LiteralPath $usersRoot) {
+        foreach ($profile in @(Get-ChildItem -LiteralPath $usersRoot -Directory -ErrorAction SilentlyContinue)) {
+            $programs = Join-Path $profile.FullName 'AppData\Local\Programs'
+            if (Test-Path -LiteralPath $programs) { $parents.Add($programs) }
+        }
+    }
+    $parents
+}
+
+# Events go to PowerShell's event queue. A script block added as a .NET event handler would run on
+# a thread pool thread with no runspace, which ends the process.
+function New-Watcher {
+    param([string]$Path, [bool]$Recursive, [string]$Filter, [int]$Index)
+    $watcher = [System.IO.FileSystemWatcher]::new($Path)
+    $watcher.IncludeSubdirectories = $Recursive
+    if ($Filter) { $watcher.Filter = $Filter }
+    $watcher.InternalBufferSize = 65536
+    $watcher.NotifyFilter = [IO.NotifyFilters]'FileName, DirectoryName, LastWrite'
+    foreach ($name in 'Changed', 'Created', 'Deleted', 'Renamed', 'Error') {
+        $null = Register-ObjectEvent -InputObject $watcher -EventName $name `
+            -SourceIdentifier "EndorVSCode.$Index.$name"
+    }
+    $watcher.EnableRaisingEvents = $true
+    $watcher
+}
+
+function Stop-Watchers {
+    param([object[]]$Watchers)
+    Get-EventSubscriber | Where-Object SourceIdentifier -like 'EndorVSCode.*' |
+        ForEach-Object { Unregister-Event -SubscriptionId $_.SubscriptionId }
+    foreach ($watcher in $Watchers) { $watcher.Dispose() }
+    Get-Event | Where-Object SourceIdentifier -like 'EndorVSCode.*' | Remove-Event
+}
+
+# Takes the queued watcher events. Returns how many there were, and whether any was an Error
+# (a buffer overflow, or a watched folder that went away).
+function Receive-WatcherEvents {
+    $queued = @(Get-Event | Where-Object SourceIdentifier -like 'EndorVSCode.*')
+    foreach ($id in @($queued | ForEach-Object SourceIdentifier | Select-Object -Unique)) {
+        Remove-Event -SourceIdentifier $id -ErrorAction SilentlyContinue
+    }
+    [PSCustomObject]@{
+        Count = $queued.Count
+        Error = @($queued | Where-Object SourceIdentifier -like '*.Error').Count -gt 0
+    }
+}
+
+# Watches each install recursively, and the folders new installs appear in. A system install
+# updates in the foreground: Setup writes a new <commit>\resources\app\product.json, then starts
+# VS Code a few seconds later. So a change is patched once 250 ms pass with no further events, and
+# never later than 1 s after the first one, however long Setup keeps writing. Events that arrive
+# during a pass stay queued and start the next one. Every RescanSeconds it patches regardless.
+function Watch-Products {
+    $rescanSeconds = 60
+    if ($env:ENDOR_VSCODE_RESCAN_SECONDS -match '^[1-9][0-9]{0,4}$') {
+        $rescanSeconds = [int]$env:ENDOR_VSCODE_RESCAN_SECONDS
+    }
+    $watchers = @()
+    $layout = $null
+    $rebuild = $true
+    $retries = 0
+    Write-Log '[endor-vscode] watcher started'
+    while ($true) {
+        $roots = @(Get-InstallRoots)
+        $parents = @(Get-InstallParents)
+        $current = ($roots -join ';') + '|' + ($parents -join ';')
+        if ($rebuild -or $current -ne $layout) {
+            Stop-Watchers $watchers
+            $watchers = @()
+            $index = 0
+            foreach ($root in $roots) {
+                try {
+                    $watchers += New-Watcher -Path $root -Recursive $true -Index $index
+                } catch {
+                    Write-Log "[endor-vscode] could not watch $root : $_"
+                }
+                $index++
+            }
+            foreach ($parent in $parents) {
+                try {
+                    $watchers += New-Watcher -Path $parent -Recursive $false -Filter 'Microsoft VS Code' -Index $index
+                } catch {
+                    Write-Log "[endor-vscode] could not watch $parent : $_"
+                }
+                $index++
+            }
+            if ($current -ne $layout) {
+                Write-Log "[endor-vscode] watching $($roots.Count) install(s) and $($parents.Count) folder(s) for new installs"
+            }
+            $layout = $current
+            $rebuild = $false
+        }
+
+        # Retry a failed pass (a file Setup still has open, say) after 2 s, for up to a minute.
+        $timeout = $rescanSeconds
+        if (Invoke-PatchAll) {
+            $retries = 0
+        } elseif ($retries -lt 30) {
+            $retries++
+            $timeout = 2
+        }
+
+        if (-not (Wait-Event -Timeout $timeout)) { continue }
+        $started = [DateTime]::UtcNow
+        $lastSeen = $started
+        while ($true) {
+            $received = Receive-WatcherEvents
+            if ($received.Count) { $lastSeen = [DateTime]::UtcNow }
+            if ($received.Error) {
+                Write-Log '[endor-vscode] a watcher reported an error; watching again'
+                $rebuild = $true
+            }
+            $now = [DateTime]::UtcNow
+            if (($now - $lastSeen).TotalMilliseconds -ge 250 -or ($now - $started).TotalMilliseconds -ge 1000) {
+                break
+            }
+            Start-Sleep -Milliseconds 50
+        }
     }
 }
 
@@ -284,7 +428,7 @@ switch ($Mode) {
         if (-not (Invoke-RestoreAll)) { exit 1 }
     }
     'Watch' {
-        $null = Invoke-PatchAll
+        $LogPath = Join-Path $PSScriptRoot 'worker.log'
         Watch-Products
     }
 }
@@ -337,7 +481,10 @@ if ($DryRun) {
                 -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$_vscodeWorkerPath`" -Mode Watch"
             $taskTrigger = New-ScheduledTaskTrigger -AtStartup
             $taskPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-            $taskSettings = New-ScheduledTaskSettingsSet -RestartCount 999 `
+            # Task Scheduler's default priority, 7, is below normal. While Setup and antivirus keep
+            # the CPUs busy, the worker would then wait about 4 s for Windows' anti-starvation boost,
+            # and could lose the race with Setup starting VS Code. 4 is normal priority.
+            $taskSettings = New-ScheduledTaskSettingsSet -Priority 4 -RestartCount 999 `
                 -RestartInterval (New-TimeSpan -Minutes 1) `
                 -ExecutionTimeLimit ([TimeSpan]::Zero) `
                 -MultipleInstances IgnoreNew

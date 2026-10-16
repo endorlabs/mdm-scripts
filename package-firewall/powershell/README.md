@@ -258,11 +258,31 @@ The script:
 - Finds system installs in Program Files, User Installer copies under
   `C:\Users\<user>\AppData\Local\Programs\Microsoft VS Code`, and current
   ten-character versioned resource directories.
-- Installs the **Endor VS Code Extension Firewall** scheduled task as SYSTEM.
-  Its `FileSystemWatcher` responds to updater replacements and rescans every
-  minute to recover missed events and discover later installs.
+- Installs the **Endor VS Code Extension Firewall** scheduled task as SYSTEM,
+  at normal priority rather than Task Scheduler's below-normal default, so a
+  busy machine doesn't hold it back during an update.
+  It watches each install, and the folders new installs appear in, and
+  patches a changed `product.json` within about a second. It also rescans
+  every minute, as a backstop. It logs what it changes to
+  `%ProgramData%\Endor Labs\vscode-firewall\worker.log` (rotated at 1 MiB).
 - Modifies only `serviceUrl` and `extensionUrlTemplate`, preserving all other
-  current `product.json` values during updates and credential rotation.
+  current `product.json` values during updates and credential rotation. VS
+  Code reads some of them, such as `target` and `win32VersionedUpdate`, to
+  decide how to update itself.
+
+How VS Code updates, and how the task keeps up:
+
+- Each update installs a new `<commit>\resources\app\product.json`, in a
+  folder named after the first ten characters of the new commit.
+- A **system install** (Program Files) updates in the foreground: VS Code
+  quits, Setup writes the new version, then starts VS Code again a few seconds
+  later. The task patches the new `product.json` before that.
+- A **user install** updates in the background while VS Code runs, then
+  switches over when VS Code restarts. The new `product.json` is patched long
+  before then.
+- After an update, VS Code's updater deletes old version folders and anything
+  else it doesn't recognise in the install folder. The scripts keep nothing of
+  their own there, and the task's reads don't block those deletions.
 
 Run through Intune as SYSTEM. Restart VS Code after initial deployment if it is
 open. Supported scope is Microsoft VS Code Stable native installs only;

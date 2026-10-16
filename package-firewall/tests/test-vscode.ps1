@@ -66,6 +66,46 @@ function Assert-Restored {
     if (-not $product.unknownFixtureData.preserve) { throw 'unknown product data was not preserved' }
 }
 
+# Everything but the two gallery settings is unchanged. The raw-text checks catch what a round
+# trip through ConvertFrom-Json could hide: an empty array or object, or a one-element array.
+function Assert-Preserved {
+    param([string]$ProductPath)
+    $raw = Get-Content -LiteralPath $ProductPath -Raw -Encoding UTF8
+    foreach ($pattern in '"target":\s*"system"', '"win32VersionedUpdate":\s*true',
+            '"emptyObject":\s*\{\s*\}', '"emptyArray":\s*\[\s*\]', '"oneItem":\s*\[\s*"only"\s*\]') {
+        if ($raw -notmatch $pattern) { throw "product.json no longer matches $pattern" }
+    }
+    $expected = Get-Content -LiteralPath $Fixture -Raw -Encoding UTF8 | ConvertFrom-Json
+    $actual = $raw | ConvertFrom-Json
+    foreach ($product in $expected, $actual) {
+        $product.extensionsGallery.PSObject.Properties.Remove('serviceUrl')
+        $product.extensionsGallery.PSObject.Properties.Remove('extensionUrlTemplate')
+    }
+    if (($expected | ConvertTo-Json -Depth 100 -Compress) -ne ($actual | ConvertTo-Json -Depth 100 -Compress)) {
+        throw 'product.json changed beyond the gallery settings'
+    }
+}
+
+function Test-Patched {
+    param([string]$ProductPath)
+    try {
+        $product = Get-Content -LiteralPath $ProductPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $product.extensionsGallery.serviceUrl -eq $ExpectedUrl
+    } catch {
+        $false
+    }
+}
+
+function Wait-Until {
+    param([scriptblock]$Condition, [double]$Seconds)
+    $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (& $Condition) { return $true }
+        Start-Sleep -Milliseconds 100
+    }
+    [bool](& $Condition)
+}
+
 function Assert-FilesEqual {
     param([string]$Actual, [string]$Expected)
     $actualHash = (Get-FileHash -LiteralPath $Actual -Algorithm SHA256).Hash
@@ -73,6 +113,7 @@ function Assert-FilesEqual {
     if ($actualHash -ne $expectedHash) { throw "files differ: $Actual and $Expected" }
 }
 
+$watcherProcess = $null
 try {
     $env:ProgramData = $TempDir
     Invoke-Generate
@@ -83,6 +124,7 @@ try {
     Copy-Item $Fixture $product
     Invoke-Installer $product $state
     Assert-Patched $product
+    Assert-Preserved $product
     $before = (Get-FileHash $product -Algorithm SHA256).Hash
     Invoke-Installer $product $state
     $after = (Get-FileHash $product -Algorithm SHA256).Hash
@@ -90,6 +132,7 @@ try {
     & (Join-Path $state 'worker.ps1') -Mode Restore
     if ($LASTEXITCODE) { throw 'restore failed' }
     Assert-Restored $product
+    Assert-Preserved $product
 
     Write-Host 'test: dry-run reports drift without writing'
     $product = Join-Path $TempDir 'dry-product.json'
@@ -187,6 +230,94 @@ try {
     if ($LASTEXITCODE) { throw 'versioned path restore failed' }
     Assert-Restored $newVersionedProduct
 
+    Write-Host 'test: the watcher patches VS Code updates and new installs as they land'
+    $watchRoot = Join-Path $TempDir 'watch'
+    $watchProgramFiles = Join-Path $watchRoot 'Program Files'
+    $watchProgramFilesX86 = Join-Path $watchRoot 'Program Files (x86)'
+    $watchDrive = Join-Path $watchRoot 'drive'
+    $watchPrograms = Join-Path $watchDrive 'Users\alice\AppData\Local\Programs'
+    $watchApp = Join-Path $watchProgramFiles 'Microsoft VS Code'
+    foreach ($dir in $watchProgramFilesX86, $watchPrograms, $watchApp) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $env:ProgramW6432 = $watchProgramFiles
+    $env:ProgramFiles = $watchProgramFilesX86
+    ${env:ProgramFiles(x86)} = ''
+    $env:SystemDrive = $watchDrive
+    Remove-Item Env:\ENDOR_VSCODE_PRODUCT_JSON -ErrorAction SilentlyContinue
+    # Long enough that only the watcher's events can explain a patch within these timeouts.
+    $env:ENDOR_VSCODE_RESCAN_SECONDS = '600'
+    $watchState = Join-Path $TempDir 'watch-state'
+    $env:ENDOR_VSCODE_STATE_DIR = $watchState
+    $env:ENDOR_VSCODE_SKIP_WATCHER = '1'
+    $global:LASTEXITCODE = 0
+    & (Join-Path $RootDir "package-firewall\powershell\out\$Namespace\endor-vscode.ps1") *> $null
+    if ($LASTEXITCODE) { throw 'install for the watcher test failed' }
+    $watchLog = Join-Path $watchState 'worker.log'
+    $installed = Join-Path $watchApp '1111111111\resources\app\product.json'
+    New-Item -ItemType Directory -Path (Split-Path $installed -Parent) -Force | Out-Null
+    Copy-Item $Fixture $installed
+    # The same PowerShell as this test, so the 32-bit run watches from 32-bit PowerShell too.
+    $watcherProcess = Start-Process -FilePath (Get-Process -Id $PID).Path -PassThru -NoNewWindow `
+        -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            ('"{0}"' -f (Join-Path $watchState 'worker.ps1')), '-Mode', 'Watch' `
+        -RedirectStandardOutput (Join-Path $TempDir 'watch.out') `
+        -RedirectStandardError (Join-Path $TempDir 'watch.err')
+    # The watcher's first pass patches the install that is already there.
+    if (-not (Wait-Until { Test-Patched $installed } 30)) { throw 'the watcher did not start' }
+    Start-Sleep -Milliseconds 500
+
+    # Background update: a new commit folder.
+    $product = Join-Path $watchApp '2222222222\resources\app\product.json'
+    New-Item -ItemType Directory -Path (Split-Path $product -Parent) -Force | Out-Null
+    Copy-Item $Fixture $product
+    if (-not (Wait-Until { Test-Patched $product } 3)) { throw 'a new commit folder was not patched within 3s' }
+
+    # Foreground update: Setup keeps writing files after product.json, then starts VS Code.
+    $product = Join-Path $watchApp '3333333333\resources\app\product.json'
+    New-Item -ItemType Directory -Path (Split-Path $product -Parent) -Force | Out-Null
+    Copy-Item $Fixture $product
+    $written = [DateTime]::UtcNow
+    $patchedAfter = $null
+    $streamed = 0
+    while (([DateTime]::UtcNow - $written).TotalSeconds -lt 4) {
+        [IO.File]::WriteAllText((Join-Path $watchApp "3333333333\stream$streamed.txt"), 'x')
+        $streamed++
+        if (-not $patchedAfter -and (Test-Patched $product)) {
+            $patchedAfter = ([DateTime]::UtcNow - $written).TotalSeconds
+        }
+        Start-Sleep -Milliseconds 20
+    }
+    if (-not $patchedAfter -or $patchedAfter -gt 2.5) {
+        throw "while files kept arriving, product.json was patched after ${patchedAfter}s, not within 2.5s"
+    }
+
+    # A new user install: Setup creates the folder, then copies files into it.
+    $userApp = Join-Path $watchPrograms 'Microsoft VS Code'
+    New-Item -ItemType Directory -Path $userApp | Out-Null
+    Start-Sleep -Milliseconds 1500
+    $product = Join-Path $userApp '4444444444\resources\app\product.json'
+    New-Item -ItemType Directory -Path (Split-Path $product -Parent) -Force | Out-Null
+    Copy-Item $Fixture $product
+    if (-not (Wait-Until { Test-Patched $product } 3)) { throw 'a new user install was not patched within 3s' }
+
+    # An overwrite of a file already patched.
+    $product = Join-Path $watchApp '2222222222\resources\app\product.json'
+    Copy-Item $Fixture $product -Force
+    if (-not (Wait-Until { Test-Patched $product } 3)) { throw 'an overwritten product.json was not patched within 3s' }
+    Assert-Preserved $product
+
+    if ($watcherProcess.HasExited) {
+        throw "the watcher exited: $(Get-Content -Raw (Join-Path $TempDir 'watch.err'))"
+    }
+    $logText = Get-Content -LiteralPath $watchLog -Raw
+    if ($logText -notmatch 'watching 2 install' -or $logText -notmatch 'configured: .*2222222222') {
+        throw 'the watcher log does not record what it patched'
+    }
+    Stop-Process -Id $watcherProcess.Id -Force
+    $watcherProcess.WaitForExit()
+    Remove-Item Env:\ENDOR_VSCODE_RESCAN_SECONDS
+
     Write-Host 'test: malformed JSON fails without mutation'
     $product = Join-Path $TempDir 'malformed-product.json'
     $original = Join-Path $TempDir 'malformed-original.json'
@@ -209,6 +340,11 @@ try {
 
     Write-Host 'VS Code PowerShell tests passed'
 } finally {
+    if ($watcherProcess -and -not $watcherProcess.HasExited) {
+        Stop-Process -Id $watcherProcess.Id -Force -ErrorAction SilentlyContinue
+        $watcherProcess.WaitForExit()
+    }
+    Remove-Item Env:\ENDOR_VSCODE_RESCAN_SECONDS -ErrorAction SilentlyContinue
     $env:ProgramData = $SavedEnvironment.ProgramData
     $env:ProgramFiles = $SavedEnvironment.ProgramFiles
     $env:ProgramW6432 = $SavedEnvironment.ProgramW6432

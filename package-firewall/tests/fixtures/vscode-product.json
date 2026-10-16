@@ -2,6 +2,8 @@
   "nameShort": "Code",
   "nameLong": "Visual Studio Code",
   "commit": "fixture-v1",
+  "target": "system",
+  "win32VersionedUpdate": true,
   "extensionsGallery": {
     "serviceUrl": "https://marketplace.visualstudio.com/_apis/public/gallery",
     "itemUrl": "https://marketplace.visualstudio.com/items",
@@ -14,6 +16,12 @@
       1,
       2,
       3
-    ]
+    ],
+    "emptyObject": {},
+    "emptyArray": [],
+    "oneItem": [
+      "only"
+    ],
+    "text": "a < b & 'c' \"d\""
   }
 }
