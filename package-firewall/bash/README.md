@@ -18,6 +18,7 @@ bash/
 │   ├── go.sh                ← orchestration: go env file write
 │   ├── maven.sh             ← orchestration: ~/.m2/settings.xml write (XML-aware)
 │   ├── nuget.sh             ← orchestration: ~/.nuget/NuGet/NuGet.Config write (section-aware XML)
+│   ├── ruby.sh              ← orchestration: ~/.bundle/config write (Bundler mirror; credentials via env.sh)
 │   ├── vscode.sh            ← VS Code: product.json patch + launchd/systemd remediation, policy.json
 │   └── remove.sh            ← orchestration: sentinel block removal
 └── out/                     ← generated scripts (gitignore this)
@@ -27,6 +28,7 @@ bash/
         ├── endor-go.sh
         ├── endor-maven.sh
         ├── endor-nuget.sh
+        ├── endor-ruby.sh
         ├── endor-vscode.sh
         ├── endor-all.sh
         └── endor-remove.sh
@@ -40,6 +42,7 @@ bash/
 ├── uvtoml.txt               ← ~/.config/uv/uv.toml content
 ├── goenv.txt                ← go env file content  (path resolved via `go env GOENV`)
 ├── mavensettings.txt        ← ~/.m2/settings.xml fragment  (Maven mirror + server)
+├── bundleconfig.txt         ← ~/.bundle/config keys  (Bundler mirror)
 ├── nugetconfig_sources.txt        ← NuGet.Config <packageSources> items  (clear + Endor source)
 ├── nugetconfig_credentials.txt    ← NuGet.Config <packageSourceCredentials> item
 └── nugetconfig_sourcemapping.txt  ← NuGet.Config <packageSourceMapping> items  (only when the section exists)
@@ -118,6 +121,7 @@ Each script in `out/<namespace>/` carries all Endor configuration it needs. The 
 | `endor-go.sh` | Team uses Go only |
 | `endor-maven.sh` | Team uses Java / Maven only |
 | `endor-nuget.sh` | Team uses .NET / NuGet only |
+| `endor-ruby.sh` | Team uses Ruby / Bundler only |
 | `endor-vscode.sh` | Team uses Microsoft VS Code Stable extensions |
 | `endor-all.sh` | Team uses multiple ecosystems — single-script deploy |
 
@@ -141,6 +145,7 @@ export ENDOR_NPM_REGISTRY_URL="..."  # used by npm, yarn 2+
 export ENDOR_PYPI_URL="..."          # used by uv
 export POETRY_HTTP_BASIC_ENDOR_FIREWALL_USERNAME="..."
 export POETRY_HTTP_BASIC_ENDOR_FIREWALL_PASSWORD="..."
+export BUNDLE_FACTORY__ENDORLABS__COM="..."   # <attributed-user>:<secret>, percent-encoded — used by bundler
 ```
 
 Shell profiles (`.zshrc`, `.bash_profile`, `.bashrc`) each get a one-line sentinel block that sources this file. Config files reference env vars rather than baking credentials — except pip, which cannot expand env vars.
@@ -274,6 +279,36 @@ Key behaviour:
 >   </packageSources>
 > </configuration>
 > ```
+
+---
+
+### `endor-ruby.sh`
+
+Writes `~/.config/endor/env.sh` and an Endor-managed block to:
+
+| File | Covers | Credentials |
+|---|---|---|
+| `~/.bundle/config` | Bundler (`bundle install` / `add` / `update` / `lock`) under every Ruby on the machine — system, rbenv, rvm, asdf | `BUNDLE_FACTORY__ENDORLABS__COM` env var exported by `env.sh` — Bundler reads any `BUNDLE_*` variable as a setting |
+
+What ends up in the file (no secret — only the mirror):
+
+```yaml
+---
+BUNDLE_JOBS: "4"                                   # pre-existing, kept
+# ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) =====
+BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/: "https://factory.endorlabs.com/v1/namespaces/my-team/firewall/gem/"
+BUNDLE_MIRROR__RUBYGEMS__ORG: "https://factory.endorlabs.com/v1/namespaces/my-team/firewall/gem/"
+# ===== END ENDOR PACKAGE FIREWALL =====
+```
+
+Key behaviour:
+- **A mirror, not a source change.** `mirror.https://rubygems.org/` makes Bundler fetch everything a Gemfile asks of rubygems.org from the firewall instead. Gemfiles keep `source "https://rubygems.org"` and `Gemfile.lock` keeps `remote: https://rubygems.org/`, so nothing firewall-related is committed, and a fresh `bundle init` project is covered with no developer action. The bare-host key `mirror.rubygems.org` also catches `http://rubygems.org`. Private `source "https://gems.corp" do … end` blocks are not redirected and keep their own credentials.
+- **Credentials by host, from env.sh.** Bundler treats any `BUNDLE_*` environment variable as a setting, so `env.sh` exports `BUNDLE_<HOST>` (`factory.endorlabs.com` → `FACTORY__ENDORLABS__COM`; `.` → `__`, `-` → `___`, port dropped) and Bundler applies it to every request to that host, whichever project sends it — developers never need the secret, and nothing secret is written to `~/.bundle/config`. The value is the attributed username and the API secret, percent-encoded as Bundler requires (raw `+ / = @ :` are rejected). `bundle config list` shows it as `[REDACTED]`. Same model as npm / Maven / NuGet, same limit: only processes that source `env.sh` get it.
+- **Survives `bundle config`.** A successful `bundle config set --global …` rewrites the file, dropping comments (the sentinels) but keeping keys. The writer therefore also recognises Endor lines by key and value, so re-runs replace stale copies instead of duplicating them, and removal still finds them.
+- **No fallback.** If a user `mirror.https://rubygems.org.fallback_timeout` exists, the block repeats the key with `0` (last key wins) — otherwise Bundler would silently use rubygems.org whenever the firewall is unreachable.
+- **Existing mirrors** (Artifactory, Nexus — `mirror.https://rubygems.org/` or `mirror.all`): the script warns and exits 1. The Endor keys are appended last and win for rubygems.org (Bundler takes the last value of a duplicated key, silently); a user `mirror.all` still beats every per-source mirror and must be removed. The user's line stays in the file only until the next `bundle config set --global …` — Bundler then re-serialises one value per key and the earlier one is gone, so removal cannot restore it after that. Customers already routing through a registry should use the registry-side integration instead.
+- **Removal** strips the block and any stale Endor lines, leaves every other key (a pre-existing user mirror becomes active again) and deletes the file only when nothing but the `---` header remains.
+- **Limits**: a project `.bundle/config` wins over the global file for that project — it is sometimes committed, and `bundle config set …` run *without* `--global` inside a project writes it; `BUNDLE_IGNORE_CONFIG=1` and `BUNDLE_USER_CONFIG` / `BUNDLE_USER_HOME` / `BUNDLE_CONFIG` bypass or relocate the global file; `git:` and `path:` sources never touch rubygems.org; `bundle install --local`, `vendor/cache` and already-installed gems make no request at all; `gem install` / `gem update` ignore Bundler config and are not covered; IDEs launched from the Dock do not inherit `env.sh`, so Bundler there gets a 401 from the firewall rather than a silent bypass.
 
 ---
 
