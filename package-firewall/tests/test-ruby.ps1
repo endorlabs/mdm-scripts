@@ -39,8 +39,10 @@ function Assert { param([bool]$Condition, [string]$Message) if (-not $Condition)
 function Get-Sha      { param([string]$File) (Get-FileHash -Algorithm SHA256 -LiteralPath $File).Hash }
 function Get-Markers  { param([string]$File) @(Get-Content -LiteralPath $File -Encoding UTF8 | Where-Object { $_ -eq $ENDOR_BLOCK_START }).Count }
 function Get-KeyCount { param([string]$File, [string]$Key) @(Get-Content -LiteralPath $File -Encoding UTF8 | Where-Object { $_.StartsWith("${Key}: ") }).Count }
-function Get-Text     { param([string]$File) Get-Content -LiteralPath $File -Raw -Encoding UTF8 }
-function Test-SameContent { param([string]$A, [string]$B) (Get-Sha $A) -eq (Get-Sha $B) }
+# Line-ending agnostic: Write-EndorFile uses the platform newline (CRLF on Windows) while the
+# fixtures are written with LF, and Bundler/RubyGems accept either.
+function Get-Text     { param([string]$File) (Get-Content -LiteralPath $File -Raw -Encoding UTF8).Replace("`r`n", "`n") }
+function Test-SameContent { param([string]$A, [string]$B) (Get-Text $A) -eq (Get-Text $B) }
 function Write-Fixture {
     param([string]$File, [string]$Content)
     New-Item -ItemType Directory -Path (Split-Path $File) -Force | Out-Null
@@ -128,7 +130,7 @@ Invoke-BundleApply $f; Assert ((Get-Markers $f) -eq 1) 'expected one block'
 $t = Get-Text $f; Assert ($t.Contains('BUNDLE_JOBS: "4"') -and $t.Contains('BUNDLE_PATH: "vendor/bundle"')) 'user keys lost'
 Assert-BundleSetting $f 'mirror.https://rubygems.org/' $MirrorUrl; Assert-BundleSetting $f 'jobs' '4'
 $out = Invoke-BundleRemove $f 6>&1 | Out-String; Assert ($out -match 'block removed') 'block not removed'
-Assert ((Get-Text $f).Replace("`r`n", "`n") -eq (Get-Text "$f.orig")) 'original not restored'
+Assert (Test-SameContent $f "$f.orig") 'original not restored'
 $out = Invoke-BundleRemove $f 6>&1 | Out-String; Assert ($out -match 'skip \(no Endor block\)') 'second removal not a no-op'
 
 Write-Host 'test: bundler -- existing file without a trailing newline: block starts on its own line'
