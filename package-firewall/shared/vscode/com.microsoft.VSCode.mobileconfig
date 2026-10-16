@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for endor-vscode.mobileconfig, which bash/generate.sh writes when it runs with
+  ENDOR_VSCODE_ENABLE_POLICY=true. Modelled on the sample VS Code ships in
+  Contents/Resources/app/policies/com.microsoft.VSCode.mobileconfig, but with only Endor's keys.
+  The generator fills in the placeholders and leaves this comment out. The sign-in provider line
+  becomes an ExtensionGalleryAuthProvider entry, or nothing when ENDOR_VSCODE_POLICY_AUTH isn't
+  set. The UUIDs come from a hash of the rest of the profile.
+-->
+<plist version="1.0">
+<dict>
+	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>PayloadDisplayName</key>
+			<string>Visual Studio Code</string>
+			<key>PayloadIdentifier</key>
+			<string>com.endorlabs.package-firewall.vscode.settings</string>
+			<key>PayloadType</key>
+			<string>com.microsoft.VSCode</string>
+			<key>PayloadUUID</key>
+			<string>{{VSCODE_PAYLOAD_UUID}}</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>ExtensionGalleryServiceUrl</key>
+			<string>{{VSCODE_SERVICE_URL}}</string>
+{{VSCODE_POLICY_AUTH_ENTRY}}
+		</dict>
+	</array>
+	<key>PayloadDescription</key>
+	<string>Routes the VS Code extension gallery through the Endor Package Firewall. Users must sign in to VS Code with an eligible account to use the Extensions Marketplace.</string>
+	<key>PayloadDisplayName</key>
+	<string>VS Code extension firewall</string>
+	<key>PayloadIdentifier</key>
+	<string>com.endorlabs.package-firewall.vscode</string>
+	<key>PayloadScope</key>
+	<string>System</string>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadUUID</key>
+	<string>{{VSCODE_PROFILE_UUID}}</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>
+	<key>TargetDeviceType</key>
+	<integer>5</integer>
+</dict>
+</plist>

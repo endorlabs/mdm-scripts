@@ -371,25 +371,83 @@ only `serviceUrl` and `extensionUrlTemplate`; every other current
   case. A record in `/var/lib/endor/vscode-policy` (root only) says whether the
   script created the file and which provider it wrote, so removal takes only
   what Endor set. The record never holds the URL.
-- **macOS**: VS Code reads the policy from the `com.microsoft.VSCode`
-  preference domain. Deliver it with an MDM configuration profile for that
-  domain, with the key `ExtensionGalleryServiceUrl` (and, optionally,
-  `ExtensionGalleryAuthProvider`). Users can't override a managed preference.
-  `endor-vscode.sh` doesn't install profiles; on a Mac it prints a reminder.
+- **macOS**: VS Code reads the policy from managed preferences for the
+  `com.microsoft.VSCode` domain, which an MDM configuration profile sets and
+  users can't override. So `generate.sh` writes the policy as a profile, and
+  `endor-vscode.sh` only checks it on each Mac. See
+  [The macOS profile](#the-macos-profile).
 
 The script warns when the installed VS Code is too old for the policy: older
 than 1.106 on Linux, or than 1.137 with `ENDOR_VSCODE_POLICY_AUTH`. With the
 patch enabled too, an old VS Code is only a note for the first, because the
 patch covers it until it's updated.
 
+#### The macOS profile
+
+With `ENDOR_VSCODE_ENABLE_POLICY=true`, `generate.sh` also writes two files to
+`out/<namespace>/`. Both hold the credential, so they are mode `600`: keep them
+out of source control, and upload the files themselves, not their text.
+
+| File | What it is |
+|---|---|
+| `endor-vscode.mobileconfig` | A configuration profile, identifier `com.endorlabs.package-firewall.vscode`, with one `com.microsoft.VSCode` payload: `ExtensionGalleryServiceUrl`, and `ExtensionGalleryAuthProvider` with `ENDOR_VSCODE_POLICY_AUTH`. Its UUIDs come from its content, so regenerating with the same values gives the same file |
+| `endor-vscode-policy.plist` | The same keys as a plain property list, for MDMs that ask for a preference domain and a file |
+
+Upload one of them, scoped to the Macs that should use the policy:
+
+- **Jamf Pro**: Computers → Configuration Profiles → **Upload**, and choose
+  `endor-vscode.mobileconfig`. Or create a profile with an **Application &
+  Custom Settings** payload: **Upload**, preference domain
+  `com.microsoft.VSCode`, and `endor-vscode-policy.plist`.
+- **Kandji**: Library → Add New → **Custom Profile**, and upload
+  `endor-vscode.mobileconfig`. Assign it to the Blueprints.
+- **Intune**: Devices → macOS → Configuration → Create → **Templates →
+  Custom**, and upload `endor-vscode.mobileconfig`. Or choose **Templates →
+  Preference file**, with domain `com.microsoft.VSCode` and
+  `endor-vscode-policy.plist`.
+- **JumpCloud**: an **MDM Custom Configuration Profile** policy, uploading
+  `endor-vscode.mobileconfig`. JumpCloud replaces the profile's outer
+  identifier with its own, which doesn't matter: VS Code reads only the payload.
+
+Each run of `endor-vscode.sh` on a Mac reads `/Library/Managed
+Preferences/com.microsoft.VSCode.plist` and the per-user files beneath it.
+
+| Outcome | When |
+|---|---|
+| Reports success | A profile sets this script's URL |
+| A note, exit 0 | No profile sets it yet (scripts and profiles arrive in any order at enrollment) |
+| A warning, exit 1 | A profile sets an older Endor URL (rotated credentials, or another namespace), a gallery that isn't Endor's, or a sign-in provider other than `ENDOR_VSCODE_POLICY_AUTH` |
+
+It also warns when VS Code is older than 1.99, or than 1.137 with
+`ENDOR_VSCODE_POLICY_AUTH`.
+
+To check a Mac by hand:
+
+```bash
+plutil -p "/Library/Managed Preferences/com.microsoft.VSCode.plist"
+```
+
+In VS Code, **Developer: Policy Diagnostics** lists the policies it applies.
+
+- **One profile per domain.** If another profile already manages
+  `com.microsoft.VSCode` (for example one based on Microsoft's sample, which
+  sets `ExtensionGalleryServiceUrl` to an empty string), macOS doesn't say which
+  wins. Put Endor's keys into that profile instead of uploading a second one.
+- **Rotating credentials** changes the URL, so regenerate and upload the new
+  profile in place of the old one. VS Code asks users to restart when the
+  policy changes.
+- **Removing it**: delete the profile in your MDM. `endor-remove.sh` can't
+  remove a profile; it warns while one still sets an Endor URL.
+
 #### A method left by an earlier deployment
 
 `endor-vscode.sh` never removes a method it wasn't generated with: that would
 turn the firewall off. If the patch (the daemon or systemd units, the worker, or
 an Endor URL in `product.json`) or the policy (an Endor URL in
-`/etc/vscode/policy.json`) is still in place from an earlier deployment, the
-script leaves it, warns and exits 1. To clear the warning, regenerate with that
-method's variable to keep it, or run `endor-remove.sh` to remove it.
+`/etc/vscode/policy.json`, or in a configuration profile on a Mac) is still in
+place from an earlier deployment, the script leaves it, warns and exits 1. To
+clear the warning, regenerate with that method's variable to keep it, or remove
+it: run `endor-remove.sh`, or on a Mac delete the profile in your MDM.
 
 #### macOS code signing
 
@@ -518,7 +576,8 @@ Code launchd daemon or systemd units, timer and dpkg hook, and restores the stab
 `serviceUrl` and `extensionUrlTemplate`. Other `product.json` modifications are
 left intact. On Linux it also removes Endor's keys from `/etc/vscode/policy.json`,
 and the file itself if `endor-vscode.sh` created it and nothing else is in it. On
-macOS, remove the policy's configuration profile in your MDM.
+macOS, remove the policy's configuration profile in your MDM; `endor-remove.sh`
+warns while a profile still sets an Endor URL.
 
 You can deploy a removal script that does this automatically:
 
@@ -556,6 +615,7 @@ remove_block() {
 | VS Code worker state | Root-owned (`0700`) and contains the generated remediation worker. |
 | `/etc/vscode/policy.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users (`0644`) because VS Code must read it. |
 | `/var/lib/endor/vscode-policy` | Root-only (`0700`). Records whether the script created `policy.json` and which sign-in provider it wrote; never the URL. |
+| `endor-vscode.mobileconfig`, `endor-vscode-policy.plist` | Contain the authenticated `_ak/<token>` gallery URL. Generated `0600`; restrict who can read them in your MDM. On a Mac, managed preferences are readable by local users. |
 | Shell profiles | Contain a single `source ~/.config/endor/env.sh` line. No credentials. |
 | API secret in MDM | The generated scripts contain the API key and secret in plaintext (used to write `env.sh`). Restrict access to the MDM policy and the generated `out/` directory. |
 | `out/` directory | Add to `.gitignore`. Do not commit generated scripts to source control. |
