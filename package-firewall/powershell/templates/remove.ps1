@@ -22,6 +22,13 @@
 #   .NET / NuGet:
 #     %APPDATA%\NuGet\NuGet.Config  (sections kept; nuget.org restored if no source is left)
 #
+#   Ruby / Bundler:
+#     %USERPROFILE%\.bundle\config  (Endor mirror keys removed, incl. stale copies left by `bundle config`;
+#                                    user keys kept; the credential is the HKCU env var)
+#
+#   Ruby / gem:
+#     %USERPROFILE%\.gemrc          (pre-install original restored from .gemrc.endor-bak, or deleted if Endor created it)
+#
 #   VS Code:
 #     Restores default gallery properties, removes update remediation, and removes
 #     Endor's ExtensionGalleryServiceUrl policy from HKLM\SOFTWARE\Policies\Microsoft\VSCode
@@ -30,6 +37,7 @@
 #   ENDOR_API_KEY_ID, ENDOR_API_SECRET, ENDOR_AUTH_B64
 #   ENDOR_NPM_REGISTRY_URL, ENDOR_PYPI_URL, ENDOR_GO_PROXY_URL
 #   POETRY_HTTP_BASIC_ENDOR_FIREWALL_USERNAME/PASSWORD
+#   BUNDLE_<FIREWALL_HOST>
 #
 # Behaviour:
 #   - Files with no Endor block are skipped (nothing modified)
@@ -59,6 +67,7 @@ $_removeVars = @(
     'ENDOR_GO_PROXY_URL'  # no longer written; still removed to clean older deployments
     'POETRY_HTTP_BASIC_ENDOR_FIREWALL_USERNAME'
     'POETRY_HTTP_BASIC_ENDOR_FIREWALL_PASSWORD'
+    'BUNDLE_{{BUNDLE_HOST_KEY}}'
 )
 
 foreach ($_name in $_removeVars) {
@@ -159,6 +168,18 @@ Write-Host ''
 Write-Host '[endor-remove] -- NuGet / .NET -------------------------------------------'
 
 Remove-NuGetBlocks -FilePath (Join-Path $AppData 'NuGet\NuGet.Config') -DryRun:$DryRun
+Write-Host ''
+
+# -- Bundler config file --
+Write-Host '[endor-remove] -- Ruby / Bundler -------------------------------------------'
+
+Remove-BundleConfig -FilePath (Join-Path $UserHome '.bundle\config') -MirrorUrl '{{GEM_MIRROR_URL}}' -DryRun:$DryRun
+Write-Host ''
+
+# -- gem config file --
+Write-Host '[endor-remove] -- Ruby / gem -----------------------------------------------'
+
+Remove-Gemrc -FilePath (Join-Path $UserHome '.gemrc') -MirrorUrl '{{GEM_MIRROR_URL}}' -DryRun:$DryRun
 Write-Host ''
 
 # >>> endor-vscode-remove

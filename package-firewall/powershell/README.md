@@ -19,6 +19,7 @@ powershell/
 │   ├── go.ps1               ← orchestration: go env file write
 │   ├── maven.ps1            ← orchestration: .m2\settings.xml write (XML-aware)
 │   ├── nuget.ps1            ← orchestration: %APPDATA%\NuGet\NuGet.Config write (section-aware XML)
+│   ├── ruby.ps1             ← orchestration: .bundle\config (Bundler mirror) and .gemrc (gem source) writes
 │   ├── vscode.ps1           ← VS Code: product.json patch + scheduled remediation, HKLM policy
 │   └── remove.ps1           ← orchestration: sentinel block + registry env var removal
 └── out/                     ← generated scripts (gitignore this)
@@ -28,6 +29,7 @@ powershell/
         ├── endor-go.ps1
         ├── endor-maven.ps1
         ├── endor-nuget.ps1
+        ├── endor-ruby.ps1
         ├── endor-vscode.ps1
         ├── endor-all.ps1
         └── endor-remove.ps1
@@ -40,6 +42,8 @@ powershell/
 ├── uvtoml.txt               ← %APPDATA%\uv\uv.toml content
 ├── goenv.txt                ← go env file content  (path resolved via `go env GOENV`)
 ├── mavensettings.txt        ← %USERPROFILE%\.m2\settings.xml fragment  (Maven mirror + server)
+├── bundleconfig.txt         ← .bundle\config keys  (Bundler mirror)
+├── gemrc.txt                ← .gemrc :sources: block  (gem)
 ├── nugetconfig_sources.txt        ← NuGet.Config <packageSources> items  (clear + Endor source)
 ├── nugetconfig_credentials.txt    ← NuGet.Config <packageSourceCredentials> item
 └── nugetconfig_sourcemapping.txt  ← NuGet.Config <packageSourceMapping> items  (only when the section exists)
@@ -123,6 +127,7 @@ Each script in `out/<namespace>/` is **fully self-contained** — no external fi
 | `endor-go.ps1` | Team uses Go only |
 | `endor-maven.ps1` | Team uses Java / Maven only |
 | `endor-nuget.ps1` | Team uses .NET / NuGet only |
+| `endor-ruby.ps1` | Team uses Ruby (Bundler, gem) only |
 | `endor-vscode.ps1` | Team uses Microsoft VS Code Stable extensions |
 | `endor-all.ps1` | Team uses multiple ecosystems — single-script deploy |
 
@@ -148,6 +153,7 @@ ENDOR_NPM_REGISTRY_URL                    = https://factory.endorlabs.com/v1/nam
 ENDOR_PYPI_URL                            = https://<key-id>:<secret>@factory.endorlabs.com/v1/namespaces/my-team/firewall/pypi/simple/
 POETRY_HTTP_BASIC_ENDOR_FIREWALL_USERNAME = <key-id>
 POETRY_HTTP_BASIC_ENDOR_FIREWALL_PASSWORD = <secret>
+BUNDLE_FACTORY__ENDORLABS__COM            = <attributed-user>:<secret>   (percent-encoded; Bundler reads any BUNDLE_* variable as a setting)
 ```
 
 Config files reference these as `${ENDOR_...}` env var placeholders — the tools expand them at runtime from the process environment.
@@ -243,6 +249,25 @@ Windows-specific notes:
 - **`ClearTextPassword` is still used**, not NuGet's encrypted `Password`. Encryption is DPAPI-bound to the user who wrote it; a script running as SYSTEM would produce a value the developer cannot decrypt. The `%VAR%` reference keeps the secret out of the file anyway.
 - **Removal** strips only the Endor blocks, restores a disabled user `<clear />`, keeps every section and never deletes the file. If `<packageSources>` ends up with no item, the dotnet default `nuget.org` entry is put back; nuget.org is never added next to a surviving private feed.
 - **Limits**: a repo-level `nuget.config` overrides the user file for that repo (commit the firewall as the only source there too — snippet in the bash README); `dotnet nuget add source` appends after our block, so a developer-added source is live until the next MDM run.
+
+---
+
+### `endor-ruby.ps1`
+
+Writes the `HKCU:\Environment` variables and Endor-managed blocks to:
+
+| File | Covers | Credentials |
+|---|---|---|
+| `%USERPROFILE%\.bundle\config` | Bundler (`bundle install` / `add` / `update` / `lock`) under every Ruby on the machine (RubyInstaller, uru, …) | `BUNDLE_FACTORY__ENDORLABS__COM` in `HKCU:\Environment` — Bundler reads any `BUNDLE_*` variable as a setting and applies it to every request to that host |
+| `%USERPROFILE%\.gemrc` | `gem install` / `update` / `fetch` under every Ruby (RubyGems ≥ 3.2 reads `%USERPROFILE%\.config\gem\gemrc` only when `.gemrc` is absent, so `.gemrc` is always the file written) | Literal, percent-encoded `user:password` in the source URL — gemrc cannot expand env vars and RubyGems has no other credential channel for downloads |
+
+The block content and behaviour are identical to the macOS version (see [`bash/README.md`](../bash/README.md#endor-rubysh)): the firewall is Bundler's *mirror* for rubygems.org, so Gemfiles and `Gemfile.lock` stay untouched and private `source "…" do` blocks are not redirected; stale Endor lines left by a `bundle config set --global` rewrite are replaced on re-run; a user `fallback_timeout` for rubygems.org is pinned to `0`; a pre-existing rubygems.org mirror or `mirror.all` warns and exits 1. For `gem`, the user's `:sources:` is replaced by the firewall (every source would otherwise be queried), the pre-install file is backed up verbatim to `.gemrc.endor-bak` and restored on removal, a `.gemrc` built from an XDG-only setup or created from scratch is deleted on removal, a disabled private gem server warns and exits 1, and `gem:` / `install:` defaults carrying `--source` / `-s` / `--clear-sources` in the user file, the XDG file or any Ruby's system-wide gemrc (`gem env` → SYSTEM CONFIGURATION DIRECTORY, incl. RubyInstaller's `<drive>:\RubyXX-x64`) warn and exit 1.
+
+Windows differences:
+- **The Bundler credential reaches IDEs.** It is an `HKCU` env var like the others, so Visual Studio Code, RubyMine and build scripts inherit it — the macOS "Dock / IDE gap" of `env.sh` does not exist here. The take-effect rules of the registry env vars apply (new processes only; next sign-in when deployed as SYSTEM).
+- **No root copy of `.gemrc`.** An elevated PowerShell keeps the user's `USERPROFILE`, so there is no `sudo gem install` case; the macOS script's `/var/root/.gemrc` has no Windows equivalent.
+- **Removal** deletes `BUNDLE_FACTORY__ENDORLABS__COM` from `HKCU:\Environment`, strips the Endor keys from `.bundle\config` (user keys kept) and restores or deletes `.gemrc`.
+- **Limits** (same as macOS): a project `.bundle\config` with its own mirror, `BUNDLE_IGNORE_CONFIG`, `gem install -s URL …` / `--config-file` / `--norc` / `GEMRC`, `gem sources --add https://rubygems.org/` until the next MDM run, a `.gem` already in the gem cache, `git:` / `path:` sources.
 
 ---
 
@@ -382,6 +407,8 @@ To change what gets written to a config file on target machines, edit the releva
 | `../shared/blocks/nugetconfig_sources.txt` | `%APPDATA%\NuGet\NuGet.Config` → `<packageSources>` |
 | `../shared/blocks/nugetconfig_credentials.txt` | `%APPDATA%\NuGet\NuGet.Config` → `<packageSourceCredentials>` |
 | `../shared/blocks/nugetconfig_sourcemapping.txt` | `%APPDATA%\NuGet\NuGet.Config` → `<packageSourceMapping>` (only when the section exists) |
+| `../shared/blocks/bundleconfig.txt` | `%USERPROFILE%\.bundle\config` |
+| `../shared/blocks/gemrc.txt` | `%USERPROFILE%\.gemrc` |
 
 To change orchestration logic (which files get written, in what order), edit the relevant `templates/*.ps1` file directly.
 
@@ -438,8 +465,8 @@ Useful for validating what the script will do before deploying to devices.
 
 Deploy `endor-remove.ps1` to strip all Endor configuration from a machine. It:
 
-- Removes the sentinel block from `.npmrc`, `.yarnrc.yml`, `pip.ini`, `uv.toml`, the go env file, `.m2\settings.xml`, and `NuGet.Config`
-- Deletes all `ENDOR_*` and `POETRY_HTTP_BASIC_ENDOR_FIREWALL_*` keys from `HKCU:\Environment`
+- Removes the sentinel block from `.npmrc`, `.yarnrc.yml`, `pip.ini`, `uv.toml`, the go env file, `.m2\settings.xml`, `NuGet.Config` and `.bundle\config`; restores `.gemrc` from `.gemrc.endor-bak` (or deletes it if Endor created it)
+- Deletes all `ENDOR_*`, `POETRY_HTTP_BASIC_ENDOR_FIREWALL_*` and `BUNDLE_<FIREWALL_HOST>` keys from `HKCU:\Environment`
 - Stops and removes the VS Code scheduled task, then restores the stable defaults for the two managed gallery properties
 - Removes Endor's values from `HKLM\SOFTWARE\Policies\Microsoft\VSCode`, and the key if `endor-vscode.ps1` created it and nothing else is in it. If the machine has no record of setting the URL, it warns: Group Policy or Intune may set it again
 - Deletes config files that are empty after block removal
@@ -460,6 +487,8 @@ Deploy `endor-remove.ps1` to strip all Endor configuration from a machine. It:
 | `.npmrc`, `.yarnrc.yml`, `uv.toml` | Contain `${VAR}` references only — no credentials baked in. |
 | `.m2\settings.xml` | Contains `${env.*}` references only — no credentials baked in. ACL-restricted to owner. |
 | `NuGet.Config` | Contains `%ENDOR_*%` references only — no credentials baked in. ACL-restricted to owner. |
+| `.bundle\config` | Mirror keys only — no credentials baked in (the credential is the `BUNDLE_<HOST>` registry var). ACL-restricted to owner. |
+| `.gemrc` | Contains credentials in the source URL (gem cannot use env var references). ACL-restricted to owner; `gem sources`, `gem env` and `gem install -V` print it. |
 | VS Code `product.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users because VS Code must consume it. |
 | `%ProgramData%\Endor Labs\vscode-firewall` | ACL-restricted to SYSTEM and Administrators; contains the remediation worker. |
 | `HKLM\SOFTWARE\Policies\Microsoft\VSCode` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users, like every policy key. |

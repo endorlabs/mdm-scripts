@@ -6,4 +6,6 @@ if ($LASTEXITCODE) { exit $LASTEXITCODE }
 & (Join-Path $TestDir 'test-vscode-policy.ps1')
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 & (Join-Path $TestDir 'test-nuget.ps1')
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
+& (Join-Path $TestDir 'test-ruby.ps1')
 exit $LASTEXITCODE
