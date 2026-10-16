@@ -23,7 +23,8 @@
 #     %APPDATA%\NuGet\NuGet.Config  (sections kept; nuget.org restored if no source is left)
 #
 #   VS Code:
-#     Restores default gallery properties and removes update remediation
+#     Restores default gallery properties, removes update remediation, and removes
+#     Endor's ExtensionGalleryServiceUrl policy from HKLM\SOFTWARE\Policies\Microsoft\VSCode
 #
 # Registry env vars removed:
 #   ENDOR_API_KEY_ID, ENDOR_API_SECRET, ENDOR_AUTH_B64
@@ -160,7 +161,10 @@ Write-Host '[endor-remove] -- NuGet / .NET -------------------------------------
 Remove-NuGetBlocks -FilePath (Join-Path $AppData 'NuGet\NuGet.Config') -DryRun:$DryRun
 Write-Host ''
 
+# >>> endor-vscode-remove
 # -- VS Code extension firewall --
+# Removes both methods: the product.json patch and the ExtensionGalleryServiceUrl policy. This
+# section stands on its own, and doesn't use the signed-in user.
 Write-Host '[endor-remove] -- VS Code extensions ------------------------------------'
 $_vscodeStateRoot = if ($env:ENDOR_VSCODE_STATE_DIR) {
     $env:ENDOR_VSCODE_STATE_DIR
@@ -201,8 +205,72 @@ if (Test-Path -LiteralPath $_vscodeWorkerPath) {
 } else {
     Write-Host '[endor-remove] skip (no VS Code managed state)'
 }
+
+# The policy, in HKLM\SOFTWARE\Policies\Microsoft\VSCode: only Endor's values go, and the key too
+# if this machine's record says the installer created it and nothing else is left in it.
+# ENDOR_VSCODE_POLICY_KEY and ENDOR_VSCODE_POLICY_STATE_DIR are for tests, as in the installer.
+if ($env:OS -eq 'Windows_NT') {
+    $_vscodePolicyHive = 'LocalMachine'
+    $_vscodePolicyKey = 'SOFTWARE\Policies\Microsoft\VSCode'
+    if ($env:ENDOR_VSCODE_POLICY_KEY) {
+        $_vscodePolicyHive = 'CurrentUser'
+        $_vscodePolicyKey = $env:ENDOR_VSCODE_POLICY_KEY
+    }
+    $_vscodePolicyName = $(if ($_vscodePolicyHive -eq 'LocalMachine') { 'HKLM\' } else { 'HKCU\' }) + $_vscodePolicyKey
+    $_vscodePolicyState = if ($env:ENDOR_VSCODE_POLICY_STATE_DIR) {
+        $env:ENDOR_VSCODE_POLICY_STATE_DIR
+    } else {
+        Join-Path $env:ProgramData 'Endor Labs\vscode-policy'
+    }
+    try {
+        $_vscodeRecord = $null
+        $_vscodeRecordPath = Join-Path $_vscodePolicyState 'record.json'
+        if (Test-Path -LiteralPath $_vscodeRecordPath) {
+            try { $_vscodeRecord = Get-Content -LiteralPath $_vscodeRecordPath -Raw | ConvertFrom-Json } catch { }
+        }
+        $_vscodeBase = [Microsoft.Win32.RegistryKey]::OpenBaseKey($_vscodePolicyHive, 'Registry64')
+        $_vscodeKey = $_vscodeBase.OpenSubKey($_vscodePolicyKey, -not $DryRun)
+        $_vscodeRemove = @()
+        if ($_vscodeKey) {
+            if ([string]$_vscodeKey.GetValue('ExtensionGalleryServiceUrl') -like '*/firewall/vscode/_ak/*') {
+                $_vscodeRemove += 'ExtensionGalleryServiceUrl'
+            }
+            if ($_vscodeRecord.auth -and [string]$_vscodeKey.GetValue('ExtensionGalleryAuthProvider') -ceq [string]$_vscodeRecord.auth) {
+                $_vscodeRemove += 'ExtensionGalleryAuthProvider'
+            }
+        }
+        if ($_vscodeRemove.Count -eq 0) {
+            Write-Host "[endor-remove] skip (no Endor VS Code policy in $_vscodePolicyName)"
+        } elseif ($DryRun) {
+            Write-Host "[dry-run]   action : REMOVE $($_vscodeRemove -join ' and ') from $_vscodePolicyName"
+        } else {
+            foreach ($_vscodeName in $_vscodeRemove) { $_vscodeKey.DeleteValue($_vscodeName, $false) }
+            Write-Host "[endor-remove] removed the Endor VS Code policy from $_vscodePolicyName"
+            if (-not $_vscodeRecord -and $_vscodeRemove -contains 'ExtensionGalleryServiceUrl') {
+                Write-Warning "[endor-remove] this machine has no record of setting ExtensionGalleryServiceUrl in $_vscodePolicyName."
+                Write-Warning '[endor-remove]   If Group Policy, an ADMX-based profile or the Intune Settings Catalog set it, it will be set again; remove it there.'
+                $EndorWarned = $true
+            }
+            if ($_vscodeRecord.createdKey -and $_vscodeKey.ValueCount -eq 0 -and $_vscodeKey.SubKeyCount -eq 0) {
+                $_vscodeKey.Dispose()
+                $_vscodeKey = $null
+                $_vscodeBase.DeleteSubKey($_vscodePolicyKey, $false)
+            }
+        }
+        if ($_vscodeKey) { $_vscodeKey.Dispose() }
+        $_vscodeBase.Dispose()
+        if (-not $DryRun -and (Test-Path -LiteralPath $_vscodePolicyState)) {
+            Remove-Item -LiteralPath $_vscodePolicyState -Recurse -Force
+        }
+    } catch {
+        Write-Warning "[endor-remove] VS Code's policy was not removed from $_vscodePolicyName ($_)"
+        $EndorWarned = $true
+    }
+}
 Remove-Variable _vscodeStateRoot, _vscodeWorkerPath
-Remove-Variable _vscodeRestoreFailed -ErrorAction SilentlyContinue
+Remove-Variable _vscodeRestoreFailed, _vscodePolicyHive, _vscodePolicyKey, _vscodePolicyName, _vscodePolicyState,
+    _vscodeRecord, _vscodeRecordPath, _vscodeBase, _vscodeKey, _vscodeRemove, _vscodeName -ErrorAction SilentlyContinue
+# <<< endor-vscode-remove
 Write-Host ''
 
 if ($DryRun) {

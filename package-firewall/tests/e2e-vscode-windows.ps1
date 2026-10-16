@@ -1,11 +1,13 @@
 # Windows only. End-to-end test of the VS Code firewall watcher with Microsoft's real system
 # installer:
-#   1. install OLD, then deploy endor-vscode.ps1 from 32-bit Windows PowerShell, as Intune does
-#      by default, and check the SYSTEM task is running and OLD is patched;
+#   1. install OLD, then deploy endor-vscode.ps1 with both methods from 32-bit Windows PowerShell,
+#      as Intune does by default, and check the SYSTEM task is running, OLD is patched, and the
+#      policy is in HKLM where VS Code's own VSCode.admx says VS Code reads it;
 #   2. install NEW over it the way a system install updates (VS Code closed, Setup writes a new
 #      <commit>\resources\app\product.json, then starts VS Code), and check the running watcher
 #      patches the new file within 5 seconds of it appearing;
-#   3. run endor-remove.ps1 and check Microsoft's gallery settings are back and the task is gone.
+#   3. run endor-remove.ps1 and check Microsoft's gallery settings are back, and the task and the
+#      policy are gone.
 #
 # It changes the machine it runs on: it installs VS Code for all users, registers a SYSTEM
 # scheduled task and runs endor-remove.ps1. So it runs only on a GitHub-hosted runner, or with
@@ -44,6 +46,8 @@ $App = Join-Path $env:ProgramW6432 'Microsoft VS Code'
 $TaskName = 'Endor VS Code Extension Firewall'
 $StateDir = Join-Path $env:ProgramData 'Endor Labs\vscode-firewall'
 $WorkerLog = Join-Path $StateDir 'worker.log'
+$PolicyKey = 'SOFTWARE\Policies\Microsoft\VSCode'
+$PolicyStateDir = Join-Path $env:ProgramData 'Endor Labs\vscode-policy'
 $WindowsPowerShell32 = Join-Path $env:SystemRoot 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
 $Artifacts = if ($env:ENDOR_E2E_ARTIFACTS) { $env:ENDOR_E2E_ARTIFACTS } else {
     Join-Path ([IO.Path]::GetTempPath()) 'vscode-e2e-artifacts'
@@ -112,6 +116,11 @@ function Save-Logs {
         $task | Get-ScheduledTaskInfo | Format-List | Out-String |
             Set-Content (Join-Path $Artifacts "task-info-$Label.txt")
     }
+    # Which Windows PowerShell processes run, since when, and with what arguments: shows whether the
+    # watcher started, and when.
+    Get-CimInstance Win32_Process -Filter "name='powershell.exe'" -ErrorAction SilentlyContinue |
+        Select-Object ProcessId, ParentProcessId, CreationDate, CommandLine | Format-List | Out-String -Width 4096 |
+        Set-Content (Join-Path $Artifacts "processes-$Label.txt")
 }
 
 try {
@@ -138,6 +147,14 @@ try {
     $env:ENDOR_NAMESPACE = $Namespace
     $env:ENDOR_API_KEY_ID = 'ci-e2e-key-id'
     $env:ENDOR_API_SECRET = 'ci-e2e-secret'
+    $env:ENDOR_VSCODE_ENABLE_PATCH = '1'
+    $env:ENDOR_VSCODE_ENABLE_POLICY = '1'
+    # VS Code reads the URL policy from 1.99, and the sign-in provider from 1.137. Check what OLD reads.
+    $oldVersion = [version]($old -replace '[^0-9.].*$', '')
+    $policyNames = @()
+    if ($oldVersion -ge [version]'1.99') { $policyNames += 'ExtensionGalleryServiceUrl' }
+    if ($oldVersion -ge [version]'1.137') { $policyNames += 'ExtensionGalleryAuthProvider' }
+    $env:ENDOR_VSCODE_POLICY_AUTH = if ($policyNames -contains 'ExtensionGalleryAuthProvider') { 'microsoft' } else { '' }
     $global:LASTEXITCODE = 0
     & (Join-Path $RootDir 'package-firewall\powershell\generate.ps1') | Out-Null
     if ($LASTEXITCODE) { Stop-Test 'generate.ps1 failed' }
@@ -153,13 +170,44 @@ try {
     }
     if ($task.Settings.Priority -ne 4) { Stop-Test "the task runs at priority $($task.Settings.Priority), not 4 (normal)" }
     Write-Pass 'the SYSTEM watcher task is running at normal priority'
-    # Let the watcher finish its first pass and start watching.
-    $deadline = (Get-Date).AddSeconds(30)
+    # Let the watcher finish its first pass and start watching. The installer has already patched,
+    # so a slow start on a busy runner doesn't matter here; the time it took is printed.
+    $watchStarted = Get-Date
+    $deadline = $watchStarted.AddSeconds(120)
     while (-not ((Test-Path -LiteralPath $WorkerLog) -and
             (Get-Content -LiteralPath $WorkerLog -Raw) -match 'watching [1-9][0-9]* install')) {
-        if ((Get-Date) -gt $deadline) { Stop-Test 'the watcher did not start watching within 30s' }
+        if ((Get-Date) -gt $deadline) {
+            Save-Logs 'watch-start'
+            Stop-Test 'the watcher did not start watching within 120s'
+        }
         Start-Sleep -Milliseconds 200
     }
+    Write-Host ("the watcher was watching {0:N1}s after the installer finished" -f ((Get-Date) - $watchStarted).TotalSeconds)
+    # VS Code's own policy definitions say where it reads each policy.
+    $admx = @(@(Get-Item -LiteralPath $App) + @(Get-ChildItem -LiteralPath $App -Directory) |
+        ForEach-Object { Join-Path $_.FullName 'policies\VSCode.admx' } |
+        Where-Object { Test-Path -LiteralPath $_ }) | Select-Object -First 1
+    if ($policyNames -and -not $admx) { Stop-Test "the install has no policies\VSCode.admx" }
+    if ($admx) { [xml]$definitions = Get-Content -LiteralPath $admx -Raw }
+    foreach ($name in $policyNames) {
+        $definition = $definitions.SelectSingleNode(
+            "//*[local-name()='policy'][@valueName='$name' or .//*[@valueName='$name']]")
+        if (-not $definition) { Stop-Test "VSCode.admx does not define $name" }
+        if ($definition.GetAttribute('key') -ne $PolicyKey) {
+            Stop-Test "VSCode.admx reads $name from $($definition.GetAttribute('key')), not $PolicyKey"
+        }
+    }
+    $hklm = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry64')
+    $key = $hklm.OpenSubKey($PolicyKey)
+    if (-not $key) { Stop-Test "the installer did not create HKLM\$PolicyKey" }
+    if (-not ([string]$key.GetValue('ExtensionGalleryServiceUrl')).StartsWith($FirewallPrefix)) {
+        Stop-Test 'HKLM does not set the Endor ExtensionGalleryServiceUrl'
+    }
+    if ($env:ENDOR_VSCODE_POLICY_AUTH -and $key.GetValue('ExtensionGalleryAuthProvider') -ne 'microsoft') {
+        Stop-Test 'HKLM does not set ExtensionGalleryAuthProvider'
+    }
+    $key.Dispose()
+    Write-Pass "the policy is in HKLM\$PolicyKey, where VSCode.admx says VS Code reads it"
 
     Write-Host '== 2. update to NEW the way a system install does, while the watcher runs'
     # Poll the new commit's product.json from another process, to time it from appearing to patched.
@@ -220,14 +268,19 @@ try {
             Tee-Object -FilePath (Join-Path $Artifacts 'remove.log')
         if ($LASTEXITCODE) { Stop-Test "endor-remove.ps1 exited with $LASTEXITCODE" }
     } else {
-        # endor-remove.ps1 needs a signed-in user for the other ecosystems. Remove VS Code's part
-        # the same way it does.
-        Write-Host '::notice::no signed-in user on this runner; removing the VS Code part directly'
-        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        & $WindowsPowerShell32 -NoProfile -ExecutionPolicy Bypass -File (Join-Path $StateDir 'worker.ps1') -Mode Restore
-        if ($LASTEXITCODE) { Stop-Test 'the worker could not restore VS Code' }
-        Remove-Item -LiteralPath $StateDir -Recurse -Force
+        # endor-remove.ps1 needs a signed-in user for the other ecosystems. Its VS Code section
+        # doesn't, so run only that.
+        Write-Host '::notice::no signed-in user on this runner; running only the VS Code section of endor-remove.ps1'
+        $text = Get-Content -Raw (Join-Path $Out 'endor-remove.ps1')
+        $section = [regex]::Match($text, '(?ms)^# >>> endor-vscode-remove\r?$.*?^# <<< endor-vscode-remove\r?$').Value
+        if (-not $section) { Stop-Test 'endor-remove.ps1 has no VS Code section' }
+        $sectionPath = Join-Path $Work 'remove-vscode.ps1'
+        [IO.File]::WriteAllText($sectionPath,
+            "param([switch]`$DryRun)`n`$ErrorActionPreference = 'Stop'`n`$EndorWarned = `$false`n$section`nif (`$EndorWarned) { exit 1 }`n",
+            [Text.UTF8Encoding]::new($true))
+        & $WindowsPowerShell32 -NoProfile -ExecutionPolicy Bypass -File $sectionPath *>&1 |
+            Tee-Object -FilePath (Join-Path $Artifacts 'remove.log')
+        if ($LASTEXITCODE) { Stop-Test "the VS Code section of endor-remove.ps1 exited with $LASTEXITCODE" }
     }
     $product = Get-Product (Get-CommitProduct $newCommit)
     if ($product.extensionsGallery.serviceUrl -ne $DefaultServiceUrl -or
@@ -236,7 +289,10 @@ try {
     }
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { Stop-Test 'the task is still registered' }
     if (Test-Path -LiteralPath $StateDir) { Stop-Test 'the state folder is still there' }
-    Write-Pass 'removal restored the gallery settings and removed the task and its state'
+    $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry64').OpenSubKey($PolicyKey)
+    if ($key) { Stop-Test "removal left HKLM\$PolicyKey, which the installer created" }
+    if (Test-Path -LiteralPath $PolicyStateDir) { Stop-Test 'removal left the policy record' }
+    Write-Pass 'removal restored the gallery settings and removed the task, its state and the policy'
     Write-Host 'VS Code Windows end-to-end test passed'
 } finally {
     Save-Logs 'end'

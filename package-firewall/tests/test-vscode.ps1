@@ -22,12 +22,38 @@ $SavedEnvironment = @{
 }
 
 function Invoke-Generate {
-    param([string]$ApiSecret = $Secret)
+    param([string]$ApiSecret = $Secret, [string]$Patch = '1', [string]$Policy = '0', [string]$Auth = '')
     $env:ENDOR_NAMESPACE = $Namespace
     $env:ENDOR_API_KEY_ID = $KeyId
     $env:ENDOR_API_SECRET = $ApiSecret
+    $env:ENDOR_VSCODE_ENABLE_PATCH = $Patch
+    $env:ENDOR_VSCODE_ENABLE_POLICY = $Policy
+    $env:ENDOR_VSCODE_POLICY_AUTH = $Auth
+    $global:LASTEXITCODE = 0
     & $Generator *> $null
     if ($LASTEXITCODE) { throw "generator failed with exit code $LASTEXITCODE" }
+}
+
+# True when the generator refuses these flags.
+function Test-GenerateRejected {
+    param([string]$Patch = '1', [string]$Policy = '0', [string]$Auth = '')
+    try {
+        Invoke-Generate -Patch $Patch -Policy $Policy -Auth $Auth
+        return $false
+    } catch {
+        return $true
+    }
+}
+
+# Runs the generated installer and returns its output; the exit code is in $LASTEXITCODE.
+function Invoke-InstallerOutput {
+    param([string]$Product, [string]$State, [string]$Script)
+    $env:ENDOR_VSCODE_PRODUCT_JSON = $Product
+    $env:ENDOR_VSCODE_STATE_DIR = $State
+    $env:ENDOR_VSCODE_SKIP_WATCHER = '1'
+    if (-not $Script) { $Script = Join-Path $RootDir "package-firewall\powershell\out\$Namespace\endor-vscode.ps1" }
+    $global:LASTEXITCODE = 0
+    & $Script *>&1 | Out-String -Width 4096
 }
 
 function Invoke-Installer {
@@ -338,6 +364,91 @@ try {
     # That exit 1 was expected; don't let run-all.ps1 read it as this suite failing.
     $global:LASTEXITCODE = 0
 
+    Write-Host 'test: the VS Code flags take true, false, 1 and 0 in any case, and nothing else'
+    $generated = Join-Path $RootDir "package-firewall\powershell\out\$Namespace\endor-vscode.ps1"
+    foreach ($value in 'true', 'TRUE', 'True', '1') {
+        Invoke-Generate -Patch $value
+        if ((Get-Content -Raw $generated) -notmatch "(?m)^\`$_vscodeEnablePatch = '1'\r?$") { throw "ENDOR_VSCODE_ENABLE_PATCH=$value did not enable the patch" }
+    }
+    foreach ($value in 'false', 'FALSE', '0', '') {
+        Invoke-Generate -Patch $value -Policy 'true'
+        $text = Get-Content -Raw $generated
+        if ($text -notmatch "(?m)^\`$_vscodeEnablePatch = '0'\r?$") { throw "ENDOR_VSCODE_ENABLE_PATCH='$value' did not disable the patch" }
+        if ($text -notmatch "(?m)^\`$_vscodeEnablePolicy = '1'\r?$") { throw 'ENDOR_VSCODE_ENABLE_POLICY=true did not enable the policy' }
+    }
+    foreach ($value in 'yes', 'on', '2', ' true') {
+        if (-not (Test-GenerateRejected -Patch $value)) { throw "expected ENDOR_VSCODE_ENABLE_PATCH='$value' to be rejected" }
+        if (-not (Test-GenerateRejected -Policy $value)) { throw "expected ENDOR_VSCODE_ENABLE_POLICY='$value' to be rejected" }
+    }
+
+    Write-Host 'test: ENDOR_VSCODE_POLICY_AUTH is github or microsoft, and only with the policy'
+    Invoke-Generate -Policy '1' -Auth 'Microsoft'
+    if ((Get-Content -Raw $generated) -notmatch "(?m)^\`$_vscodePolicyAuth = 'microsoft'\r?$") { throw 'AUTH=Microsoft was not normalised' }
+    if (-not (Test-GenerateRejected -Policy '1' -Auth 'okta')) { throw 'expected ENDOR_VSCODE_POLICY_AUTH=okta to be rejected' }
+    if (-not (Test-GenerateRejected -Auth 'github')) { throw 'expected ENDOR_VSCODE_POLICY_AUTH without the policy to be rejected' }
+
+    Write-Host 'test: with neither method enabled, VS Code is left alone'
+    Invoke-Generate -Patch '0'
+    $allScript = Join-Path $RootDir "package-firewall\powershell\out\$Namespace\endor-all.ps1"
+    if ((Get-Content -Raw $allScript) -notmatch 'VS Code: not enabled') { throw 'endor-all.ps1 claims to configure VS Code' }
+    $product = Join-Path $TempDir 'neither-product.json'
+    $state = Join-Path $TempDir 'neither-state'
+    Copy-Item $Fixture $product
+    $output = Invoke-InstallerOutput $product $state
+    if ($LASTEXITCODE) { throw "expected exit 0 with neither method, got $LASTEXITCODE`n$output" }
+    if ($output -notmatch 'no VS Code method is enabled') { throw 'the installer did not say no method is enabled' }
+    if ($output -match '\[done\] VS Code') { throw 'the installer said VS Code was done' }
+    Assert-FilesEqual $product $Fixture
+    if (Test-Path -LiteralPath $state) { throw 'the installer created state with neither method' }
+
+    Write-Host 'test: a patch left by an earlier deployment is reported, and left in place'
+    Invoke-Generate
+    $product = Join-Path $TempDir 'leftover-product.json'
+    $state = Join-Path $TempDir 'leftover-state'
+    Copy-Item $Fixture $product
+    Invoke-Installer $product $state
+    Invoke-Generate -Patch '0'
+    $output = Invoke-InstallerOutput $product $state
+    if ($LASTEXITCODE -ne 1) { throw "expected a leftover patch to exit 1, got $LASTEXITCODE" }
+    if ($output -notmatch 'patch from an earlier deployment is still installed') { throw "the leftover patch was not reported`n$output" }
+    Assert-Patched $product
+    # The patched product.json alone is enough to report it.
+    Remove-Item -LiteralPath $state -Recurse -Force
+    $output = Invoke-InstallerOutput $product $state
+    if ($LASTEXITCODE -ne 1 -or $output -notmatch [regex]::Escape("still installed ($product)")) {
+        throw "a patched product.json was not reported`n$output"
+    }
+
+    # The docs-site generator fetches these templates and fills in only the placeholders it knows.
+    # A script with the method placeholders left in place must behave as scripts did before them.
+    Write-Host 'test: a script from a generator that predates the method flags behaves as before'
+    Invoke-Generate -Patch '1' -Policy '1'
+    $legacy = Join-Path $TempDir 'legacy-vscode.ps1'
+    $text = Get-Content -Raw $generated
+    $text = $text -creplace "(?m)^\`$_vscodeEnablePatch = '1'", "`$`$_vscodeEnablePatch = '{{VSCODE_ENABLE_PATCH}}'"
+    $text = $text -creplace "(?m)^\`$_vscodeEnablePolicy = '1'", "`$`$_vscodeEnablePolicy = '{{VSCODE_ENABLE_POLICY}}'"
+    $text = $text -creplace "(?m)^\`$_vscodePolicyAuth = ''", "`$`$_vscodePolicyAuth = '{{VSCODE_POLICY_AUTH}}'"
+    if (([regex]::Matches($text, '\{\{VSCODE_')).Count -ne 3) { throw 'the legacy script does not have the three placeholders' }
+    [IO.File]::WriteAllText($legacy, $text, [Text.UTF8Encoding]::new($true))
+    $product = Join-Path $TempDir 'legacy-product.json'
+    $state = Join-Path $TempDir 'legacy-state'
+    Copy-Item $Fixture $product
+    $output = Invoke-InstallerOutput $product $state $legacy
+    if ($LASTEXITCODE) { throw "the legacy script exited $LASTEXITCODE`n$output" }
+    if ($output -match 'policy') { throw "a script from an older generator mentioned the policy`n$output" }
+    Assert-Patched $product
+
+    if ($env:OS -ne 'Windows_NT') {
+        Write-Host 'test: the policy is reported as Windows-only elsewhere'
+        Invoke-Generate -Patch '0' -Policy '1'
+        $product = Join-Path $TempDir 'policy-elsewhere-product.json'
+        Copy-Item $Fixture $product
+        $output = Invoke-InstallerOutput $product (Join-Path $TempDir 'policy-elsewhere-state')
+        if ($LASTEXITCODE -ne 1 -or $output -notmatch 'Windows registry setting') { throw "expected a Windows-only warning`n$output" }
+    }
+    Invoke-Generate
+    $global:LASTEXITCODE = 0
+
     Write-Host 'VS Code PowerShell tests passed'
 } finally {
     if ($watcherProcess -and -not $watcherProcess.HasExited) {
@@ -353,5 +464,6 @@ try {
     Remove-Item Env:\ENDOR_VSCODE_PRODUCT_JSON -ErrorAction SilentlyContinue
     Remove-Item Env:\ENDOR_VSCODE_STATE_DIR -ErrorAction SilentlyContinue
     Remove-Item Env:\ENDOR_VSCODE_SKIP_WATCHER -ErrorAction SilentlyContinue
+    Remove-Item Env:\ENDOR_VSCODE_ENABLE_PATCH, Env:\ENDOR_VSCODE_ENABLE_POLICY, Env:\ENDOR_VSCODE_POLICY_AUTH -ErrorAction SilentlyContinue
     Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
 }

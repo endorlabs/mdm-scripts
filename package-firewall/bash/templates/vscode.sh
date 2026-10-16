@@ -1,8 +1,11 @@
 # templates/vscode.sh
-# Patches Microsoft VS Code Stable's product.json and installs update remediation.
-# On macOS this runs only when the script was generated with ENDOR_VSCODE_MACOS_DAEMON=1. The
-# worker then patches a clone of the app, re-signs it with a per-device identity and swaps the
-# whole bundle into place, so Gatekeeper keeps accepting it (BUG-1862).
+# Routes Microsoft VS Code Stable's extension gallery through the Endor firewall, by whichever
+# methods the script was generated with:
+#   - the patch (ENDOR_VSCODE_ENABLE_PATCH): edits product.json and installs update remediation.
+#     On macOS the worker patches a clone of the app, re-signs it with a per-device identity and
+#     swaps the whole bundle into place, so Gatekeeper keeps accepting it (BUG-1862);
+#   - the policy (ENDOR_VSCODE_ENABLE_POLICY): VS Code's ExtensionGalleryServiceUrl policy, in
+#     /etc/vscode/policy.json on Linux. On macOS it comes from an MDM profile instead.
 
 echo ""
 echo "[endor] ── VS Code extension firewall ───────────────────────────────────────"
@@ -1788,29 +1791,324 @@ generic_main "$@"
 exit $?
 ENDOR_VSCODE_WORKER
 
-# Changing VS Code on macOS has costs that each customer weighs (see bash/README.md), so the
-# macOS daemon is opt-in: ENDOR_VSCODE_MACOS_DAEMON=1 when the script is generated.
+# ── Which methods this script applies ─────────────────────────────────────────
+# Chosen when the script was generated; bash/README.md compares them:
+#   ENDOR_VSCODE_ENABLE_PATCH   patch product.json and keep it patched (on macOS, the daemon that
+#                               re-signs the app)
+#   ENDOR_VSCODE_ENABLE_POLICY  set VS Code's ExtensionGalleryServiceUrl policy
+# This script never removes a method that isn't enabled, because that would turn the firewall
+# off. When an earlier deployment left one in place, it says so and exits non-zero.
+_VSCODE_SERVICE_URL='{{VSCODE_SERVICE_URL}}'
+_VSCODE_ENABLE_PATCH='{{VSCODE_ENABLE_PATCH}}'
+_VSCODE_ENABLE_POLICY='{{VSCODE_ENABLE_POLICY}}'
+_VSCODE_POLICY_AUTH='{{VSCODE_POLICY_AUTH}}'
 _VSCODE_MACOS_DAEMON='{{VSCODE_MACOS_DAEMON}}'
-_vscode_skip=0
 _vscode_os=$(uname -s)
+# A generator that predates the two flags, such as the one on docs.endorlabs.com, leaves their
+# placeholders in place. Its scripts behave as they always did: the patch on Linux, and on macOS
+# only with ENDOR_VSCODE_MACOS_DAEMON=1; no policy, and no warnings about one.
+_vscode_legacy=0
+case "$_VSCODE_ENABLE_PATCH" in
+  0|1) ;;
+  *)
+    _vscode_legacy=1
+    _VSCODE_ENABLE_PATCH=1
+    if [[ "$_vscode_os" == "Darwin" && "$_VSCODE_MACOS_DAEMON" != "1" ]]; then
+      _VSCODE_ENABLE_PATCH=0
+    fi
+    ;;
+esac
+[[ "$_VSCODE_ENABLE_POLICY" == "1" ]] || _VSCODE_ENABLE_POLICY=0
+case "$_VSCODE_POLICY_AUTH" in github|microsoft) ;; *) _VSCODE_POLICY_AUTH="" ;; esac
+
 case "$_vscode_os" in
   Darwin)
     _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/Library/Application Support/Endor Labs/vscode-firewall}"
     _VSCODE_LOG_DIR="/Library/Logs/Endor Labs"
-    [[ "$_VSCODE_MACOS_DAEMON" == "1" ]] || _vscode_skip=1
+    _vscode_product="${ENDOR_VSCODE_APP:-/Applications/Visual Studio Code.app}/Contents/Resources/app/product.json"
     ;;
   Linux)
     _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/var/lib/endor/vscode-firewall}"
+    _vscode_product="/usr/share/code/resources/app/product.json"
     ;;
   *)
-    # This script runs as a whole, not sourced, so skip the rest rather than return.
-    echo "[endor] WARNING: VS Code firewall supports macOS and Linux only in this script." >&2
-    _ENDOR_WARNED=1
     _VSCODE_STATE_DIR=""
-    _vscode_skip=unsupported
+    _vscode_product=""
     ;;
 esac
+_vscode_product="${ENDOR_VSCODE_PRODUCT_JSON:-$_vscode_product}"
 _VSCODE_WORKER_PATH="$_VSCODE_STATE_DIR/worker.sh"
+# The policy is a file on Linux and a configuration profile on macOS. ENDOR_VSCODE_POLICY_FILE and
+# ENDOR_VSCODE_POLICY_STATE_DIR are for tests: they use the Linux file on any OS, and skip the
+# checks that root owns it.
+_VSCODE_POLICY_FILE="${ENDOR_VSCODE_POLICY_FILE:-/etc/vscode/policy.json}"
+_VSCODE_POLICY_STATE_DIR="${ENDOR_VSCODE_POLICY_STATE_DIR:-/var/lib/endor/vscode-policy}"
+_vscode_policy_kind=""
+if [[ -n "${ENDOR_VSCODE_POLICY_FILE:-}" || "$_vscode_os" == "Linux" ]]; then
+  _vscode_policy_kind="file"
+elif [[ "$_vscode_os" == "Darwin" ]]; then
+  _vscode_policy_kind="profile"
+fi
+_vscode_done=0
+
+# /etc/vscode/policy.json (VS Code 1.106 or later) is a flat JSON object that other policies share,
+# so this changes only the two keys it owns, and leaves a value that isn't Endor's alone. A record
+# outside /etc says whether it created the file and which sign-in provider it wrote. The URL is
+# never recorded, because it carries the credential, and it reaches Python in the environment,
+# not on the command line. remove.sh carries the same program; a test keeps the two identical.
+IFS= read -r -d '' _VSCODE_POLICY_PY <<'ENDOR_VSCODE_POLICY_PY' || true
+import json
+import os
+import stat
+import sys
+import tempfile
+
+URL_KEY = "ExtensionGalleryServiceUrl"
+AUTH_KEY = "ExtensionGalleryAuthProvider"
+
+
+def say(message):
+    print("[endor-vscode] " + message)
+
+
+def warn(message):
+    print("[endor-vscode] WARNING: " + message, file=sys.stderr)
+
+
+def is_endor(value):
+    return isinstance(value, str) and "/firewall/vscode/_ak/" in value
+
+
+def safe(path, strict):
+    """False for a symbolic link and, as root, for anything another user can change."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return True
+    if stat.S_ISLNK(info.st_mode):
+        warn(path + " is a symbolic link; leaving it alone")
+        return False
+    if strict and (info.st_uid != 0 or info.st_mode & 0o022):
+        warn(path + " is not owned by root, or others can change it; leaving it alone")
+        return False
+    return True
+
+
+def load(path):
+    """The policy object, or None when there is no file. Raises ValueError if it isn't one."""
+    try:
+        handle = open(path, encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    with handle:
+        policy = json.load(handle)
+    if not isinstance(policy, dict):
+        raise ValueError("not a JSON object")
+    return policy
+
+
+def write(path, value, mode):
+    """Replaces path in one step. A file that exists keeps its mode and owner; a new one gets mode."""
+    try:
+        before = os.stat(path)
+    except FileNotFoundError:
+        before = None
+    fd, temp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".endor.", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if before is None:
+            os.chmod(temp, mode)
+        else:
+            os.chmod(temp, stat.S_IMODE(before.st_mode))
+            after = os.stat(temp)
+            if (after.st_uid, after.st_gid) != (before.st_uid, before.st_gid):
+                os.chown(temp, before.st_uid, before.st_gid)
+        os.replace(temp, path)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
+
+
+def load_record(state):
+    try:
+        with open(os.path.join(state, "record.json"), encoding="utf-8") as handle:
+            record = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def save_record(state, record):
+    os.makedirs(state, mode=0o700, exist_ok=True)
+    write(os.path.join(state, "record.json"), record, 0o600)
+
+
+def forget(state):
+    try:
+        os.unlink(os.path.join(state, "record.json"))
+    except OSError:
+        pass
+    try:
+        os.rmdir(state)
+    except OSError:
+        pass
+
+
+def apply(path, state, url, auth, dry_run, strict):
+    folder = os.path.dirname(path)
+    if not (safe(folder, strict) and safe(path, strict)):
+        return 1
+    try:
+        current = load(path)
+    except ValueError:
+        warn(path + " is not a JSON object, so VS Code ignores every policy in it. Fix or delete it, then run this again")
+        return 1
+    record = load_record(state)
+    policy = dict(current or {})
+    if policy.get(URL_KEY) not in (None, "") and not is_endor(policy[URL_KEY]):
+        warn(path + " sets " + URL_KEY + " to another gallery; leaving it. Remove that value to use the Endor firewall")
+        return 1
+    status = 0
+    policy[URL_KEY] = url
+    ours = record.get("auth")
+    present = policy.get(AUTH_KEY)
+    owned = None
+    if auth:
+        if present is None or present == ours:
+            policy[AUTH_KEY] = auth
+            owned = auth
+        elif present != auth:
+            warn(path + " sets " + AUTH_KEY + " to " + repr(present) + "; leaving it rather than setting " + repr(auth))
+            status = 1
+    elif ours and present == ours:
+        del policy[AUTH_KEY]
+    new_record = {
+        "createdFile": bool(record.get("createdFile")) or current is None,
+        "createdFolder": bool(record.get("createdFolder")) or not os.path.isdir(folder),
+        "auth": owned,
+    }
+    if policy == current:
+        if not dry_run and new_record != record:
+            save_record(state, new_record)
+        say("policy already set: " + path)
+        return status
+    if dry_run:
+        print("[dry-run]   action : SET " + URL_KEY + (" and " + AUTH_KEY if owned else ""))
+        print("[dry-run]   file   : " + path)
+        return status
+    save_record(state, new_record)
+    if not os.path.isdir(folder):
+        os.makedirs(folder)
+        os.chmod(folder, 0o755)
+    write(path, policy, 0o644)
+    say("policy set: " + path)
+    return status
+
+
+def remove(path, state, dry_run, strict):
+    folder = os.path.dirname(path)
+    if not (safe(folder, strict) and safe(path, strict)):
+        return 1
+    try:
+        current = load(path)
+    except ValueError:
+        warn(path + " is not a JSON object; leaving it alone")
+        return 1
+    record = load_record(state)
+    policy = dict(current or {})
+    if is_endor(policy.get(URL_KEY)):
+        del policy[URL_KEY]
+        if not record:
+            say("note: this machine has no record of setting " + URL_KEY + " in " + path
+                + ". If another tool set it, that tool may set it again")
+    ours = record.get("auth")
+    if ours and policy.get(AUTH_KEY) == ours:
+        del policy[AUTH_KEY]
+    if current is None or policy == current:
+        say("skip (no Endor policy): " + path)
+    elif dry_run:
+        print("[dry-run]   action : REMOVE the Endor " + URL_KEY + " policy")
+        print("[dry-run]   file   : " + path)
+        return 0
+    elif not policy and record.get("createdFile"):
+        os.unlink(path)
+        if record.get("createdFolder"):
+            try:
+                os.rmdir(folder)
+            except OSError:
+                pass
+        say("removed " + path)
+    else:
+        write(path, policy, 0o644)
+        say("removed the Endor policy from " + path)
+    if not dry_run:
+        forget(state)
+    return 0
+
+
+def version(package):
+    try:
+        with open(package, encoding="utf-8") as handle:
+            value = json.load(handle).get("version")
+    except (OSError, ValueError, AttributeError):
+        return 0
+    if isinstance(value, str):
+        print(value)
+    return 0
+
+
+def main(argv):
+    try:
+        if argv[1] == "apply":
+            path, state, auth, dry_run, strict = argv[2:7]
+            return apply(path, state, os.environ["ENDOR_VSCODE_POLICY_URL"], auth, dry_run == "1", strict == "1")
+        if argv[1] == "remove":
+            path, state, dry_run, strict = argv[2:6]
+            return remove(path, state, dry_run == "1", strict == "1")
+        if argv[1] == "version":
+            return version(argv[2])
+    except OSError as error:
+        warn(str(error))
+        return 1
+    warn("unknown policy command")
+    return 2
+
+
+sys.exit(main(sys.argv))
+ENDOR_VSCODE_POLICY_PY
+
+_vscode_policy() {
+  ENDOR_VSCODE_POLICY_URL="$_VSCODE_SERVICE_URL" python3 -I -c "$_VSCODE_POLICY_PY" "$@"
+}
+
+_vscode_warn() {
+  echo "[endor] WARNING: $*" >&2
+  _ENDOR_WARNED=1
+}
+
+# _vscode_older <version> <minimum>: true when version comes before minimum.
+_vscode_older() {
+  local IFS=. i have need
+  local -a v m
+  read -r -a v <<< "$1"
+  read -r -a m <<< "$2"
+  for i in 0 1 2; do
+    have="${v[i]:-0}"; have="${have%%[!0-9]*}"; have="${have:-0}"
+    need="${m[i]:-0}"; need="${need%%[!0-9]*}"; need="${need:-0}"
+    if (( 10#$have != 10#$need )); then
+      (( 10#$have < 10#$need ))
+      return
+    fi
+  done
+  return 1
+}
 
 # The worker runs under /bin/bash on macOS: Bash 3.2, whatever PATH the MDM agent has.
 _vscode_run_worker() {
@@ -1825,19 +2123,51 @@ _vscode_xml() {
   printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
 
-if [[ "$_vscode_skip" == "unsupported" ]]; then
-  :
-elif [[ "$_vscode_skip" == "1" ]]; then
-  echo "[endor] skip: the VS Code firewall is not enabled for macOS in this script."
-  echo "[endor]   To enable it, regenerate with ENDOR_VSCODE_MACOS_DAEMON=1 (see bash/README.md)."
-  # An earlier version of this script installed the daemon unconditionally. Leave it running,
-  # because removing it would turn the firewall off, but make the admin decide.
-  if [[ -f /Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist ]]; then
-    echo "[endor] WARNING: a VS Code firewall daemon from an earlier deployment is still installed." >&2
-    echo "[endor]   Regenerate with ENDOR_VSCODE_MACOS_DAEMON=1 to keep it, or run endor-remove.sh to remove it." >&2
-    _ENDOR_WARNED=1
+if [[ "$_VSCODE_ENABLE_PATCH" == "0" && "$_VSCODE_ENABLE_POLICY" == "0" ]]; then
+  if [[ "$_vscode_legacy" == "1" ]]; then
+    echo "[endor] skip: the VS Code firewall is not enabled for macOS in this script."
+    echo "[endor]   To enable it, regenerate with ENDOR_VSCODE_MACOS_DAEMON=1 (see bash/README.md)."
+  else
+    echo "[endor] skip: no VS Code method is enabled in this script."
+    echo "[endor]   To enable one, regenerate with ENDOR_VSCODE_ENABLE_PATCH=true or ENDOR_VSCODE_ENABLE_POLICY=true (see bash/README.md)."
   fi
+elif [[ -z "$_VSCODE_STATE_DIR" ]]; then
+  # This script runs as a whole, not sourced, so skip the rest rather than return.
+  _vscode_warn "VS Code firewall supports macOS and Linux only in this script."
+fi
+
+# ── The product.json patch ────────────────────────────────────────────────────
+# A patch left by an earlier deployment keeps working when this script doesn't enable it, so the
+# admin decides: keep it, or remove it. A script from an older generator checks only for the
+# macOS daemon, and names the flag that generator has, as such scripts always did.
+if [[ "$_VSCODE_ENABLE_PATCH" != "1" && "$_vscode_legacy" == "1" ]]; then
+  if [[ -f /Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist ]]; then
+    _vscode_warn "a VS Code firewall daemon from an earlier deployment is still installed."
+    echo "[endor]   Regenerate with ENDOR_VSCODE_MACOS_DAEMON=1 to keep it, or run endor-remove.sh to remove it." >&2
+  fi
+elif [[ "$_VSCODE_ENABLE_PATCH" != "1" && -n "$_VSCODE_STATE_DIR" ]]; then
+  _vscode_left=""
+  for _vscode_item in /Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist \
+      /etc/systemd/system/endor-vscode-firewall.path /etc/dpkg/dpkg.cfg.d/endor-vscode-firewall \
+      "$_VSCODE_WORKER_PATH"; do
+    if [[ -e "$_vscode_item" ]]; then
+      _vscode_left="$_vscode_item"
+      break
+    fi
+  done
+  if [[ -z "$_vscode_left" && -f "$_vscode_product" ]] && grep -q '/firewall/vscode/_ak/' "$_vscode_product"; then
+    _vscode_left="$_vscode_product"
+  fi
+  if [[ -n "$_vscode_left" ]]; then
+    _vscode_warn "the VS Code product.json patch from an earlier deployment is still installed ($_vscode_left)."
+    echo "[endor]   This script doesn't enable it. Regenerate with ENDOR_VSCODE_ENABLE_PATCH=true to keep it, or run endor-remove.sh to remove it." >&2
+  fi
+fi
+
+if [[ "$_VSCODE_ENABLE_PATCH" != "1" || -z "$_VSCODE_STATE_DIR" ]]; then
+  :
 elif [[ "${DRY_RUN:-0}" == "1" ]]; then
+  _vscode_done=1
   _vscode_tmp_worker=$(mktemp)
   printf '%s\n' "$_VSCODE_WORKER_CONTENT" > "$_vscode_tmp_worker"
   chmod 700 "$_vscode_tmp_worker"
@@ -1846,6 +2176,7 @@ elif [[ "${DRY_RUN:-0}" == "1" ]]; then
   rm -f "$_vscode_tmp_worker"
   echo "[dry-run]   action : INSTALL VS Code update remediation"
 else
+  _vscode_done=1
   if [[ "${EUID:-$(id -u)}" -ne 0 && "${ENDOR_VSCODE_SKIP_WATCHER:-0}" != "1" ]]; then
     echo "[endor] WARNING: VS Code firewall installation must run as root." >&2
     _ENDOR_WARNED=1
@@ -1996,9 +2327,55 @@ DPKGHOOK
   fi
 fi
 
-[[ "$_vscode_skip" != "0" ]] || echo "[endor] ✓ VS Code extension firewall done"
-unset -f _vscode_run_worker _vscode_xml
+# ── The ExtensionGalleryServiceUrl policy ─────────────────────────────────────
+if [[ "$_VSCODE_ENABLE_POLICY" == "1" && -n "$_vscode_policy_kind" ]]; then
+  if [[ "$_vscode_policy_kind" == "profile" ]]; then
+    echo "[endor] note: on macOS, VS Code reads its policy from a configuration profile, which this script doesn't install."
+    echo "[endor]   Deliver ExtensionGalleryServiceUrl with your MDM (see bash/README.md)."
+  elif ! command -v python3 >/dev/null 2>&1; then
+    _vscode_warn "python3 is required to set VS Code's policy on Linux."
+  elif [[ "${DRY_RUN:-0}" != "1" && -z "${ENDOR_VSCODE_POLICY_FILE:-}" && "${EUID:-$(id -u)}" -ne 0 ]]; then
+    _vscode_warn "setting VS Code's policy must run as root."
+  else
+    _vscode_done=1
+    _vscode_strict=1
+    [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" ]] || _vscode_strict=0
+    _vscode_policy apply "$_VSCODE_POLICY_FILE" "$_VSCODE_POLICY_STATE_DIR" "$_VSCODE_POLICY_AUTH" \
+      "${DRY_RUN:-0}" "$_vscode_strict" || _ENDOR_WARNED=1
+    # An older VS Code ignores the file. The patch, if enabled, covers it until it's updated. It
+    # can't help with the sign-in provider: the editor follows the policy's URL either way.
+    _vscode_version=$(_vscode_policy version "$(dirname "$_vscode_product")/package.json" 2>/dev/null || true)
+    if [[ -z "$_vscode_version" ]]; then
+      :
+    elif _vscode_older "$_vscode_version" 1.106; then
+      if [[ "$_VSCODE_ENABLE_PATCH" == "1" ]]; then
+        echo "[endor] note: VS Code $_vscode_version doesn't read $_VSCODE_POLICY_FILE (1.106 and later do); the patch covers it until it's updated."
+      else
+        _vscode_warn "VS Code $_vscode_version doesn't read $_VSCODE_POLICY_FILE; 1.106 and later do."
+      fi
+    elif [[ -n "$_VSCODE_POLICY_AUTH" ]] && _vscode_older "$_vscode_version" 1.137; then
+      _vscode_warn "VS Code $_vscode_version ignores ExtensionGalleryAuthProvider and asks for a GitHub account; 1.137 and later read it."
+    fi
+  fi
+  if [[ "$_VSCODE_POLICY_AUTH" == "microsoft" ]]; then
+    echo "[endor] note: under this policy, VS Code turns the Extensions Marketplace off until the user signs in"
+    echo "[endor]   with a Microsoft Entra ID work or school account (see bash/README.md)."
+  else
+    echo "[endor] note: under this policy, VS Code turns the Extensions Marketplace off until the user signs in"
+    echo "[endor]   with a GitHub account that has Copilot Business or Enterprise, or a GitHub Enterprise account (see bash/README.md)."
+  fi
+elif [[ "$_vscode_legacy" == "0" && "$_vscode_policy_kind" == "file" && -f "$_VSCODE_POLICY_FILE" ]] \
+    && grep -q '/firewall/vscode/_ak/' "$_VSCODE_POLICY_FILE"; then
+  # As with the patch: a policy left by an earlier deployment stays until the admin decides.
+  _vscode_warn "VS Code's ExtensionGalleryServiceUrl policy from an earlier deployment is still set in $_VSCODE_POLICY_FILE."
+  echo "[endor]   This script doesn't enable it. Regenerate with ENDOR_VSCODE_ENABLE_POLICY=true to keep it, or run endor-remove.sh to remove it." >&2
+fi
+
+[[ "$_vscode_done" != "1" ]] || echo "[endor] ✓ VS Code extension firewall done"
+unset -f _vscode_run_worker _vscode_xml _vscode_policy _vscode_warn _vscode_older
 unset _vscode_os _VSCODE_STATE_DIR _VSCODE_WORKER_PATH _VSCODE_WORKER_CONTENT _VSCODE_LOG_DIR
 unset _vscode_tmp_worker _vscode_plist _vscode_service _vscode_path _vscode_timer _vscode_dpkg_hook
-unset _vscode_log _vscode_watch
-unset _vscode_caches _VSCODE_MACOS_DAEMON _vscode_skip
+unset _vscode_log _vscode_watch _vscode_caches _vscode_left _vscode_done _vscode_product
+unset _VSCODE_SERVICE_URL _VSCODE_ENABLE_PATCH _VSCODE_ENABLE_POLICY _VSCODE_POLICY_AUTH _VSCODE_MACOS_DAEMON
+unset _vscode_legacy _VSCODE_POLICY_FILE _VSCODE_POLICY_STATE_DIR _vscode_policy_kind _VSCODE_POLICY_PY
+unset _vscode_strict _vscode_version _vscode_item

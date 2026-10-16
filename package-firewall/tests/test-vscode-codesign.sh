@@ -98,7 +98,7 @@ firewall_url() {
 generate() {
   local secret="${1:-$SECRET}"
   ENDOR_NAMESPACE="$NAMESPACE" ENDOR_API_KEY_ID="$KEY_ID" ENDOR_API_SECRET="$secret" \
-    ENDOR_VSCODE_MACOS_DAEMON="${MACOS_DAEMON:-1}" bash "$GENERATOR" >/dev/null
+    ENDOR_VSCODE_ENABLE_PATCH="${PATCH:-1}" bash "$GENERATOR" >/dev/null
   EXPECTED_URL=$(firewall_url "$secret")
 }
 
@@ -247,13 +247,13 @@ stage_update() {
     "$BUNDLE_ID" "$(url_encode_path "$APP")" "$(url_encode_path "$STAGED")" > "$cache/ShipItState.plist"
 }
 
-echo "test: without ENDOR_VSCODE_MACOS_DAEMON=1 the installer leaves the app alone"
-MACOS_DAEMON=0 generate
+echo "test: without ENDOR_VSCODE_ENABLE_PATCH the installer leaves the app alone"
+PATCH=0 generate
 state="$TMP_DIR/state-opt-out"
 build_app "$APP" 1.0.0
 digest=$(tree_digest "$APP")
 install "$state" || [[ -f /Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist ]] || fail "installer failed"
-grep -qF 'ENDOR_VSCODE_MACOS_DAEMON=1' "$TMP_DIR/worker.out" || fail "the installer did not say how to opt in"
+grep -qF 'ENDOR_VSCODE_ENABLE_PATCH=true' "$TMP_DIR/worker.out" || fail "the installer did not say how to opt in"
 [[ "$(tree_digest "$APP")" == "$digest" && ! -e "$state" ]] || fail "the installer changed something without the flag"
 
 generate
