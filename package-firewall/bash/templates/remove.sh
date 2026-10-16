@@ -21,6 +21,10 @@
 #   .NET / NuGet:
 #     ~/.nuget/NuGet/NuGet.Config  (sections kept; nuget.org restored if no source is left)
 #
+#   Ruby / Bundler:
+#     ~/.bundle/config  (Endor mirror keys removed, including stale copies left by `bundle config`;
+#                        user keys kept; the credential is in env.sh)
+#
 #   VS Code:
 #     Restores default gallery properties and removes update remediation. On macOS this
 #     swaps Microsoft's original app back in and deletes the per-device signing identity.
@@ -156,6 +160,12 @@ echo ""
 echo "[endor-remove] ── NuGet / .NET ────────────────────────────────────────────────"
 
 remove_nuget_blocks "$USER_HOME/.nuget/NuGet/NuGet.Config" "$CONSOLE_USER" "$USER_GROUP"
+
+# ── Bundler config file ───────────────────────────────────────────────────────
+echo ""
+echo "[endor-remove] ── Ruby / Bundler ──────────────────────────────────────────────"
+
+remove_bundle_config "$USER_HOME/.bundle/config" "{{GEM_MIRROR_URL}}" "$CONSOLE_USER" "$USER_GROUP"
 
 # ── VS Code extension firewall ────────────────────────────────────────────────
 echo ""

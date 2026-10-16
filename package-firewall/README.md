@@ -28,6 +28,7 @@ See each directory's README for generation and deployment instructions.
 | Go | go modules (via GOPROXY) |
 | Java | Maven (via `~/.m2/settings.xml` mirror); Gradle when it reads `~/.m2` |
 | .NET | NuGet — dotnet CLI, NuGet CLI, Visual Studio, Rider, VS Code (via user-level `NuGet.Config`) |
+| Ruby | Bundler — `bundle install` / `add` / `update` under every Ruby version (via a global `~/.bundle/config` mirror); bash only |
 | VS Code | Microsoft VS Code Stable extension gallery |
 
 ---
@@ -46,6 +47,7 @@ shared/blocks/
 ├── uvtoml.txt         ← uv.toml content
 ├── goenv.txt          ← go env file content  (GOPROXY)
 ├── mavensettings.txt  ← ~/.m2/settings.xml fragment  (Maven mirror + server)
+├── bundleconfig.txt   ← ~/.bundle/config keys  (Bundler mirror; credentials come from env.sh; bash only)
 ├── nugetconfig_sources.txt        ← NuGet.Config <packageSources> items  (clear + Endor source)
 ├── nugetconfig_credentials.txt    ← NuGet.Config <packageSourceCredentials> item
 └── nugetconfig_sourcemapping.txt  ← NuGet.Config <packageSourceMapping> items  (only when the section exists)
@@ -66,6 +68,7 @@ Running either generator produces these scripts in `out/<namespace>/`:
 | `endor-go.*` | Configure Go modules only |
 | `endor-maven.*` | Configure Maven only |
 | `endor-nuget.*` | Configure NuGet / .NET only |
+| `endor-ruby.sh` | Configure Ruby / Bundler only (bash only) |
 | `endor-vscode.*` | Patch VS Code `product.json` and install update remediation |
 | `endor-all.*` | Configure all package managers (single-script deploy) |
 | `endor-remove.*` | Strip all Endor configuration from a machine |
