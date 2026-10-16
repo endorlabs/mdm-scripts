@@ -50,7 +50,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-26]
+        # Through fromJSON, as in vscode-macos-e2e.yml, because CI's actionlint (1.7.7) predates
+        # the macos-26 label.
+        os: ${{ fromJSON('["macos-15", "macos-26"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
