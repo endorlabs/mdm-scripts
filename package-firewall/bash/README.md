@@ -296,8 +296,22 @@ The script applies immediately and installs drift remediation:
   when `/Applications/Visual Studio Code.app` or a user's VS Code update cache
   (`~/Library/Caches/com.microsoft.VSCode.ShipIt`) changes, and every 60
   seconds. See [macOS code signing](#macos-code-signing).
-- **Linux**: `endor-vscode-firewall.path` watches `/usr/share/code` and
-  `/usr/lib/code`; its oneshot systemd service reapplies the patch.
+- **Linux**: three triggers run the same worker, one at a time (a lock under
+  `/var/lib/endor/vscode-firewall`):
+  - **dpkg hook** (Debian, Ubuntu): `/etc/dpkg/dpkg.cfg.d/endor-vscode-firewall`
+    runs the worker after every dpkg run, so an upgrade through apt,
+    unattended-upgrades or `dpkg -i` is patched before the command returns.
+  - **Path unit**: `endor-vscode-firewall.path` watches
+    `/usr/share/code/resources/app`. dpkg and rpm unpack a new VS Code as
+    temporary files and rename them into place at the end, so the worker
+    waits for that (up to 5 minutes) before patching.
+  - **Timer**: `endor-vscode-firewall.timer` runs the worker every minute. It
+    catches changes the path unit misses: systemd doesn't watch while the
+    worker runs. On RPM systems (Fedora, RHEL), which have no built-in package
+    hook, the path unit and the timer are what patch an upgrade.
+
+  File-integrity tools (`debsums`, `rpm -V`, AIDE) report `product.json` as
+  modified. That is expected.
 
 Re-running is idempotent. Credential rotation and updater remediation modify
 only `serviceUrl` and `extensionUrlTemplate`; every other current
@@ -306,10 +320,11 @@ only `serviceUrl` and `extensionUrlTemplate`; every other current
 Run as root. Restart VS Code after initial deployment if it is open.
 
 Supported scope: Microsoft VS Code Stable at
-`/Applications/Visual Studio Code.app`,
-`/usr/share/code/resources/app/product.json`, or
-`/usr/lib/code/resources/app/product.json`. Insiders, VSCodium, Code OSS,
-Snap, Flatpak, and arbitrary portable/tarball installs are excluded.
+`/Applications/Visual Studio Code.app`, or at
+`/usr/share/code/resources/app/product.json`, where Microsoft's `.deb` and
+`.rpm` packages install it. Insiders, VSCodium, Code OSS (including Arch's
+`code` package), Snap, Flatpak, and arbitrary portable/tarball installs are
+excluded.
 
 #### macOS is opt-in
 
@@ -446,7 +461,7 @@ always-auth=true
 
 To remove the Endor firewall configuration from a machine, deploy
 `endor-remove.sh`. It removes package-manager sentinel blocks, unloads the VS
-Code launchd/systemd watcher, and restores the stable default values for
+Code launchd daemon or systemd units, timer and dpkg hook, and restores the stable default values for
 `serviceUrl` and `extensionUrlTemplate`. Other `product.json` modifications are
 left intact.
 

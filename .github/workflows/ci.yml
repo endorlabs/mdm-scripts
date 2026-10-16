@@ -211,6 +211,10 @@ jobs:
           for key in StartInterval StandardOutPath WatchPaths; do
             grep -qF "<key>$key</key>" "$vscode_script"
           done
+          # Linux: the timer and the dpkg hook back up the path unit.
+          for line in "OnUnitInactiveSec=1min" "PathChanged=/usr/share/code/resources/app" "post-invoke="; do
+            grep -qF "$line" "$vscode_script"
+          done
           for f in "${files[@]}"; do
             bash -n "$f"
             echo "ok: $f"

@@ -85,7 +85,9 @@ managed properties after VS Code updates:
 - macOS: root launchd daemon watching the VS Code app and users' VS Code update
   caches, only when the bash generator runs with `ENDOR_VSCODE_MACOS_DAEMON=1`
   (opt-in; see [bash/README.md](bash/README.md#macos-is-opt-in))
-- Linux: systemd path/service units watching native `code` package locations
+- Linux: a dpkg hook (Debian, Ubuntu), a systemd path unit and a 1-minute
+  timer, so a package upgrade is patched before apt or dpkg returns, and
+  within a minute on RPM systems
 - Windows: SYSTEM scheduled task using `FileSystemWatcher`, with a periodic rescan
 
 Run the script as root/SYSTEM. Restart VS Code after the first deployment if it
