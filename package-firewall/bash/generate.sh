@@ -54,7 +54,7 @@
 #   endor-go.sh       — Go:         go modules (GOPROXY → ~/.config/go/env)
 #   endor-maven.sh    — Maven:      Maven (settings.xml → ~/.m2/settings.xml)
 #   endor-nuget.sh    — .NET:       NuGet / dotnet (NuGet.Config → ~/.nuget/NuGet/NuGet.Config)
-#   endor-ruby.sh     — Ruby:       Bundler (mirror + credentials → ~/.bundle/config)
+#   endor-ruby.sh     — Ruby:       Bundler (mirror → ~/.bundle/config) · gem (source → ~/.gemrc)
 #   endor-vscode.sh   — VS Code:    extension gallery firewall + update watcher
 #   endor-all.sh      — All of the above (single-script MDM deploy)
 #   endor-remove.sh   — Offboarding: strips Endor config from all files
@@ -317,6 +317,7 @@ emit_all_blocks() {
   emit_block_assignment "NUGET_CREDENTIALS_BLOCK" "$SHARED_BLOCKS_DIR/nugetconfig_credentials.txt"
   emit_block_assignment "NUGET_SOURCEMAPPING_BLOCK" "$SHARED_BLOCKS_DIR/nugetconfig_sourcemapping.txt"
   emit_block_assignment "BUNDLE_BLOCK"        "$SHARED_BLOCKS_DIR/bundleconfig.txt"
+  emit_block_assignment "GEMRC_BLOCK"         "$SHARED_BLOCKS_DIR/gemrc.txt"
   echo "# ─────────────────────────────────────────────────────────────────────────────"
   echo ""
 }
@@ -381,6 +382,8 @@ ENDOR_GO_PROXY_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):$(endor_urlen
 
 # bundler: exported from env.sh as BUNDLE_<HOST> — percent-encoded user:password (URL userinfo rules).
 ENDOR_BUNDLE_CREDS="$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):$(endor_urlenc_b64 "$ENDOR_API_SECRET")"
+# gem: ~/.gemrc source url carries the credentials (gemrc cannot expand env vars).
+ENDOR_GEM_SOURCE_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):$(endor_urlenc_b64 "$ENDOR_API_SECRET")@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/gem/"
 
 # No exports — every consumer is same-process template code inlined below.
 
@@ -509,7 +512,7 @@ build_script \
 build_script \
   "$TMPL_DIR/ruby.sh" \
   "$OUT_DIR/endor-ruby.sh" \
-  "Configures Ruby / Bundler (~/.bundle/config) for Endor Package Firewall."
+  "Configures Ruby — Bundler (~/.bundle/config) and gem (~/.gemrc) — for Endor Package Firewall."
 
 build_system_script \
   "$TMPL_DIR/vscode.sh" \
@@ -522,7 +525,7 @@ build_remove_script "$OUT_DIR/endor-remove.sh"
 # ─── Generate combined all.sh ─────────────────────────────────────────────────
 {
   script_header "$OUT_DIR/endor-all.sh" \
-    "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry · go · maven · nuget · bundler · vscode"
+    "Configures all package managers for Endor Package Firewall. Covers: npm · pnpm · yarn classic · yarn 2+ · bun · pip · uv · poetry · go · maven · nuget · bundler · gem · vscode"
   credentials_block
   echo ""
   emit_all_blocks
@@ -586,7 +589,7 @@ printf "   %-24s  %s\n" "endor-python.sh" "pip · uv · poetry"
 printf "   %-24s  %s\n" "endor-go.sh"     "go modules (GOPROXY)"
 printf "   %-24s  %s\n" "endor-maven.sh"  "maven (~/.m2/settings.xml)"
 printf "   %-24s  %s\n" "endor-nuget.sh"  "nuget / dotnet (~/.nuget/NuGet/NuGet.Config)"
-printf "   %-24s  %s\n" "endor-ruby.sh"   "bundler (~/.bundle/config)"
+printf "   %-24s  %s\n" "endor-ruby.sh"   "bundler (~/.bundle/config) · gem (~/.gemrc)"
 printf "   %-24s  %s\n" "endor-vscode.sh" "VS Code extension gallery + update remediation"
 printf "   %-24s  %s\n" "endor-all.sh"    "all of the above (single-script deploy)"
 printf "   %-24s  %s\n" "endor-remove.sh" "offboarding — strips all Endor config"
