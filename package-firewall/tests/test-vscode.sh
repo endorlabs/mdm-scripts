@@ -93,6 +93,56 @@ after=$(shasum -a 256 "$product" 2>/dev/null | awk '{print $1}' || sha256sum "$p
 [[ "$before" == "$after" ]]
 [[ ! -e "$state" ]]
 
+echo "test: Jamf's volume, computer and user arguments are accepted"
+product="$TMP_DIR/jamf-product.json"
+state="$TMP_DIR/jamf-state"
+cp "$FIXTURE" "$product"
+before=$(shasum -a 256 "$product" 2>/dev/null | awk '{print $1}' || sha256sum "$product" | awk '{print $1}')
+ENDOR_VSCODE_PRODUCT_JSON="$product" \
+  ENDOR_VSCODE_STATE_DIR="$state" \
+  ENDOR_VSCODE_SKIP_WATCHER=1 \
+  "$ROOT_DIR/package-firewall/bash/out/$NAMESPACE/endor-vscode.sh" / test-mac test-user --dry-run "" >/dev/null
+after=$(shasum -a 256 "$product" 2>/dev/null | awk '{print $1}' || sha256sum "$product" | awk '{print $1}')
+[[ "$before" == "$after" ]]
+[[ ! -e "$state" ]]
+ENDOR_VSCODE_PRODUCT_JSON="$product" \
+  ENDOR_VSCODE_STATE_DIR="$state" \
+  ENDOR_VSCODE_SKIP_WATCHER=1 \
+  "$ROOT_DIR/package-firewall/bash/out/$NAMESPACE/endor-vscode.sh" / test-mac test-user "" "" >/dev/null
+assert_patched "$product"
+if "$ROOT_DIR/package-firewall/bash/out/$NAMESPACE/endor-vscode.sh" --bogus >/dev/null 2>&1; then
+  echo "expected an unknown argument to be rejected" >&2
+  exit 1
+fi
+
+echo "test: an unsupported OS is skipped with a warning"
+fake_bin="$TMP_DIR/fake-bin"
+mkdir -p "$fake_bin"
+printf '#!/bin/sh\necho FreeBSD\n' > "$fake_bin/uname"
+chmod 755 "$fake_bin/uname"
+set +e
+output=$(PATH="$fake_bin:$PATH" ENDOR_VSCODE_SKIP_WATCHER=1 \
+  "$ROOT_DIR/package-firewall/bash/out/$NAMESPACE/endor-vscode.sh" 2>&1)
+status=$?
+set -e
+[[ "$status" == "1" ]]
+grep -q "supports macOS and Linux only" <<<"$output"
+if grep -q "unbound variable" <<<"$output"; then
+  echo "an unsupported OS hit an unset variable" >&2
+  exit 1
+fi
+
+echo "test: the worker's python3 ignores modules in the current directory"
+product="$TMP_DIR/isolated-product.json"
+state="$TMP_DIR/isolated-state"
+planted="$TMP_DIR/planted"
+mkdir -p "$planted"
+printf 'open("%s", "w").close()\nfrom json import *\n' "$TMP_DIR/planted-imported" > "$planted/json.py"
+cp "$FIXTURE" "$product"
+(cd "$planted" && run_installer "$product" "$state" >/dev/null)
+assert_patched "$product"
+[[ ! -e "$TMP_DIR/planted-imported" ]]
+
 echo "test: credential rotation preserves valid product.json modifications"
 product="$TMP_DIR/rotation-product.json"
 state="$TMP_DIR/rotation-state"

@@ -177,12 +177,22 @@ if ($DryRun) {
 }
 
 if (Test-Path -LiteralPath $_vscodeWorkerPath) {
-    if ($DryRun) {
-        & $_vscodeWorkerPath -Mode Restore -DryRun
-    } else {
-        & $_vscodeWorkerPath -Mode Restore
+    # Workers installed by earlier versions throw on a file they can't restore; count that as
+    # a failure too, so the state is kept for another try.
+    $_vscodeRestoreFailed = $false
+    try {
+        $global:LASTEXITCODE = 0
+        if ($DryRun) {
+            & $_vscodeWorkerPath -Mode Restore -DryRun
+        } else {
+            & $_vscodeWorkerPath -Mode Restore
+        }
+        if ($LASTEXITCODE) { $_vscodeRestoreFailed = $true }
+    } catch {
+        Write-Warning "[endor-remove] VS Code worker failed: $_"
+        $_vscodeRestoreFailed = $true
     }
-    if ($LASTEXITCODE) {
+    if ($_vscodeRestoreFailed) {
         $EndorWarned = $true
         Write-Warning '[endor-remove] VS Code restoration was incomplete; managed state was retained.'
     } elseif (-not $DryRun) {
@@ -192,6 +202,7 @@ if (Test-Path -LiteralPath $_vscodeWorkerPath) {
     Write-Host '[endor-remove] skip (no VS Code managed state)'
 }
 Remove-Variable _vscodeStateRoot, _vscodeWorkerPath
+Remove-Variable _vscodeRestoreFailed -ErrorAction SilentlyContinue
 Write-Host ''
 
 if ($DryRun) {

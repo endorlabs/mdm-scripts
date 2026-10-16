@@ -266,9 +266,13 @@ arg_parsing_block() {
 # ── Argument parsing ──────────────────────────────────────────────────────────
 DRY_RUN=0
 _ENDOR_WARNED=0
+# Jamf Pro passes the target volume, computer name and user as $1-$3, before its script
+# parameters, which it passes empty when unset.
+if [[ "${1:-}" == "/" && $# -ge 3 ]]; then shift 3; fi
 for _arg in "$@"; do
   case "$_arg" in
     --dry-run) DRY_RUN=1 ;;
+    "") ;;
     *) echo "[endor] Unknown argument: $_arg  (supported: --dry-run)" >&2; exit 1 ;;
   esac
 done

@@ -300,3 +300,12 @@ jobs:
           } else {
             Write-Host 'No package-firewall/tests directory on this branch yet - skipping.'
           }
+
+      # Intune runs scripts in 32-bit Windows PowerShell 5.1 unless told otherwise, where
+      # ProgramFiles is the x86 folder. Run the VS Code suite there too.
+      - name: Run the VS Code PowerShell tests in 32-bit Windows PowerShell
+        shell: pwsh
+        run: |
+          & "$env:SystemRoot\SysWOW64\WindowsPowerShell\v1.0\powershell.exe" -NoProfile `
+            -ExecutionPolicy Bypass -File package-firewall/tests/test-vscode.ps1
+          exit $LASTEXITCODE

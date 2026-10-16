@@ -11,6 +11,8 @@ param(
     [switch]$DryRun
 )
 
+# Failures to patch or restore one file are reported with Write-Error -ErrorAction Continue, so
+# they don't end the run (or the watcher loop) and the caller sees the exit code instead.
 $ErrorActionPreference = 'Stop'
 $FirewallUrl = '{{VSCODE_SERVICE_URL}}'
 $DefaultServiceUrl = 'https://marketplace.visualstudio.com/_apis/public/gallery'
@@ -19,14 +21,17 @@ $DefaultExtensionUrlTemplate = 'https://www.vscode-unpkg.net/_gallery/{publisher
 function Get-InstallRoots {
     $roots = [System.Collections.Generic.List[string]]::new()
     $systemRoots = @()
-    if ($env:ProgramFiles) {
-        $systemRoots += Join-Path $env:ProgramFiles 'Microsoft VS Code'
-    }
-    if (${env:ProgramFiles(x86)}) {
-        $systemRoots += Join-Path ${env:ProgramFiles(x86)} 'Microsoft VS Code'
+    # 32-bit PowerShell, which Intune uses by default, sees the x86 folder as ProgramFiles.
+    # ProgramW6432 is the 64-bit folder whichever PowerShell runs this.
+    foreach ($programFiles in @($env:ProgramW6432, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ($programFiles) {
+            $systemRoots += Join-Path $programFiles 'Microsoft VS Code'
+        }
     }
     foreach ($root in $systemRoots) {
-        if ($root -and (Test-Path -LiteralPath $root)) { $roots.Add($root) }
+        if ($root -and (Test-Path -LiteralPath $root) -and -not $roots.Contains($root)) {
+            $roots.Add($root)
+        }
     }
 
     $usersRoot = Join-Path $env:SystemDrive 'Users'
@@ -136,7 +141,7 @@ function Invoke-PatchOne {
     try {
         $product = Read-ProductJson $FilePath
     } catch {
-        Write-Error "[endor-vscode] refusing to modify invalid JSON: $FilePath : $_"
+        Write-Error "[endor-vscode] refusing to modify invalid JSON: $FilePath : $_" -ErrorAction Continue
         return $false
     }
 
@@ -168,7 +173,7 @@ function Invoke-PatchOne {
         Remove-Item -LiteralPath $replaceBackup -Force -ErrorAction SilentlyContinue
     } catch {
         Remove-Item -LiteralPath $tempPath, $replaceBackup -Force -ErrorAction SilentlyContinue
-        Write-Error "[endor-vscode] failed to patch $FilePath : $_"
+        Write-Error "[endor-vscode] failed to patch $FilePath : $_" -ErrorAction Continue
         return $false
     }
 
@@ -194,7 +199,7 @@ function Invoke-RestoreOne {
     try {
         $product = Read-ProductJson $FilePath
     } catch {
-        Write-Error "[endor-vscode] refusing to modify invalid JSON: $FilePath : $_"
+        Write-Error "[endor-vscode] refusing to modify invalid JSON: $FilePath : $_" -ErrorAction Continue
         return $false
     }
 
@@ -226,7 +231,7 @@ function Invoke-RestoreOne {
         return $true
     } catch {
         Remove-Item -LiteralPath $tempPath, $replaceBackup -Force -ErrorAction SilentlyContinue
-        Write-Error "[endor-vscode] failed to restore $FilePath : $_"
+        Write-Error "[endor-vscode] failed to restore $FilePath : $_" -ErrorAction Continue
         return $false
     }
 }
@@ -296,8 +301,12 @@ if ($DryRun) {
     $_vscodeTempWorker = Join-Path ([IO.Path]::GetTempPath()) "endor-vscode-$([Guid]::NewGuid().ToString('N')).ps1"
     [IO.File]::WriteAllText($_vscodeTempWorker, $_vscodeWorkerContent, [Text.UTF8Encoding]::new($false))
     try {
+        $global:LASTEXITCODE = 0
         & $_vscodeTempWorker -Mode Once -DryRun
         if ($LASTEXITCODE) { $EndorWarned = $true }
+    } catch {
+        Write-Warning "[endor] VS Code firewall dry run failed: $_"
+        $EndorWarned = $true
     } finally {
         Remove-Item -LiteralPath $_vscodeTempWorker -Force -ErrorAction SilentlyContinue
     }
@@ -310,8 +319,15 @@ if ($DryRun) {
             '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
     }
 
-    & $_vscodeWorkerPath -Mode Once
-    if ($LASTEXITCODE) { $EndorWarned = $true }
+    # A worker failure is reported, not thrown, so the update remediation task is still installed.
+    try {
+        $global:LASTEXITCODE = 0
+        & $_vscodeWorkerPath -Mode Once
+        if ($LASTEXITCODE) { $EndorWarned = $true }
+    } catch {
+        Write-Warning "[endor] VS Code firewall worker failed: $_"
+        $EndorWarned = $true
+    }
 
     if ($env:ENDOR_VSCODE_SKIP_WATCHER -ne '1') {
         try {
