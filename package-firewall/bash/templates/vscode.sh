@@ -2354,8 +2354,12 @@ if [[ "$_VSCODE_ENABLE_POLICY" == "1" && "$_vscode_policy_kind" == "profile" ]];
       continue
     elif [[ "$_vscode_url" == "$_VSCODE_SERVICE_URL" ]]; then
       _vscode_found=1
-      if [[ -n "$_VSCODE_POLICY_AUTH" && "$_vscode_auth" != "$_VSCODE_POLICY_AUTH" ]]; then
-        _vscode_warn "$_vscode_item sets ExtensionGalleryAuthProvider to '${_vscode_auth:-github, the default}', not '$_VSCODE_POLICY_AUTH'."
+      # Without ENDOR_VSCODE_POLICY_AUTH, any provider the profile sets (or VS Code's default) is fine.
+      if [[ -n "$_VSCODE_POLICY_AUTH" && -z "$_vscode_auth" ]]; then
+        _vscode_warn "$_vscode_item doesn't set ExtensionGalleryAuthProvider, so VS Code uses its default sign-in provider, not '$_VSCODE_POLICY_AUTH'."
+        echo "[endor]   Upload the endor-vscode.mobileconfig generated with this script." >&2
+      elif [[ -n "$_VSCODE_POLICY_AUTH" && "$_vscode_auth" != "$_VSCODE_POLICY_AUTH" ]]; then
+        _vscode_warn "$_vscode_item sets ExtensionGalleryAuthProvider to '$_vscode_auth', not '$_VSCODE_POLICY_AUTH'."
         echo "[endor]   Upload the endor-vscode.mobileconfig generated with this script." >&2
       fi
     elif [[ "$_vscode_url" == *"/firewall/vscode/_ak/"* ]]; then

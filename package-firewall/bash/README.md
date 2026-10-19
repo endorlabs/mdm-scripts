@@ -451,7 +451,7 @@ out of source control, and upload the files themselves, not their text.
 
 | File | What it is |
 |---|---|
-| `endor-vscode.mobileconfig` | A configuration profile, identifier `com.endorlabs.package-firewall.vscode`, with one `com.microsoft.VSCode` payload: `ExtensionGalleryServiceUrl`, and `ExtensionGalleryAuthProvider` with `ENDOR_VSCODE_POLICY_AUTH`. Its UUIDs come from its content, so regenerating with the same values gives the same file |
+| `endor-vscode.mobileconfig` | A configuration profile, identifier `com.endorlabs.package-firewall.vscode`, with one `com.microsoft.VSCode` payload: `ExtensionGalleryServiceUrl`, and `ExtensionGalleryAuthProvider` only when `ENDOR_VSCODE_POLICY_AUTH` is set. Its UUIDs come from its content, so regenerating with the same values gives the same file |
 | `endor-vscode-policy.plist` | The same keys as a plain property list, for MDMs that ask for a preference domain and a file |
 
 Upload one of them, scoped to the Macs that should use the policy:
@@ -477,7 +477,7 @@ Preferences/com.microsoft.VSCode.plist` and the per-user files beneath it.
 |---|---|
 | Reports success | A profile sets this script's URL |
 | A note, exit 0 | No profile sets it yet (scripts and profiles arrive in any order at enrollment) |
-| A warning, exit 1 | A profile sets an older Endor URL (rotated credentials, or another namespace), a gallery that isn't Endor's, or a sign-in provider other than `ENDOR_VSCODE_POLICY_AUTH` |
+| A warning, exit 1 | A profile sets an older Endor URL (rotated credentials, or another namespace), a gallery that isn't Endor's, or, with `ENDOR_VSCODE_POLICY_AUTH` set, a different sign-in provider or none. Without `ENDOR_VSCODE_POLICY_AUTH`, any provider the profile sets is accepted |
 
 It also warns when VS Code is older than 1.99, or than 1.137 with
 `ENDOR_VSCODE_POLICY_AUTH`.
