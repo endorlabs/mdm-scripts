@@ -123,7 +123,8 @@ try {
     Assert-Rc 0 $output
     if ((Get-PolicyValue 'ExtensionGalleryServiceUrl') -cne $ExpectedUrl) { throw 'the URL is not set' }
     if ((Get-PolicyValue 'ExtensionGalleryAuthProvider') -ne '<none>') { throw 'the auth provider was set without AUTH' }
-    Assert-Output $output 'Copilot Business or Enterprise'
+    Assert-Output $output "with an account that VS Code's default sign-in provider accepts"
+    if ($output.Contains('Copilot')) { throw "without AUTH, the sign-in note names a provider`n$output" }
     if ((Get-Content -Raw (Join-Path $Case.Record 'record.json')) -match '_ak/') { throw 'the record contains the URL' }
     if ((Get-FileHash $Case.Product).Hash -ne (Get-FileHash $Fixture).Hash) { throw 'the policy alone changed product.json' }
     if (Test-Path -LiteralPath $Case.State) { throw 'the policy alone installed the patch' }
@@ -164,6 +165,7 @@ try {
     $output = Invoke-Install
     Assert-Rc 0 $output
     if ((Get-PolicyValue 'ExtensionGalleryAuthProvider') -ne 'github') { throw 'AUTH was not changed to github' }
+    Assert-Output $output 'Copilot Business or Enterprise'
     Invoke-Generate
     $output = Invoke-Install
     Assert-Rc 0 $output

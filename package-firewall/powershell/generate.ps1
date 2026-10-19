@@ -39,7 +39,9 @@
 #                      signed in with an eligible account.
 #   ENDOR_VSCODE_POLICY_AUTH
 #                      Optional, with the policy only. github or microsoft:
-#                      the account VS Code asks for (its default is github).
+#                      the account VS Code asks users to sign in with. Unset
+#                      by default: the scripts then set no provider, and VS
+#                      Code uses its own default.
 #                      With neither VS Code flag, endor-vscode.ps1 and endor-all.ps1
 #                      leave VS Code alone. Read the endor-vscode.ps1 section of
 #                      README.md first.
@@ -434,7 +436,7 @@ if ($VSCODE_ENABLE_PATCH -eq '0' -and $VSCODE_ENABLE_POLICY -eq '0') {
     Write-Warning 'VS Code: no method enabled, so endor-vscode.ps1 and endor-all.ps1 leave VS Code alone.'
     Write-Warning 'Set ENDOR_VSCODE_ENABLE_PATCH=true and/or ENDOR_VSCODE_ENABLE_POLICY=true (see README.md).'
 } else {
-    $_policyShown = if ($VSCODE_ENABLE_POLICY -ne '1') { 'off' } elseif ($VSCODE_POLICY_AUTH) { "on (sign-in: $VSCODE_POLICY_AUTH)" } else { 'on' }
+    $_policyShown = if ($VSCODE_ENABLE_POLICY -ne '1') { 'off' } elseif ($VSCODE_POLICY_AUTH) { "on (sign-in: $VSCODE_POLICY_AUTH)" } else { "on (sign-in: VS Code's default)" }
     Write-Host ("   VS Code: product.json patch {0}, policy {1}." -f $(if ($VSCODE_ENABLE_PATCH -eq '1') { 'on' } else { 'off' }), $_policyShown)
     if ($VSCODE_ENABLE_POLICY -eq '1') {
         Write-Host '   With the policy, VS Code turns the Extensions Marketplace off for anyone not signed in'

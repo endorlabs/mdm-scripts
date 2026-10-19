@@ -381,9 +381,15 @@ try {
         if (-not (Test-GenerateRejected -Policy $value)) { throw "expected ENDOR_VSCODE_ENABLE_POLICY='$value' to be rejected" }
     }
 
-    Write-Host 'test: ENDOR_VSCODE_POLICY_AUTH is github or microsoft, and only with the policy'
+    Write-Host 'test: ENDOR_VSCODE_POLICY_AUTH is optional, github or microsoft, and only with the policy'
     Invoke-Generate -Policy '1' -Auth 'Microsoft'
     if ((Get-Content -Raw $generated) -notmatch "(?m)^\`$_vscodePolicyAuth = 'microsoft'\r?$") { throw 'AUTH=Microsoft was not normalised' }
+    Invoke-Generate -Policy '1'
+    if ((Get-Content -Raw $generated) -notmatch "(?m)^\`$_vscodePolicyAuth = ''\r?$") { throw 'an unset AUTH was given a value' }
+    $summary = & $Generator *>&1 | Out-String -Width 4096
+    if (-not $summary.Contains("policy on (sign-in: VS Code's default).")) {
+        throw "expected the summary to say an unset ENDOR_VSCODE_POLICY_AUTH leaves VS Code's default`n$summary"
+    }
     if (-not (Test-GenerateRejected -Policy '1' -Auth 'okta')) { throw 'expected ENDOR_VSCODE_POLICY_AUTH=okta to be rejected' }
     if (-not (Test-GenerateRejected -Auth 'github')) { throw 'expected ENDOR_VSCODE_POLICY_AUTH without the policy to be rejected' }
 

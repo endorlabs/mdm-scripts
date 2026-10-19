@@ -686,16 +686,16 @@ if (-not $_vscodeSkip -and $_vscodeEnablePolicy -eq '1') {
                 $EndorWarned = $true
             }
         } elseif ($_vscodePolicyAuth -and $_vscodeVersion -lt [version]'1.137') {
-            Write-Warning "[endor] VS Code $($_vscodeInstall.Version) ($($_vscodeInstall.Path)) ignores ExtensionGalleryAuthProvider and asks for a GitHub account; 1.137 and later read it."
+            Write-Warning "[endor] VS Code $($_vscodeInstall.Version) ($($_vscodeInstall.Path)) ignores ExtensionGalleryAuthProvider; 1.137 and later read it."
             $EndorWarned = $true
         }
     }
-    if ($_vscodePolicyAuth -eq 'microsoft') {
-        Write-Host '[endor] note: under this policy, VS Code turns the Extensions Marketplace off until the user signs in'
-        Write-Host '[endor]   with a Microsoft Entra ID work or school account (see powershell/README.md).'
-    } else {
-        Write-Host '[endor] note: under this policy, VS Code turns the Extensions Marketplace off until the user signs in'
-        Write-Host '[endor]   with a GitHub account that has Copilot Business or Enterprise, or a GitHub Enterprise account (see powershell/README.md).'
+    # Without ENDOR_VSCODE_POLICY_AUTH the script sets no provider, so VS Code's default applies.
+    Write-Host '[endor] note: under this policy, VS Code turns the Extensions Marketplace off until the user signs in'
+    switch ($_vscodePolicyAuth) {
+        'microsoft' { Write-Host '[endor]   with a Microsoft Entra ID work or school account (see powershell/README.md).' }
+        'github' { Write-Host '[endor]   with a GitHub account that has Copilot Business or Enterprise, or a GitHub Enterprise account (see powershell/README.md).' }
+        default { Write-Host "[endor]   with an account that VS Code's default sign-in provider accepts (see powershell/README.md)." }
     }
 } elseif (-not $_vscodeSkip -and -not $_vscodeLegacy -and $_vscodeOnWindows) {
     # As with the patch: a policy left by an earlier deployment stays until the admin decides.

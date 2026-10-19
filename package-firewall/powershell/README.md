@@ -98,7 +98,7 @@ Everything else makes `generate.ps1` exit non-zero rather than emit registry URL
 
 `ENDOR_NAMESPACE` is checked separately, against a different rule: letters, digits, dots, hyphens and underscores — underscore is allowed here, and there is no scheme or port. Empty, `.` and `..` are rejected outright, because they would collapse the `out/<namespace>/` path. Names that merely look unusual, such as `.hidden` or `-rf`, are accepted: they stay inside `out/` and contain no character that could alter the generated scripts. Windows adds one wrinkle: Win32 path canonicalization strips trailing dots from the final path segment, so a name ending in a dot loses it — `my-team.` writes to `out/my-team`, and an all-dots name such as `...` collapses entirely, writing the scripts straight into `out/` rather than `out/.../`.
 
-`ENDOR_VSCODE_ENABLE_PATCH` and `ENDOR_VSCODE_ENABLE_POLICY` choose how `endor-vscode.ps1` and `endor-all.ps1` configure VS Code: patch `product.json`, set VS Code's `ExtensionGalleryServiceUrl` policy, or both. Both are off by default, so without them the scripts leave VS Code alone. Each takes `true`, `false`, `1` or `0`, in any case; any other value makes `generate.ps1` exit non-zero. `ENDOR_VSCODE_POLICY_AUTH` (`github` or `microsoft`) is allowed only with the policy. Read [the comparison](../README.md#vs-code) and [`endor-vscode.ps1`](#endor-vscodeps1) before enabling either. **The policy turns the Extensions Marketplace off for anyone who isn't signed in with an eligible account.**
+`ENDOR_VSCODE_ENABLE_PATCH` and `ENDOR_VSCODE_ENABLE_POLICY` choose how `endor-vscode.ps1` and `endor-all.ps1` configure VS Code: patch `product.json`, set VS Code's `ExtensionGalleryServiceUrl` policy, or both. Both are off by default, so without them the scripts leave VS Code alone. Each takes `true`, `false`, `1` or `0`, in any case; any other value makes `generate.ps1` exit non-zero. `ENDOR_VSCODE_POLICY_AUTH` (`github` or `microsoft`) is optional and allowed only with the policy. It has no default: unset, the script sets no sign-in provider (and removes one it set before), so VS Code uses its own default. Read [the comparison](../README.md#vs-code) and [`endor-vscode.ps1`](#endor-vscodeps1) before enabling either. **The policy turns the Extensions Marketplace off for anyone who isn't signed in with an eligible account.**
 
 ```powershell
 $env:ENDOR_VSCODE_ENABLE_PATCH  = 'true'       # patch product.json, with a SYSTEM scheduled task
@@ -316,11 +316,13 @@ locations are excluded.
 
 > [!IMPORTANT]
 > Once the policy is set, VS Code turns the Extensions Marketplace off until the
-> user signs in with an eligible account: by default a GitHub account with a
-> Copilot Business or Enterprise seat, or a GitHub Enterprise account; with
-> `ENDOR_VSCODE_POLICY_AUTH=microsoft`, a Microsoft Entra ID work or school
-> account. It doesn't fall back to `product.json`. See [the
-> comparison](../README.md#vs-code).
+> user signs in with an eligible account. With VS Code's default sign-in
+> provider (GitHub, as of VS Code 1.142), which applies when
+> `ENDOR_VSCODE_POLICY_AUTH` is unset, or with `ENDOR_VSCODE_POLICY_AUTH=github`,
+> that is a GitHub account with a Copilot Business or Enterprise seat, or a
+> GitHub Enterprise account. With `ENDOR_VSCODE_POLICY_AUTH=microsoft`, it is a
+> Microsoft Entra ID work or school account. It doesn't fall back to
+> `product.json`. See [the comparison](../README.md#vs-code).
 
 The script writes `ExtensionGalleryServiceUrl`, and `ExtensionGalleryAuthProvider`
 when `ENDOR_VSCODE_POLICY_AUTH` is set, as `REG_SZ` values in

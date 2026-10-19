@@ -332,11 +332,17 @@ for value in yes on 2 " true"; do
   fi
 done
 
-echo "test: ENDOR_VSCODE_POLICY_AUTH is github or microsoft, and only with the policy"
+echo "test: ENDOR_VSCODE_POLICY_AUTH is optional, github or microsoft, and only with the policy"
 POLICY=1 ENDOR_VSCODE_POLICY_AUTH=Microsoft generate
 grep -qxF "_VSCODE_POLICY_AUTH='microsoft'" "$OUT/endor-vscode.sh"
 POLICY=1 generate
 grep -qxF "_VSCODE_POLICY_AUTH=''" "$OUT/endor-vscode.sh"
+summary=$(ENDOR_NAMESPACE="$NAMESPACE" ENDOR_API_KEY_ID="$KEY_ID" ENDOR_API_SECRET="$SECRET" \
+  ENDOR_VSCODE_ENABLE_PATCH=0 ENDOR_VSCODE_ENABLE_POLICY=1 bash "$GENERATOR" 2>&1)
+if ! grep -qF "policy on (sign-in: VS Code's default)." <<<"$summary"; then
+  echo "expected the summary to say an unset ENDOR_VSCODE_POLICY_AUTH leaves VS Code's default" >&2
+  exit 1
+fi
 if POLICY=1 ENDOR_VSCODE_POLICY_AUTH=okta generate 2>/dev/null; then
   echo "expected ENDOR_VSCODE_POLICY_AUTH=okta to be rejected" >&2
   exit 1

@@ -85,7 +85,7 @@ case.
 |---|---|
 | `ENDOR_VSCODE_ENABLE_PATCH=true` | **Patch**: set `extensionsGallery.serviceUrl` in VS Code's `product.json` to the authenticated `/firewall/vscode/_ak/<token>` URL, remove `extensionUrlTemplate`, and keep it that way across VS Code updates |
 | `ENDOR_VSCODE_ENABLE_POLICY=true` | **Policy**: set VS Code's `ExtensionGalleryServiceUrl` enterprise policy to the same URL |
-| `ENDOR_VSCODE_POLICY_AUTH=github` or `microsoft` | Optional, with the policy only: the account VS Code asks users to sign in with. VS Code's default is `github` |
+| `ENDOR_VSCODE_POLICY_AUTH=github` or `microsoft` | Optional, with the policy only: set `ExtensionGalleryAuthProvider`, the account VS Code asks users to sign in with. It has no default: unset, the scripts set no provider (and remove one they set before), so VS Code uses its own default, which is `github` as of VS Code 1.142 |
 
 `ENDOR_VSCODE_MACOS_DAEMON`, from earlier versions of the bash generator, still
 works as a deprecated name for `ENDOR_VSCODE_ENABLE_PATCH`. So
@@ -98,7 +98,8 @@ patch off everywhere; `generate.sh` warns about it.
 > Code shows extensions only after the user signs in, and it doesn't fall back to
 > `product.json`. Eligible accounts:
 >
-> - with the default GitHub sign-in: a GitHub account with a Copilot Business or
+> - with VS Code's default sign-in (GitHub, as of VS Code 1.142) or
+>   `ENDOR_VSCODE_POLICY_AUTH=github`: a GitHub account with a Copilot Business or
 >   Enterprise seat (trials count), or a GitHub Enterprise account (GHE.com, or an
 >   Enterprise Managed User);
 > - with `ENDOR_VSCODE_POLICY_AUTH=microsoft` (VS Code 1.137 or later): any

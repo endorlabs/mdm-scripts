@@ -36,7 +36,9 @@
 #                      with an eligible account.
 #   ENDOR_VSCODE_POLICY_AUTH
 #                      Optional, with the policy only. github or microsoft:
-#                      the account VS Code asks for (its default is github).
+#                      the account VS Code asks users to sign in with. Unset
+#                      by default: the scripts then set no provider, and VS
+#                      Code uses its own default.
 #   ENDOR_VSCODE_MACOS_DAEMON
 #                      Deprecated alias for ENDOR_VSCODE_ENABLE_PATCH.
 #                      With neither VS Code flag, endor-vscode.sh and endor-all.sh
@@ -572,9 +574,14 @@ if [[ "$VSCODE_ENABLE_PATCH" == "0" && "$VSCODE_ENABLE_POLICY" == "0" ]]; then
   echo "WARNING: VS Code: no method enabled, so endor-vscode.sh and endor-all.sh leave VS Code alone." >&2
   echo "         Set ENDOR_VSCODE_ENABLE_PATCH=true and/or ENDOR_VSCODE_ENABLE_POLICY=true (see README.md)." >&2
 else
+  vscode_policy_shown=off
+  if [[ "$VSCODE_ENABLE_POLICY" == "1" && -n "$VSCODE_POLICY_AUTH" ]]; then
+    vscode_policy_shown="on (sign-in: $VSCODE_POLICY_AUTH)"
+  elif [[ "$VSCODE_ENABLE_POLICY" == "1" ]]; then
+    vscode_policy_shown="on (sign-in: VS Code's default)"
+  fi
   printf "   VS Code: product.json patch %s, policy %s.\n" \
-    "$([[ "$VSCODE_ENABLE_PATCH" == "1" ]] && echo on || echo off)" \
-    "$([[ "$VSCODE_ENABLE_POLICY" == "1" ]] && echo "on${VSCODE_POLICY_AUTH:+ (sign-in: $VSCODE_POLICY_AUTH)}" || echo off)"
+    "$([[ "$VSCODE_ENABLE_PATCH" == "1" ]] && echo on || echo off)" "$vscode_policy_shown"
   if [[ "$VSCODE_ENABLE_POLICY" == "1" ]]; then
     echo "   With the policy, VS Code turns the Extensions Marketplace off for anyone not signed in"
     echo "   with an eligible account. See README.md before deploying."

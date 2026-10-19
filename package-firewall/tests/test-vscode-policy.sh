@@ -116,7 +116,8 @@ expect_rc 0
 [[ "$(file_mode "$POLICY_FILE")" == "644" ]] || fail "policy.json is not mode 644"
 [[ "$(file_mode "$POLICY_STATE/record.json")" == "600" ]] || fail "the record is not mode 600"
 if grep -qF "/_ak/" "$POLICY_STATE/record.json"; then fail "the record contains the URL"; fi
-expect_output "Copilot Business or Enterprise"
+expect_output "with an account that VS Code's default sign-in provider accepts"
+if grep -qF "Copilot" <<<"$OUTPUT"; then fail "without AUTH, the sign-in note names a provider"; fi
 cmp -s "$CASE/app/product.json" "$FIXTURE" || fail "the policy alone changed product.json"
 [[ ! -e "$CASE/state" ]] || fail "the policy alone installed the patch"
 before=$(digest "$POLICY_FILE")
@@ -189,6 +190,7 @@ AUTH=github generate
 install
 expect_rc 0
 [[ "$(policy_value ExtensionGalleryAuthProvider)" == "github" ]] || fail "AUTH was not changed to github"
+expect_output "Copilot Business or Enterprise"
 generate
 install
 expect_rc 0

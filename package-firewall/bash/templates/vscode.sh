@@ -2354,16 +2354,16 @@ if [[ "$_VSCODE_ENABLE_POLICY" == "1" && -n "$_vscode_policy_kind" ]]; then
         _vscode_warn "VS Code $_vscode_version doesn't read $_VSCODE_POLICY_FILE; 1.106 and later do."
       fi
     elif [[ -n "$_VSCODE_POLICY_AUTH" ]] && _vscode_older "$_vscode_version" 1.137; then
-      _vscode_warn "VS Code $_vscode_version ignores ExtensionGalleryAuthProvider and asks for a GitHub account; 1.137 and later read it."
+      _vscode_warn "VS Code $_vscode_version ignores ExtensionGalleryAuthProvider; 1.137 and later read it."
     fi
   fi
-  if [[ "$_VSCODE_POLICY_AUTH" == "microsoft" ]]; then
-    echo "[endor] note: under this policy, VS Code turns the Extensions Marketplace off until the user signs in"
-    echo "[endor]   with a Microsoft Entra ID work or school account (see bash/README.md)."
-  else
-    echo "[endor] note: under this policy, VS Code turns the Extensions Marketplace off until the user signs in"
-    echo "[endor]   with a GitHub account that has Copilot Business or Enterprise, or a GitHub Enterprise account (see bash/README.md)."
-  fi
+  # Without ENDOR_VSCODE_POLICY_AUTH the script sets no provider, so VS Code's default applies.
+  echo "[endor] note: under this policy, VS Code turns the Extensions Marketplace off until the user signs in"
+  case "$_VSCODE_POLICY_AUTH" in
+    microsoft) echo "[endor]   with a Microsoft Entra ID work or school account (see bash/README.md)." ;;
+    github) echo "[endor]   with a GitHub account that has Copilot Business or Enterprise, or a GitHub Enterprise account (see bash/README.md)." ;;
+    *) echo "[endor]   with an account that VS Code's default sign-in provider accepts (see bash/README.md)." ;;
+  esac
 elif [[ "$_vscode_legacy" == "0" && "$_vscode_policy_kind" == "file" && -f "$_VSCODE_POLICY_FILE" ]] \
     && grep -q '/firewall/vscode/_ak/' "$_VSCODE_POLICY_FILE"; then
   # As with the patch: a policy left by an earlier deployment stays until the admin decides.
