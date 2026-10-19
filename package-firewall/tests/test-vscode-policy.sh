@@ -442,10 +442,20 @@ PY
   managed_prefs "$CASE/managed/com.microsoft.VSCode.plist" "$EXPECTED_URL"
   install_mac
   expect_rc 1
-  expect_output "sets ExtensionGalleryAuthProvider to 'github, the default', not 'microsoft'"
+  expect_output "doesn't set ExtensionGalleryAuthProvider, so VS Code uses its default sign-in provider, not 'microsoft'"
+  managed_prefs "$CASE/managed/com.microsoft.VSCode.plist" "$EXPECTED_URL" github
+  install_mac
+  expect_rc 1
+  expect_output "sets ExtensionGalleryAuthProvider to 'github', not 'microsoft'"
   managed_prefs "$CASE/managed/com.microsoft.VSCode.plist" "$EXPECTED_URL" microsoft
   install_mac
   expect_rc 0
+  # Without AUTH, the script has no opinion on the provider.
+  PATCH=1 generate
+  managed_prefs "$CASE/managed/com.microsoft.VSCode.plist" "$EXPECTED_URL" github
+  install_mac
+  expect_rc 0
+  expect_output "with an account that VS Code's default sign-in provider accepts"
 
   echo "test: macOS: a VS Code too old for the policy is reported"
   PATCH=1 generate
