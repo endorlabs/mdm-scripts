@@ -433,10 +433,17 @@ What users and admins notice:
   before deploying.
 - **Open sessions** keep running and use the firewall from their next start.
 
-For defense in depth, block `marketplace.visualstudio.com/_apis`,
-`*.gallery.vsassets.io` and `www.vscode-unpkg.net` at your web gateway, so a
-session that is not using the firewall fails closed. This matters with the
-policy alone too: `code --install-extension` ignores the policy.
+For defense in depth, block `marketplace.visualstudio.com/_apis` and
+`www.vscode-unpkg.net` at your web gateway, so a session that is not using the
+firewall can't find or update extensions. This matters with the policy alone
+too: `code --install-extension` ignores the policy.
+
+Don't block `*.gallery.vsassets.io` or `*.gallerycdn.vsassets.io`. The firewall
+checks each extension download, then redirects VS Code to those hosts for the
+file, and VS Code reads each extension's manifest and signature from
+`*.gallerycdn.vsassets.io` directly. Blocking either breaks installs and updates
+through the firewall. Because these hosts stay reachable, a `.vsix` downloaded
+by hand can still be installed.
 
 Troubleshooting, as root:
 

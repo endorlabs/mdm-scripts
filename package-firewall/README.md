@@ -125,9 +125,12 @@ Both at once isn't a fallback: the editor follows the policy, and the command
 line follows `product.json`. For users without an eligible account, adding the
 policy turns off a Marketplace that the patch alone would have left working.
 
-Whichever you choose, also block `marketplace.visualstudio.com/_apis`,
-`*.gallery.vsassets.io` and `www.vscode-unpkg.net` at your web gateway, so a
-session that isn't using the firewall fails closed.
+Whichever you choose, also block `marketplace.visualstudio.com/_apis` and
+`www.vscode-unpkg.net` at your web gateway, so a session that isn't using the
+firewall can't find or update extensions. Don't block `*.gallery.vsassets.io`
+or `*.gallerycdn.vsassets.io`: the firewall checks each extension download and
+then redirects VS Code to those hosts for the file, so blocking them breaks
+installs and updates through the firewall too.
 
 ### Switching methods, and turning one off
 
