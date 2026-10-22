@@ -227,6 +227,13 @@ jobs:
             grep -qxF "$line" "$policy_script"
           done
           grep -qxF '# >>> endor-vscode-remove' package-firewall/bash/out/ci-smoke-policy/endor-remove.sh
+          # The macOS profile and property list: well-formed, readable as plists, owner-only.
+          for f in package-firewall/bash/out/ci-smoke-policy/endor-vscode.mobileconfig \
+              package-firewall/bash/out/ci-smoke-policy/endor-vscode-policy.plist; do
+            python3 -I -c 'import plistlib, sys; plistlib.load(open(sys.argv[1], "rb"))' "$f"
+            test "$(stat -c %a "$f")" = 600
+            if grep -qF '{{' "$f"; then echo "placeholder left in $f"; exit 1; fi
+          done
           for f in package-firewall/bash/out/ci-smoke-policy/*.sh; do
             bash -n "$f"
           done
