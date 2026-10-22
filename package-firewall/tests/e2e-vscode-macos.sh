@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# macOS only. End-to-end test of the VS Code firewall daemon (ENDOR_VSCODE_MACOS_DAEMON=1) with
+# macOS only. End-to-end test of the VS Code firewall daemon (ENDOR_VSCODE_ENABLE_PATCH=1) with
 # Microsoft's real VS Code and VS Code's own updater:
 #   1. deploy endor-vscode.sh over a running Microsoft copy (OLD), then relaunch the re-signed app;
 #   2. check that the daemon stays quiet while nothing it watches changes;
@@ -220,7 +220,7 @@ generate() {
   ENDOR_NAMESPACE="$NAMESPACE" \
     ENDOR_API_KEY_ID="ci-e2e-key-id" \
     ENDOR_API_SECRET="ci-e2e-secret" \
-    ENDOR_VSCODE_MACOS_DAEMON=1 \
+    ENDOR_VSCODE_ENABLE_PATCH=1 \
     bash "$GENERATOR" >/dev/null
 }
 

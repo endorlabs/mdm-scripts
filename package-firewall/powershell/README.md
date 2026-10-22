@@ -19,7 +19,7 @@ powershell/
 │   ├── go.ps1               ← orchestration: go env file write
 │   ├── maven.ps1            ← orchestration: .m2\settings.xml write (XML-aware)
 │   ├── nuget.ps1            ← orchestration: %APPDATA%\NuGet\NuGet.Config write (section-aware XML)
-│   ├── vscode.ps1           ← VS Code product.json patch + scheduled remediation
+│   ├── vscode.ps1           ← VS Code: product.json patch + scheduled remediation, HKLM policy
 │   └── remove.ps1           ← orchestration: sentinel block + registry env var removal
 └── out/                     ← generated scripts (gitignore this)
     └── <namespace>/
@@ -97,6 +97,14 @@ The value must be lowercase `https://` followed by a host of letters, digits, do
 Everything else makes `generate.ps1` exit non-zero rather than emit registry URLs that fail on the developer machine or inject the value into the generated scripts: a path, query string, fragment, userinfo, whitespace, a shell metacharacter or any other character outside that set; a missing or uppercased scheme; and `http://`. Plaintext `http://` is rejected rather than downgraded — both hosted base URLs are https, and the generated configuration sends Basic Auth credentials on every request.
 
 `ENDOR_NAMESPACE` is checked separately, against a different rule: letters, digits, dots, hyphens and underscores — underscore is allowed here, and there is no scheme or port. Empty, `.` and `..` are rejected outright, because they would collapse the `out/<namespace>/` path. Names that merely look unusual, such as `.hidden` or `-rf`, are accepted: they stay inside `out/` and contain no character that could alter the generated scripts. Windows adds one wrinkle: Win32 path canonicalization strips trailing dots from the final path segment, so a name ending in a dot loses it — `my-team.` writes to `out/my-team`, and an all-dots name such as `...` collapses entirely, writing the scripts straight into `out/` rather than `out/.../`.
+
+`ENDOR_VSCODE_ENABLE_PATCH` and `ENDOR_VSCODE_ENABLE_POLICY` choose how `endor-vscode.ps1` and `endor-all.ps1` configure VS Code: patch `product.json`, set VS Code's `ExtensionGalleryServiceUrl` policy, or both. Both are off by default, so without them the scripts leave VS Code alone. Each takes `true`, `false`, `1` or `0`, in any case; any other value makes `generate.ps1` exit non-zero. `ENDOR_VSCODE_POLICY_AUTH` (`github` or `microsoft`) is optional and allowed only with the policy. It has no default: unset, the script sets no sign-in provider (and removes one it set before), so VS Code uses its own default. Read [the comparison](../README.md#vs-code) and [`endor-vscode.ps1`](#endor-vscodeps1) before enabling either. **The policy turns the Extensions Marketplace off for anyone who isn't signed in with an eligible account.**
+
+```powershell
+$env:ENDOR_VSCODE_ENABLE_PATCH  = 'true'       # patch product.json, with a SYSTEM scheduled task
+$env:ENDOR_VSCODE_ENABLE_POLICY = 'true'       # set the ExtensionGalleryServiceUrl policy in HKLM
+$env:ENDOR_VSCODE_POLICY_AUTH   = 'microsoft'  # optional, with the policy: sign in with Entra ID
+```
 
 Re-running `generate.ps1` overwrites the same `out/<namespace>/` directory.
 
@@ -240,6 +248,21 @@ Windows-specific notes:
 
 ### `endor-vscode.ps1`
 
+Routes Microsoft VS Code Stable's extension gallery through the firewall, by the
+methods `endor-vscode.ps1` was generated with (see [the comparison](../README.md#vs-code)):
+
+- **The patch** (`ENDOR_VSCODE_ENABLE_PATCH=true`): edits `product.json`, and
+  keeps it edited across VS Code updates.
+- **The policy** (`ENDOR_VSCODE_ENABLE_POLICY=true`): sets VS Code's
+  `ExtensionGalleryServiceUrl` policy.
+
+With neither, the script prints a skip line and changes nothing. Either method
+needs SYSTEM or an elevated administrator; otherwise the script warns and skips
+VS Code. In Intune, set **Run script in 64-bit PowerShell host** to **Yes** if
+you can; the script also works from the default 32-bit host.
+
+#### The patch
+
 Patches Microsoft VS Code Stable's installation-level `product.json`. It sets
 `extensionsGallery.serviceUrl` to:
 
@@ -288,6 +311,58 @@ Run through Intune as SYSTEM. Restart VS Code after initial deployment if it is
 open. Supported scope is Microsoft VS Code Stable native installs only;
 Insiders, VSCodium/Code OSS, Store/packaged variants, and arbitrary portable
 locations are excluded.
+
+#### The policy
+
+> [!IMPORTANT]
+> Once the policy is set, VS Code turns the Extensions Marketplace off until the
+> user signs in with an eligible account. With VS Code's default sign-in
+> provider (GitHub, as of VS Code 1.142), which applies when
+> `ENDOR_VSCODE_POLICY_AUTH` is unset, or with `ENDOR_VSCODE_POLICY_AUTH=github`,
+> that is a GitHub account with a Copilot Business or Enterprise seat, or a
+> GitHub Enterprise account. With `ENDOR_VSCODE_POLICY_AUTH=microsoft`, it is a
+> Microsoft Entra ID work or school account. It doesn't fall back to
+> `product.json`. See [the comparison](../README.md#vs-code).
+
+The script writes `ExtensionGalleryServiceUrl`, and `ExtensionGalleryAuthProvider`
+when `ENDOR_VSCODE_POLICY_AUTH` is set, as `REG_SZ` values in
+`HKLM\SOFTWARE\Policies\Microsoft\VSCode`. That is where the `VSCode.admx` that
+ships with VS Code defines them. It writes the 64-bit registry view, whichever
+PowerShell runs it. Other values under the key are kept. A URL that isn't Endor's,
+or a sign-in provider the script didn't set, is left alone with a warning and
+exit 1. A record in `%ProgramData%\Endor Labs\vscode-policy` (SYSTEM and
+Administrators only) says whether the script created the key and which provider
+it wrote, so removal takes only what Endor set. The record never holds the URL.
+
+If you already manage VS Code with Group Policy, an ADMX-based Intune profile or
+the Intune Settings Catalog, set the URL there instead: whichever writes last
+wins, and Group Policy writes again at every refresh.
+
+The script warns when an installed VS Code is too old for the policy: older than
+1.99, or than 1.137 with `ENDOR_VSCODE_POLICY_AUTH`. With the patch enabled too,
+an old VS Code is only a note for the first, because the patch covers it until
+it's updated.
+
+For defense in depth, block `marketplace.visualstudio.com/_apis` and
+`www.vscode-unpkg.net` at your web gateway, so a session that isn't using the
+firewall can't find or update extensions. This matters with the policy alone:
+`code --install-extension` ignores the policy.
+
+Don't block `*.gallery.vsassets.io` or `*.gallerycdn.vsassets.io`. The firewall
+checks each extension download, then redirects VS Code to those hosts for the
+file, and VS Code reads each extension's manifest and signature from
+`*.gallerycdn.vsassets.io` directly. Blocking either breaks installs and updates
+through the firewall. Because these hosts stay reachable, a `.vsix` downloaded
+by hand can still be installed.
+
+#### A method left by an earlier deployment
+
+`endor-vscode.ps1` never removes a method it wasn't generated with: that would
+turn the firewall off. If the patch (the scheduled task, the worker, or an Endor
+URL in a `product.json`) or the policy (an Endor URL in the registry) is still in
+place from an earlier deployment, the script leaves it, warns and exits 1. To
+clear the warning, regenerate with that method's variable to keep it, or run
+`endor-remove.ps1` to remove it.
 
 ---
 
@@ -366,6 +441,7 @@ Deploy `endor-remove.ps1` to strip all Endor configuration from a machine. It:
 - Removes the sentinel block from `.npmrc`, `.yarnrc.yml`, `pip.ini`, `uv.toml`, the go env file, `.m2\settings.xml`, and `NuGet.Config`
 - Deletes all `ENDOR_*` and `POETRY_HTTP_BASIC_ENDOR_FIREWALL_*` keys from `HKCU:\Environment`
 - Stops and removes the VS Code scheduled task, then restores the stable defaults for the two managed gallery properties
+- Removes Endor's values from `HKLM\SOFTWARE\Policies\Microsoft\VSCode`, and the key if `endor-vscode.ps1` created it and nothing else is in it. If the machine has no record of setting the URL, it warns: Group Policy or Intune may set it again
 - Deletes config files that are empty after block removal
 
 ```powershell
@@ -386,5 +462,7 @@ Deploy `endor-remove.ps1` to strip all Endor configuration from a machine. It:
 | `NuGet.Config` | Contains `%ENDOR_*%` references only — no credentials baked in. ACL-restricted to owner. |
 | VS Code `product.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users because VS Code must consume it. |
 | `%ProgramData%\Endor Labs\vscode-firewall` | ACL-restricted to SYSTEM and Administrators; contains the remediation worker. |
+| `HKLM\SOFTWARE\Policies\Microsoft\VSCode` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users, like every policy key. |
+| `%ProgramData%\Endor Labs\vscode-policy` | ACL-restricted to SYSTEM and Administrators. Records whether the script created the policy key and which sign-in provider it wrote; never the URL. |
 | API secret in MDM | Generated scripts contain the API key and secret in plaintext (used to write registry env vars). Restrict access to the Intune policy and the generated `out/` directory. |
 | `out/` directory | Add to `.gitignore`. Do not commit generated scripts to source control. |

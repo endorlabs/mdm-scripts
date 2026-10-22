@@ -18,7 +18,7 @@ bash/
 │   ├── go.sh                ← orchestration: go env file write
 │   ├── maven.sh             ← orchestration: ~/.m2/settings.xml write (XML-aware)
 │   ├── nuget.sh             ← orchestration: ~/.nuget/NuGet/NuGet.Config write (section-aware XML)
-│   ├── vscode.sh            ← VS Code product.json patch + launchd/systemd remediation
+│   ├── vscode.sh            ← VS Code: product.json patch + launchd/systemd remediation, policy.json
 │   └── remove.sh            ← orchestration: sentinel block removal
 └── out/                     ← generated scripts (gitignore this)
     └── <namespace>/
@@ -93,7 +93,13 @@ Everything else makes `generate.sh` exit non-zero rather than emit registry URLs
 
 `ENDOR_NAMESPACE` is checked separately, against a different rule: letters, digits, dots, hyphens and underscores — underscore is allowed here, and there is no scheme or port. Empty, `.` and `..` are rejected outright, because they would collapse the `out/<namespace>/` path. Names that merely look unusual, such as `.hidden`, `...` or `-rf`, are accepted: they stay inside `out/` and contain no character that could alter the generated scripts.
 
-`ENDOR_VSCODE_MACOS_DAEMON` is optional: `0` (the default) or `1`. On macOS, `endor-vscode.sh` and `endor-all.sh` configure VS Code only when it is `1`. Read [`endor-vscode.sh`](#endor-vscodesh) before turning it on. It has no effect on Linux, and any other value makes `generate.sh` exit non-zero.
+`ENDOR_VSCODE_ENABLE_PATCH` and `ENDOR_VSCODE_ENABLE_POLICY` choose how `endor-vscode.sh` and `endor-all.sh` configure VS Code: patch `product.json`, set VS Code's `ExtensionGalleryServiceUrl` policy, or both. Both are off by default, so without them the scripts leave VS Code alone. Each takes `true`, `false`, `1` or `0`, in any case; any other value makes `generate.sh` exit non-zero. `ENDOR_VSCODE_POLICY_AUTH` (`github` or `microsoft`) is optional and allowed only with the policy. It has no default: unset, the script sets no sign-in provider (and removes one it set before), so VS Code uses its own default. `ENDOR_VSCODE_MACOS_DAEMON` is a deprecated name for `ENDOR_VSCODE_ENABLE_PATCH`: `generate.sh` warns, and stops if the two disagree. So `ENDOR_VSCODE_MACOS_DAEMON=0`, which used to leave Linux patched, now turns the patch off on Linux too. Read [the comparison](../README.md#vs-code) and [`endor-vscode.sh`](#endor-vscodesh) before enabling either. **The policy turns the Extensions Marketplace off for anyone who isn't signed in with an eligible account.**
+
+```bash
+ENDOR_VSCODE_ENABLE_PATCH=true      # patch product.json (on macOS, the re-signing daemon)
+ENDOR_VSCODE_ENABLE_POLICY=true     # set the ExtensionGalleryServiceUrl policy
+ENDOR_VSCODE_POLICY_AUTH=microsoft  # optional, with the policy: sign in with Entra ID
+```
 
 Re-running `generate.sh` overwrites the same `out/<namespace>/` directory — no accumulation of stale directories.
 
@@ -273,6 +279,35 @@ Key behaviour:
 
 ### `endor-vscode.sh`
 
+Routes Microsoft VS Code Stable's extension gallery through the firewall, by the
+methods `endor-vscode.sh` was generated with (see [the comparison](../README.md#vs-code)):
+
+- **The patch** (`ENDOR_VSCODE_ENABLE_PATCH=true`): edits `product.json`, and
+  keeps it edited across VS Code updates.
+- **The policy** (`ENDOR_VSCODE_ENABLE_POLICY=true`): sets VS Code's
+  `ExtensionGalleryServiceUrl` policy.
+
+With neither, the script prints a skip line and changes nothing. Both use the same
+URL:
+
+```
+https://factory.endorlabs.com/v1/namespaces/my-team/firewall/vscode/_ak/<base64url-token>
+```
+
+The token is the unpadded Base64 URL encoding of
+`ENDOR_API_KEY_ID:ENDOR_API_SECRET`.
+
+Run as root. Restart VS Code after initial deployment if it is open.
+
+Supported scope: Microsoft VS Code Stable at
+`/Applications/Visual Studio Code.app`, or at
+`/usr/share/code/resources/app/product.json`, where Microsoft's `.deb` and
+`.rpm` packages install it. Insiders, VSCodium, Code OSS (including Arch's
+`code` package), Snap, Flatpak, and arbitrary portable/tarball installs are
+excluded.
+
+#### The patch
+
 Patches Microsoft VS Code Stable's installation-level `product.json`:
 
 ```json
@@ -283,19 +318,17 @@ Patches Microsoft VS Code Stable's installation-level `product.json`:
 }
 ```
 
-The token is the unpadded Base64 URL encoding of
-`ENDOR_API_KEY_ID:ENDOR_API_SECRET`. The patch preserves every unrelated field
-and removes `extensionsGallery.extensionUrlTemplate` entirely, which disables
-VS Code's direct upstream fallback.
+The patch preserves every unrelated field and removes
+`extensionsGallery.extensionUrlTemplate` entirely, which disables VS Code's
+direct upstream fallback.
 
 The script applies immediately and installs drift remediation:
 
-- **macOS**, only with `ENDOR_VSCODE_MACOS_DAEMON=1` (see
-  [macOS is opt-in](#macos-is-opt-in)):
-  `/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist` runs a worker
-  when `/Applications/Visual Studio Code.app` or a user's VS Code update cache
-  (`~/Library/Caches/com.microsoft.VSCode.ShipIt`) changes, and every 60
-  seconds. See [macOS code signing](#macos-code-signing).
+- **macOS**: `/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist` runs a
+  worker when `/Applications/Visual Studio Code.app` or a user's VS Code update
+  cache (`~/Library/Caches/com.microsoft.VSCode.ShipIt`) changes, and every 60
+  seconds. It re-signs VS Code: read [macOS code signing](#macos-code-signing)
+  before enabling the patch for Macs.
 - **Linux**: three triggers run the same worker, one at a time (a lock under
   `/var/lib/endor/vscode-firewall`):
   - **dpkg hook** (Debian, Ubuntu): `/etc/dpkg/dpkg.cfg.d/endor-vscode-firewall`
@@ -317,27 +350,48 @@ Re-running is idempotent. Credential rotation and updater remediation modify
 only `serviceUrl` and `extensionUrlTemplate`; every other current
 `product.json` value is preserved.
 
-Run as root. Restart VS Code after initial deployment if it is open.
+#### The policy
 
-Supported scope: Microsoft VS Code Stable at
-`/Applications/Visual Studio Code.app`, or at
-`/usr/share/code/resources/app/product.json`, where Microsoft's `.deb` and
-`.rpm` packages install it. Insiders, VSCodium, Code OSS (including Arch's
-`code` package), Snap, Flatpak, and arbitrary portable/tarball installs are
-excluded.
+> [!IMPORTANT]
+> Once the policy is set, VS Code turns the Extensions Marketplace off until the
+> user signs in with an eligible account. With VS Code's default sign-in
+> provider (GitHub, as of VS Code 1.142), which applies when
+> `ENDOR_VSCODE_POLICY_AUTH` is unset, or with `ENDOR_VSCODE_POLICY_AUTH=github`,
+> that is a GitHub account with a Copilot Business or Enterprise seat, or a
+> GitHub Enterprise account. With `ENDOR_VSCODE_POLICY_AUTH=microsoft`, it is a
+> Microsoft Entra ID work or school account. It doesn't fall back to
+> `product.json`. See [the comparison](../README.md#vs-code).
 
-#### macOS is opt-in
+- **Linux**: the script writes `ExtensionGalleryServiceUrl`, and
+  `ExtensionGalleryAuthProvider` when `ENDOR_VSCODE_POLICY_AUTH` is set, into
+  `/etc/vscode/policy.json`, which VS Code 1.106 and later read. Other keys in
+  the file are kept. The file is mode `0644`, because VS Code runs as the user.
+  The script refuses to change a `policy.json` that is a symbolic link, isn't
+  owned by root, or that others can write to, or that isn't a JSON object (VS
+  Code then ignores every policy in it). It also leaves alone a URL that isn't
+  Endor's, and a sign-in provider it didn't set; it warns and exits 1 in each
+  case. A record in `/var/lib/endor/vscode-policy` (root only) says whether the
+  script created the file and which provider it wrote, so removal takes only
+  what Endor set. The record never holds the URL.
+- **macOS**: VS Code reads the policy from the `com.microsoft.VSCode`
+  preference domain. Deliver it with an MDM configuration profile for that
+  domain, with the key `ExtensionGalleryServiceUrl` (and, optionally,
+  `ExtensionGalleryAuthProvider`). Users can't override a managed preference.
+  `endor-vscode.sh` doesn't install profiles; on a Mac it prints a reminder.
 
-On macOS the script changes VS Code only if it was generated with
-`ENDOR_VSCODE_MACOS_DAEMON=1`. Without that flag, `endor-vscode.sh` and the VS Code
-part of `endor-all.sh` leave VS Code alone and print how to turn it on. If a daemon
-from an earlier version of this script is still installed, the script leaves it
-running, warns and exits non-zero. To clear the warning, regenerate with the flag
-to keep the daemon, or run `endor-remove.sh` to remove it.
+The script warns when the installed VS Code is too old for the policy: older
+than 1.106 on Linux, or than 1.137 with `ENDOR_VSCODE_POLICY_AUTH`. With the
+patch enabled too, an old VS Code is only a note for the first, because the
+patch covers it until it's updated.
 
-Read [macOS code signing](#macos-code-signing) before turning it on. The daemon
-re-signs VS Code, which changes what users see and what EDR or allowlisting
-rules match.
+#### A method left by an earlier deployment
+
+`endor-vscode.sh` never removes a method it wasn't generated with: that would
+turn the firewall off. If the patch (the daemon or systemd units, the worker, or
+an Endor URL in `product.json`) or the policy (an Endor URL in
+`/etc/vscode/policy.json`) is still in place from an earlier deployment, the
+script leaves it, warns and exits 1. To clear the warning, regenerate with that
+method's variable to keep it, or run `endor-remove.sh` to remove it.
 
 #### macOS code signing
 
@@ -379,9 +433,17 @@ What users and admins notice:
   before deploying.
 - **Open sessions** keep running and use the firewall from their next start.
 
-For defense in depth, block `marketplace.visualstudio.com/_apis`,
-`*.gallery.vsassets.io` and `www.vscode-unpkg.net` at your web gateway, so a
-session that is not using the firewall fails closed.
+For defense in depth, block `marketplace.visualstudio.com/_apis` and
+`www.vscode-unpkg.net` at your web gateway, so a session that is not using the
+firewall can't find or update extensions. This matters with the policy alone
+too: `code --install-extension` ignores the policy.
+
+Don't block `*.gallery.vsassets.io` or `*.gallerycdn.vsassets.io`. The firewall
+checks each extension download, then redirects VS Code to those hosts for the
+file, and VS Code reads each extension's manifest and signature from
+`*.gallerycdn.vsassets.io` directly. Blocking either breaks installs and updates
+through the firewall. Because these hosts stay reachable, a `.vsix` downloaded
+by hand can still be installed.
 
 Troubleshooting, as root:
 
@@ -463,7 +525,9 @@ To remove the Endor firewall configuration from a machine, deploy
 `endor-remove.sh`. It removes package-manager sentinel blocks, unloads the VS
 Code launchd daemon or systemd units, timer and dpkg hook, and restores the stable default values for
 `serviceUrl` and `extensionUrlTemplate`. Other `product.json` modifications are
-left intact.
+left intact. On Linux it also removes Endor's keys from `/etc/vscode/policy.json`,
+and the file itself if `endor-vscode.sh` created it and nothing else is in it. On
+macOS, remove the policy's configuration profile in your MDM.
 
 You can deploy a removal script that does this automatically:
 
@@ -499,6 +563,8 @@ remove_block() {
 | `~/.nuget/NuGet/NuGet.Config` | Contains `%ENDOR_*%` references only — no credentials baked in (unless you opt into the `{{ATTR_USER}}` / `{{API_SECRET}}` fill). File is `chmod 600`. |
 | VS Code `product.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users because VS Code must consume it. |
 | VS Code worker state | Root-owned (`0700`) and contains the generated remediation worker. |
+| `/etc/vscode/policy.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users (`0644`) because VS Code must read it. |
+| `/var/lib/endor/vscode-policy` | Root-only (`0700`). Records whether the script created `policy.json` and which sign-in provider it wrote; never the URL. |
 | Shell profiles | Contain a single `source ~/.config/endor/env.sh` line. No credentials. |
 | API secret in MDM | The generated scripts contain the API key and secret in plaintext (used to write `env.sh`). Restrict access to the MDM policy and the generated `out/` directory. |
 | `out/` directory | Add to `.gitignore`. Do not commit generated scripts to source control. |

@@ -15,13 +15,24 @@ DEFAULT_EXTENSION_URL_TEMPLATE="https://www.vscode-unpkg.net/_gallery/{publisher
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+OUT="$ROOT_DIR/package-firewall/bash/out/$NAMESPACE"
+
+# PATCH and POLICY set the two method flags; the patch is on unless PATCH says otherwise.
 generate() {
   local secret="${1:-$SECRET}"
   ENDOR_NAMESPACE="$NAMESPACE" \
     ENDOR_API_KEY_ID="$KEY_ID" \
     ENDOR_API_SECRET="$secret" \
-    ENDOR_VSCODE_MACOS_DAEMON="${MACOS_DAEMON:-1}" \
+    ENDOR_VSCODE_ENABLE_PATCH="${PATCH-1}" \
+    ENDOR_VSCODE_ENABLE_POLICY="${POLICY:-0}" \
     bash "$GENERATOR" >/dev/null
+}
+
+# A leftover Endor deployment on this machine makes a script with a method turned off exit 1.
+host_has_patch() {
+  [[ -e /Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist \
+    || -e /etc/systemd/system/endor-vscode-firewall.path \
+    || -e /etc/dpkg/dpkg.cfg.d/endor-vscode-firewall ]]
 }
 
 run_installer() {
@@ -300,33 +311,145 @@ if run_installer "$product" "$state" >/dev/null 2>&1; then
 fi
 cmp -s "$product" "$TMP_DIR/malformed-original.json"
 
-echo "test: without ENDOR_VSCODE_MACOS_DAEMON=1, macOS leaves VS Code alone"
-MACOS_DAEMON=0 generate
-product="$TMP_DIR/opt-out-product.json"
-state="$TMP_DIR/opt-out-state"
-cp "$FIXTURE" "$product"
-rc=0
-output=$(run_installer "$product" "$state" 2>&1) || rc=$?
-if [[ "$(uname -s)" == "Darwin" ]]; then
-  cmp -s "$product" "$FIXTURE"
-  [[ ! -e "$state" ]]
-  grep -qF 'ENDOR_VSCODE_MACOS_DAEMON=1' <<< "$output"
-  # A daemon left by an earlier deployment is reported as a warning.
-  if [[ -f /Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist ]]; then
-    [[ "$rc" -eq 1 ]]
-  else
-    [[ "$rc" -eq 0 ]]
+echo "test: the VS Code flags take true, false, 1 and 0 in any case, and nothing else"
+for value in true TRUE True 1; do
+  PATCH="$value" generate
+  grep -qxF "_VSCODE_ENABLE_PATCH='1'" "$OUT/endor-vscode.sh"
+done
+for value in false FALSE 0 ""; do
+  PATCH="$value" POLICY=true generate
+  grep -qxF "_VSCODE_ENABLE_PATCH='0'" "$OUT/endor-vscode.sh"
+  grep -qxF "_VSCODE_ENABLE_POLICY='1'" "$OUT/endor-vscode.sh"
+done
+for value in yes on 2 " true"; do
+  if PATCH="$value" generate 2>/dev/null; then
+    echo "expected ENDOR_VSCODE_ENABLE_PATCH='$value' to be rejected" >&2
+    exit 1
   fi
-else
-  [[ "$rc" -eq 0 ]]
-  assert_patched "$product"
+  if POLICY="$value" generate 2>/dev/null; then
+    echo "expected ENDOR_VSCODE_ENABLE_POLICY='$value' to be rejected" >&2
+    exit 1
+  fi
+done
+
+echo "test: ENDOR_VSCODE_POLICY_AUTH is optional, github or microsoft, and only with the policy"
+POLICY=1 ENDOR_VSCODE_POLICY_AUTH=Microsoft generate
+grep -qxF "_VSCODE_POLICY_AUTH='microsoft'" "$OUT/endor-vscode.sh"
+POLICY=1 generate
+grep -qxF "_VSCODE_POLICY_AUTH=''" "$OUT/endor-vscode.sh"
+summary=$(ENDOR_NAMESPACE="$NAMESPACE" ENDOR_API_KEY_ID="$KEY_ID" ENDOR_API_SECRET="$SECRET" \
+  ENDOR_VSCODE_ENABLE_PATCH=0 ENDOR_VSCODE_ENABLE_POLICY=1 bash "$GENERATOR" 2>&1)
+if ! grep -qF "policy on (sign-in: VS Code's default)." <<<"$summary"; then
+  echo "expected the summary to say an unset ENDOR_VSCODE_POLICY_AUTH leaves VS Code's default" >&2
+  exit 1
+fi
+if POLICY=1 ENDOR_VSCODE_POLICY_AUTH=okta generate 2>/dev/null; then
+  echo "expected ENDOR_VSCODE_POLICY_AUTH=okta to be rejected" >&2
+  exit 1
+fi
+if ENDOR_VSCODE_POLICY_AUTH=github generate 2>/dev/null; then
+  echo "expected ENDOR_VSCODE_POLICY_AUTH without the policy to be rejected" >&2
+  exit 1
 fi
 
-echo "test: the generator rejects an invalid ENDOR_VSCODE_MACOS_DAEMON"
-if MACOS_DAEMON=yes generate 2>/dev/null; then
+echo "test: ENDOR_VSCODE_MACOS_DAEMON is a deprecated alias for ENDOR_VSCODE_ENABLE_PATCH"
+output=$(PATCH="" ENDOR_VSCODE_MACOS_DAEMON=1 generate 2>&1)
+grep -q "ENDOR_VSCODE_MACOS_DAEMON is deprecated" <<<"$output"
+grep -qxF "_VSCODE_ENABLE_PATCH='1'" "$OUT/endor-vscode.sh"
+PATCH=true ENDOR_VSCODE_MACOS_DAEMON=1 generate 2>/dev/null
+output=$(PATCH="" ENDOR_VSCODE_MACOS_DAEMON=0 generate 2>&1)
+grep -q "no longer patches Linux either" <<<"$output"
+if PATCH=0 ENDOR_VSCODE_MACOS_DAEMON=1 generate 2>/dev/null; then
+  echo "expected ENDOR_VSCODE_MACOS_DAEMON=1 with ENDOR_VSCODE_ENABLE_PATCH=0 to be rejected" >&2
+  exit 1
+fi
+if PATCH="" ENDOR_VSCODE_MACOS_DAEMON=yes generate 2>/dev/null; then
   echo "expected ENDOR_VSCODE_MACOS_DAEMON=yes to be rejected" >&2
   exit 1
 fi
+
+echo "test: with neither method enabled, VS Code is left alone"
+output=$(PATCH=0 generate 2>&1)
+grep -q "no method enabled" <<<"$output"
+grep -q "VS Code: not enabled" "$OUT/endor-all.sh"
+product="$TMP_DIR/neither-product.json"
+state="$TMP_DIR/neither-state"
+cp "$FIXTURE" "$product"
+rc=0
+output=$(run_installer "$product" "$state" 2>&1) || rc=$?
+cmp -s "$product" "$FIXTURE"
+[[ ! -e "$state" ]]
+grep -q "no VS Code method is enabled" <<<"$output"
+if grep -q "VS Code extension firewall done" <<<"$output"; then
+  echo "a script with no method enabled said VS Code was done" >&2
+  exit 1
+fi
+if host_has_patch; then [[ "$rc" -eq 1 ]]; else [[ "$rc" -eq 0 ]]; fi
+
+echo "test: a patch left by an earlier deployment is reported, and left in place"
+generate
+product="$TMP_DIR/leftover-product.json"
+state="$TMP_DIR/leftover-state"
+cp "$FIXTURE" "$product"
+run_installer "$product" "$state" >/dev/null
+PATCH=0 generate 2>/dev/null
+rc=0
+output=$(run_installer "$product" "$state" 2>&1) || rc=$?
+[[ "$rc" -eq 1 ]]
+grep -q "patch from an earlier deployment is still installed" <<<"$output"
+assert_patched "$product"
+[[ -x "$state/worker.sh" ]]
+# The patched product.json alone is enough to report it.
+rm -rf "$state"
+rc=0
+output=$(run_installer "$product" "$state" 2>&1) || rc=$?
+[[ "$rc" -eq 1 ]]
+grep -qF "still installed ($product)" <<<"$output"
+
+# The docs-site generator fetches these templates and fills in only the placeholders it knows.
+# A script with the method placeholders left in place must behave as scripts did before them.
+echo "test: a script from a generator that predates the method flags behaves as before"
+PATCH=1 POLICY=1 generate
+legacy="$TMP_DIR/legacy-vscode.sh"
+for daemon in "{{VSCODE_MACOS_DAEMON}}" 1; do
+  sed -e "s/^_VSCODE_ENABLE_PATCH='1'\$/_VSCODE_ENABLE_PATCH='{{VSCODE_ENABLE_PATCH}}'/" \
+    -e "s/^_VSCODE_ENABLE_POLICY='1'\$/_VSCODE_ENABLE_POLICY='{{VSCODE_ENABLE_POLICY}}'/" \
+    -e "s/^_VSCODE_POLICY_AUTH=''\$/_VSCODE_POLICY_AUTH='{{VSCODE_POLICY_AUTH}}'/" \
+    -e "s/^_VSCODE_MACOS_DAEMON='1'\$/_VSCODE_MACOS_DAEMON='$daemon'/" \
+    "$OUT/endor-vscode.sh" > "$legacy"
+  chmod 700 "$legacy"
+  [[ "$(grep -c '{{VSCODE_' "$legacy")" -ge 3 ]]
+  product="$TMP_DIR/legacy-product.json"
+  state="$TMP_DIR/legacy-state-$RANDOM"
+  policy="$TMP_DIR/legacy-policy/policy.json"
+  mkdir -p "$(dirname "$policy")"
+  # An Endor policy is already there; a script that predates the policy says nothing about it.
+  printf '{"ExtensionGalleryServiceUrl": "%s"}\n' "$EXPECTED_URL" > "$policy"
+  cp "$policy" "$TMP_DIR/legacy-policy-before.json"
+  cp "$FIXTURE" "$product"
+  # Such scripts looked only for the macOS daemon's plist, not for a stray worker.
+  mkdir -p "$state"
+  printf '#!/bin/sh\n' > "$state/worker.sh"
+  rc=0
+  output=$(ENDOR_VSCODE_PRODUCT_JSON="$product" ENDOR_VSCODE_STATE_DIR="$state" \
+    ENDOR_VSCODE_POLICY_FILE="$policy" ENDOR_VSCODE_POLICY_STATE_DIR="$TMP_DIR/legacy-policy-state" \
+    ENDOR_VSCODE_SKIP_WATCHER=1 "$legacy" 2>&1) || rc=$?
+  cmp -s "$policy" "$TMP_DIR/legacy-policy-before.json"
+  [[ ! -e "$TMP_DIR/legacy-policy-state" ]]
+  if grep -qi "policy" <<<"$output"; then
+    echo "a script from an older generator mentioned the policy:" >&2
+    echo "$output" >&2
+    exit 1
+  fi
+  if [[ "$(uname -s)" == "Darwin" && "$daemon" != "1" ]]; then
+    cmp -s "$product" "$FIXTURE"
+    grep -qF 'ENDOR_VSCODE_MACOS_DAEMON=1' <<<"$output"
+    if host_has_patch; then [[ "$rc" -eq 1 ]]; else [[ "$rc" -eq 0 ]]; fi
+  else
+    [[ "$rc" -eq 0 ]]
+    assert_patched "$product"
+  fi
+done
 generate
 
 echo "VS Code Bash tests passed"

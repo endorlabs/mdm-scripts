@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Linux (Debian/Ubuntu with systemd) only. End-to-end test of the VS Code firewall's update
 # remediation with Microsoft's real .deb packages:
-#   1. install OLD with apt, deploy endor-vscode.sh, and check the path unit, timer and dpkg hook;
+#   1. install OLD with apt, deploy endor-vscode.sh with both methods, and check the path unit,
+#      timer and dpkg hook, and /etc/vscode/policy.json;
 #   2. upgrade to NEW with apt, and downgrade to OLD with dpkg -i: each is patched by the time the
 #      command returns (the dpkg hook);
 #   3. without the dpkg hook, dpkg -i NEW is patched within 15 seconds (the path unit, whose run
 #      waits for dpkg to rename the new files into place);
 #   4. with the path unit stopped, a reset product.json is patched within 75 seconds (the timer);
-#   5. remove, and check Microsoft's gallery settings are back and the units and hook are gone.
+#   5. remove, and check Microsoft's gallery settings are back and the units, hook and policy are
+#      gone.
 #
 # It changes the machine it runs on: it installs VS Code, systemd units and a dpkg hook. So it
 # runs only on a GitHub-hosted runner, or with ENDOR_E2E_ALLOW_HOST_CHANGES=1 on a disposable
@@ -50,6 +52,8 @@ APP_DIR="/usr/share/code/resources/app"
 PRODUCT="$APP_DIR/product.json"
 STATE_DIR="/var/lib/endor/vscode-firewall"
 DPKG_HOOK="/etc/dpkg/dpkg.cfg.d/endor-vscode-firewall"
+POLICY_FILE="/etc/vscode/policy.json"
+POLICY_STATE_DIR="/var/lib/endor/vscode-policy"
 UNITS=(endor-vscode-firewall.path endor-vscode-firewall.timer endor-vscode-firewall.service)
 ARTIFACTS="${ENDOR_E2E_ARTIFACTS:-${TMPDIR:-/tmp}/vscode-e2e-artifacts}"
 WORK=$(mktemp -d)
@@ -105,8 +109,11 @@ info "1. install $OLD with apt and deploy"
 sudo -E apt-get install -y -q "$OLD_DEB" > "$ARTIFACTS/apt-old.log" 2>&1 || fail "apt could not install $OLD"
 [[ "$(installed_version)" == "$OLD" ]] || fail "expected $OLD, found $(installed_version)"
 patched && fail "a fresh install is already patched"
+# Removal deletes /etc/vscode only if the installer created it.
+POLICY_DIR_EXISTED=0
+[[ ! -e /etc/vscode ]] || POLICY_DIR_EXISTED=1
 ENDOR_NAMESPACE="$NAMESPACE" ENDOR_API_KEY_ID="ci-e2e-key-id" ENDOR_API_SECRET="ci-e2e-secret" \
-  bash "$ROOT_DIR/package-firewall/bash/generate.sh" >/dev/null
+  ENDOR_VSCODE_ENABLE_PATCH=1 ENDOR_VSCODE_ENABLE_POLICY=1 bash "$ROOT_DIR/package-firewall/bash/generate.sh" >/dev/null
 sudo bash "$OUT/endor-vscode.sh" > "$ARTIFACTS/install.log" 2>&1 || fail "endor-vscode.sh failed (see install.log)"
 patched || fail "the installer did not patch $PRODUCT"
 for unit in endor-vscode-firewall.path endor-vscode-firewall.timer; do
@@ -116,7 +123,16 @@ done
 [[ -f "$DPKG_HOOK" ]] || fail "the dpkg hook is missing"
 grep -q '^PathChanged=/usr/share/code/resources/app$' /etc/systemd/system/endor-vscode-firewall.path \
   || fail "the path unit doesn't watch $APP_DIR"
-pass "deployed: patched, with the path unit, the timer and the dpkg hook"
+[[ "$(stat -c '%U:%G %a' "$POLICY_FILE" 2>/dev/null)" == "root:root 644" ]] \
+  || fail "$POLICY_FILE is missing, or not root's with mode 644"
+python3 -I -c 'import json, sys; assert json.load(open(sys.argv[1]))["ExtensionGalleryServiceUrl"].startswith(sys.argv[2])' \
+  "$POLICY_FILE" "$FIREWALL_PREFIX" || fail "$POLICY_FILE doesn't set the Endor ExtensionGalleryServiceUrl"
+# VS Code reads policy.json from 1.106.
+if [[ "$(printf '%s\n' 1.106.0 "$OLD" | sort -V | head -n 1)" == "1.106.0" ]] \
+    && grep -q "doesn't read $POLICY_FILE" "$ARTIFACTS/install.log"; then
+  fail "the installer says VS Code $OLD is too old for the policy"
+fi
+pass "deployed: patched and the policy set, with the path unit, the timer and the dpkg hook"
 
 info "2. upgrade with apt, then downgrade with dpkg -i"
 sudo -E apt-get install -y -q "$NEW_DEB" > "$ARTIFACTS/apt-new.log" 2>&1 || fail "apt could not install $NEW"
@@ -155,16 +171,17 @@ info "5. remove"
 if sudo bash "$OUT/endor-remove.sh" > "$ARTIFACTS/remove.log" 2>&1; then
   :
 elif grep -q "could not detect console user" "$ARTIFACTS/remove.log"; then
-  # endor-remove.sh needs a signed-in user for the other ecosystems. Remove VS Code's part the
-  # same way it does.
-  echo "::notice::no signed-in user on this runner; removing the VS Code part directly"
-  sudo rm -f "$DPKG_HOOK"
-  sudo systemctl disable --now endor-vscode-firewall.path endor-vscode-firewall.timer
-  sudo systemctl stop endor-vscode-firewall.service
-  for unit in "${UNITS[@]}"; do sudo rm -f "/etc/systemd/system/$unit"; done
-  sudo systemctl daemon-reload
-  sudo "$STATE_DIR/worker.sh" --restore >> "$ARTIFACTS/remove.log" 2>&1 || fail "the worker could not restore VS Code"
-  sudo rm -rf "$STATE_DIR"
+  # endor-remove.sh needs a signed-in user for the other ecosystems. Its VS Code section doesn't,
+  # so run only that.
+  echo "::notice::no signed-in user on this runner; running only the VS Code section of endor-remove.sh"
+  {
+    echo 'set -euo pipefail'
+    echo 'DRY_RUN=0; _ENDOR_WARNED=0'
+    sed -n '/^# >>> endor-vscode-remove$/,/^# <<< endor-vscode-remove$/p' "$OUT/endor-remove.sh"
+    echo 'exit "$_ENDOR_WARNED"'
+  } > "$WORK/remove-vscode.sh"
+  sudo bash "$WORK/remove-vscode.sh" >> "$ARTIFACTS/remove.log" 2>&1 \
+    || fail "the VS Code section of endor-remove.sh failed (see remove.log)"
 else
   fail "endor-remove.sh failed (see remove.log)"
 fi
@@ -176,7 +193,10 @@ for unit in "${UNITS[@]}"; do
   [[ ! -e "/etc/systemd/system/$unit" ]] || fail "$unit is still there"
 done
 [[ ! -e "$STATE_DIR" ]] || fail "the state folder is still there"
+[[ ! -e "$POLICY_FILE" ]] || fail "removal left $POLICY_FILE, which the installer created"
+[[ "$POLICY_DIR_EXISTED" == "1" || ! -e /etc/vscode ]] || fail "removal left /etc/vscode, which the installer created"
+[[ ! -e "$POLICY_STATE_DIR" ]] || fail "removal left the policy record"
 sudo dpkg -i "$OLD_DEB" > "$ARTIFACTS/dpkg-after-removal.log" 2>&1 || fail "dpkg could not install $OLD"
 patched && fail "VS Code was patched after removal"
-pass "removal restored the gallery settings and removed the units and the dpkg hook"
+pass "removal restored the gallery settings and removed the units, the dpkg hook and the policy"
 echo "VS Code Linux end-to-end test passed"

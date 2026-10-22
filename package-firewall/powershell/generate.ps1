@@ -28,6 +28,23 @@
 #                      the generated scripts send Basic Auth credentials.
 #                      US (default): https://factory.endorlabs.com
 #                      EU:           https://factory.eu.endorlabs.com
+#   ENDOR_VSCODE_ENABLE_PATCH
+#                      Optional. true or false (default; 1 and 0 also work).
+#                      Patch VS Code's product.json and keep it patched with a
+#                      SYSTEM scheduled task.
+#   ENDOR_VSCODE_ENABLE_POLICY
+#                      Optional. true or false (default; 1 and 0 also work).
+#                      Set VS Code's ExtensionGalleryServiceUrl policy in HKLM.
+#                      VS Code then turns the Marketplace off for anyone not
+#                      signed in with an eligible account.
+#   ENDOR_VSCODE_POLICY_AUTH
+#                      Optional, with the policy only. github or microsoft:
+#                      the account VS Code asks users to sign in with. Unset
+#                      by default: the scripts then set no provider, and VS
+#                      Code uses its own default.
+#                      With neither VS Code flag, endor-vscode.ps1 and endor-all.ps1
+#                      leave VS Code alone. Read the endor-vscode.ps1 section of
+#                      README.md first.
 #
 # To customise config blocks, edit shared/blocks/*.txt directly.
 # To customise orchestration logic, edit templates/*.ps1 directly.
@@ -138,6 +155,31 @@ if ($FQDN -cnotmatch '^https://[A-Za-z0-9.-]+(:[0-9]+)?\z') {
     exit 1
 }
 
+# -- Feature flags -------------------------------------------------------------
+# Get-FlagValue <name>: '1' or '0'. Accepts true, false, 1 and 0 in any case; unset or empty is
+# '0'. Mirrors flag_value in generate.sh.
+function Get-FlagValue {
+    param([string]$Name)
+    $raw = [string][Environment]::GetEnvironmentVariable($Name)
+    $value = $raw.ToLowerInvariant()
+    if ($value -ceq '1' -or $value -ceq 'true') { return '1' }
+    if ($value -ceq '' -or $value -ceq '0' -or $value -ceq 'false') { return '0' }
+    $shown = $raw -creplace '[^\x20-\x7E]', '?'
+    Write-Error "$Name must be true, false, 1 or 0. got: $shown"
+    exit 1
+}
+$VSCODE_ENABLE_PATCH  = Get-FlagValue 'ENDOR_VSCODE_ENABLE_PATCH'
+$VSCODE_ENABLE_POLICY = Get-FlagValue 'ENDOR_VSCODE_ENABLE_POLICY'
+$VSCODE_POLICY_AUTH   = ([string]$env:ENDOR_VSCODE_POLICY_AUTH).ToLowerInvariant()
+if ($VSCODE_POLICY_AUTH -cnotin '', 'github', 'microsoft') {
+    Write-Error 'ENDOR_VSCODE_POLICY_AUTH must be github or microsoft'
+    exit 1
+}
+if ($VSCODE_POLICY_AUTH -and $VSCODE_ENABLE_POLICY -ne '1') {
+    Write-Error 'ENDOR_VSCODE_POLICY_AUTH applies only with ENDOR_VSCODE_ENABLE_POLICY=true'
+    exit 1
+}
+
 # -- Compute derived values ----------------------------------------------------
 # Package-manager attribution credentials are computed at install time because
 # <console-user>@<machine> exists only on the endpoint. Machine-independent
@@ -179,6 +221,9 @@ function Invoke-Substitute {
     $r = $r.Replace('{{MAVEN_REGISTRY_URL}}', $MAVEN_REGISTRY_URL)
     $r = $r.Replace('{{NUGET_SOURCE_URL}}',   $NUGET_SOURCE_URL)
     $r = $r.Replace('{{VSCODE_SERVICE_URL}}',  $VSCODE_SERVICE_URL)
+    $r = $r.Replace('{{VSCODE_ENABLE_PATCH}}',  $VSCODE_ENABLE_PATCH)
+    $r = $r.Replace('{{VSCODE_ENABLE_POLICY}}', $VSCODE_ENABLE_POLICY)
+    $r = $r.Replace('{{VSCODE_POLICY_AUTH}}',   $VSCODE_POLICY_AUTH)
     $r
 }
 
@@ -364,7 +409,11 @@ $_allParts = @(
     (Invoke-Substitute (Get-Content (Join-Path $TmplDir 'vscode.ps1') -Raw -Encoding UTF8)),
     '',
     "Write-Host ''",
-    "Write-Host '[endor] [done] All package managers and VS Code configured for $ENDOR_NAMESPACE.'",
+    $(if ($VSCODE_ENABLE_PATCH -eq '0' -and $VSCODE_ENABLE_POLICY -eq '0') {
+        "Write-Host '[endor] [done] All package managers configured for $ENDOR_NAMESPACE. VS Code: not enabled.'"
+    } else {
+        "Write-Host '[endor] [done] All package managers and VS Code configured for $ENDOR_NAMESPACE.'"
+    }),
     $ScriptFooter
 )
 Set-Content -Path (Join-Path $OutDir $_allName) -Value ($_allParts -join "`n") -Encoding UTF8
@@ -383,6 +432,18 @@ Write-Host ('   {0,-24}  {1}' -f 'endor-vscode.ps1', 'VS Code extension gallery 
 Write-Host ('   {0,-24}  {1}' -f 'endor-all.ps1',    'all of the above (single-script deploy)')
 Write-Host ('   {0,-24}  {1}' -f 'endor-remove.ps1', 'offboarding -- strips all Endor config + registry env vars')
 Write-Host ''
+if ($VSCODE_ENABLE_PATCH -eq '0' -and $VSCODE_ENABLE_POLICY -eq '0') {
+    Write-Warning 'VS Code: no method enabled, so endor-vscode.ps1 and endor-all.ps1 leave VS Code alone.'
+    Write-Warning 'Set ENDOR_VSCODE_ENABLE_PATCH=true and/or ENDOR_VSCODE_ENABLE_POLICY=true (see README.md).'
+} else {
+    $_policyShown = if ($VSCODE_ENABLE_POLICY -ne '1') { 'off' } elseif ($VSCODE_POLICY_AUTH) { "on (sign-in: $VSCODE_POLICY_AUTH)" } else { "on (sign-in: VS Code's default)" }
+    Write-Host ("   VS Code: product.json patch {0}, policy {1}." -f $(if ($VSCODE_ENABLE_PATCH -eq '1') { 'on' } else { 'off' }), $_policyShown)
+    if ($VSCODE_ENABLE_POLICY -eq '1') {
+        Write-Host '   With the policy, VS Code turns the Extensions Marketplace off for anyone not signed in'
+        Write-Host '   with an eligible account. See README.md before deploying.'
+    }
+    Remove-Variable _policyShown
+}
 Write-Host '   All scripts accept -DryRun to preview changes without writing anything.'
 Write-Host '   Upload to your MDM tool (Intune). Each script is self-contained and idempotent.'
 Write-Host ''

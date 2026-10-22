@@ -6,7 +6,7 @@ Write-Host '[endor] -- VS Code extension firewall ------------------------------
 
 $_vscodeWorkerContent = @'
 param(
-    [ValidateSet('Once', 'Watch', 'Restore')]
+    [ValidateSet('Once', 'Watch', 'Restore', 'Inventory')]
     [string]$Mode = 'Once',
     [switch]$DryRun
 )
@@ -427,6 +427,16 @@ switch ($Mode) {
     'Restore' {
         if (-not (Invoke-RestoreAll)) { exit 1 }
     }
+    # Read-only: each install's product.json, its version, and whether it carries the patch.
+    'Inventory' {
+        foreach ($file in @(Get-ProductFiles)) {
+            $version = ''
+            $managed = $false
+            try { $version = [string](Read-ProductJson (Join-Path (Split-Path $file) 'package.json')).version } catch { }
+            try { $managed = [bool](Test-ProductManaged (Read-ProductJson $file)) } catch { }
+            [PSCustomObject]@{ Path = $file; Version = $version; Managed = $managed }
+        }
+    }
     'Watch' {
         $LogPath = Join-Path $PSScriptRoot 'worker.log'
         Watch-Products
@@ -434,70 +444,279 @@ switch ($Mode) {
 }
 '@
 
+# -- Which methods this script applies --
+# Chosen when the script was generated; powershell/README.md compares them:
+#   ENDOR_VSCODE_ENABLE_PATCH   patch product.json and keep it patched (a SYSTEM scheduled task)
+#   ENDOR_VSCODE_ENABLE_POLICY  set VS Code's ExtensionGalleryServiceUrl policy in HKLM
+# This script never removes a method that isn't enabled, because that would turn the firewall
+# off. When an earlier deployment left one in place, it says so and exits non-zero.
+$_vscodeServiceUrl = '{{VSCODE_SERVICE_URL}}'
+$_vscodeEnablePatch = '{{VSCODE_ENABLE_PATCH}}'
+$_vscodeEnablePolicy = '{{VSCODE_ENABLE_POLICY}}'
+$_vscodePolicyAuth = '{{VSCODE_POLICY_AUTH}}'
+# A generator that predates the two flags, such as the one on docs.endorlabs.com, leaves their
+# placeholders in place. Its scripts behave as they always did: the patch, no policy, and no
+# warnings about one.
+$_vscodeLegacy = $_vscodeEnablePatch -cnotin '0', '1'
+if ($_vscodeLegacy) { $_vscodeEnablePatch = '1' }
+if ($_vscodeEnablePolicy -cne '1') { $_vscodeEnablePolicy = '0' }
+if ($_vscodePolicyAuth -cnotin 'github', 'microsoft') { $_vscodePolicyAuth = '' }
+
 $_vscodeStateRoot = if ($env:ENDOR_VSCODE_STATE_DIR) {
     $env:ENDOR_VSCODE_STATE_DIR
 } else {
     Join-Path $env:ProgramData 'Endor Labs\vscode-firewall'
 }
 $_vscodeWorkerPath = Join-Path $_vscodeStateRoot 'worker.ps1'
+$_vscodeTaskName = 'Endor VS Code Extension Firewall'
+$_vscodeOnWindows = $env:OS -eq 'Windows_NT'
+# The policy is in HKLM's 64-bit view, which 32-bit PowerShell (Intune's default) reaches only
+# through OpenBaseKey. ENDOR_VSCODE_POLICY_KEY and ENDOR_VSCODE_POLICY_STATE_DIR are for tests:
+# the first names a key under HKCU to use instead.
+$_vscodePolicyHive = 'LocalMachine'
+$_vscodePolicyKey = 'SOFTWARE\Policies\Microsoft\VSCode'
+if ($env:ENDOR_VSCODE_POLICY_KEY) {
+    $_vscodePolicyHive = 'CurrentUser'
+    $_vscodePolicyKey = $env:ENDOR_VSCODE_POLICY_KEY
+}
+$_vscodePolicyName = $(if ($_vscodePolicyHive -eq 'LocalMachine') { 'HKLM\' } else { 'HKCU\' }) + $_vscodePolicyKey
+$_vscodePolicyState = if ($env:ENDOR_VSCODE_POLICY_STATE_DIR) {
+    $env:ENDOR_VSCODE_POLICY_STATE_DIR
+} else {
+    Join-Path $env:ProgramData 'Endor Labs\vscode-policy'
+}
+$_vscodeDone = $false
+$_vscodeSkip = $false
 
-if ($DryRun) {
+if ($_vscodeEnablePatch -eq '0' -and $_vscodeEnablePolicy -eq '0') {
+    Write-Host '[endor] skip: no VS Code method is enabled in this script.'
+    Write-Host '[endor]   To enable one, regenerate with ENDOR_VSCODE_ENABLE_PATCH=true or ENDOR_VSCODE_ENABLE_POLICY=true (see powershell/README.md).'
+} elseif (-not $_vscodeLegacy -and -not $DryRun -and $_vscodeOnWindows -and
+        -not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    # Both methods write to Program Files or HKLM. Run as SYSTEM (Intune's default) or elevated.
+    Write-Warning '[endor] the VS Code firewall needs SYSTEM or an elevated administrator; skipping it.'
+    $EndorWarned = $true
+    $_vscodeSkip = $true
+}
+
+# The installs, their versions, and whether product.json carries the patch: for the policy's
+# version checks, and to spot a patch left over when the patch isn't enabled. The worker knows
+# where VS Code installs, so ask a temporary copy of it. The copy doesn't need the URL, so it
+# doesn't get the credential either.
+$_vscodeInstalls = @()
+if (-not $_vscodeSkip -and -not $_vscodeLegacy -and ($_vscodeEnablePolicy -eq '1' -or $_vscodeEnablePatch -eq '0')) {
     $_vscodeTempWorker = Join-Path ([IO.Path]::GetTempPath()) "endor-vscode-$([Guid]::NewGuid().ToString('N')).ps1"
-    [IO.File]::WriteAllText($_vscodeTempWorker, $_vscodeWorkerContent, [Text.UTF8Encoding]::new($false))
     try {
-        $global:LASTEXITCODE = 0
-        & $_vscodeTempWorker -Mode Once -DryRun
-        if ($LASTEXITCODE) { $EndorWarned = $true }
+        [IO.File]::WriteAllText($_vscodeTempWorker, $_vscodeWorkerContent.Replace($_vscodeServiceUrl, ''),
+            [Text.UTF8Encoding]::new($false))
+        $_vscodeInstalls = @(& $_vscodeTempWorker -Mode Inventory)
     } catch {
-        Write-Warning "[endor] VS Code firewall dry run failed: $_"
-        $EndorWarned = $true
+        Write-Warning "[endor] could not list the VS Code installs: $_"
     } finally {
         Remove-Item -LiteralPath $_vscodeTempWorker -Force -ErrorAction SilentlyContinue
     }
-    Write-Host '[dry-run]   action : INSTALL VS Code update remediation scheduled task'
-} else {
-    New-Item -ItemType Directory -Path $_vscodeStateRoot -Force | Out-Null
-    [IO.File]::WriteAllText($_vscodeWorkerPath, $_vscodeWorkerContent, [Text.UTF8Encoding]::new($false))
-    if ($env:OS -eq 'Windows_NT') {
-        & icacls.exe $_vscodeStateRoot /inheritance:r /grant:r `
-            '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
-    }
+}
 
-    # A worker failure is reported, not thrown, so the update remediation task is still installed.
-    try {
-        $global:LASTEXITCODE = 0
-        & $_vscodeWorkerPath -Mode Once
-        if ($LASTEXITCODE) { $EndorWarned = $true }
-    } catch {
-        Write-Warning "[endor] VS Code firewall worker failed: $_"
+# -- The product.json patch --
+# A patch left by an earlier deployment keeps working when this script doesn't enable it, so the
+# admin decides: keep it, or remove it.
+if (-not $_vscodeSkip -and $_vscodeEnablePatch -eq '0') {
+    $_vscodeLeft = $null
+    if ($_vscodeOnWindows -and (Get-ScheduledTask -TaskName $_vscodeTaskName -ErrorAction SilentlyContinue)) {
+        $_vscodeLeft = "the '$_vscodeTaskName' scheduled task"
+    } elseif (Test-Path -LiteralPath $_vscodeWorkerPath) {
+        $_vscodeLeft = $_vscodeWorkerPath
+    } else {
+        $_vscodeLeft = @($_vscodeInstalls | Where-Object Managed | ForEach-Object Path) | Select-Object -First 1
+    }
+    if ($_vscodeLeft) {
+        Write-Warning "[endor] the VS Code product.json patch from an earlier deployment is still installed ($_vscodeLeft)."
+        Write-Warning "[endor]   This script doesn't enable it. Regenerate with ENDOR_VSCODE_ENABLE_PATCH=true to keep it, or run endor-remove.ps1 to remove it."
         $EndorWarned = $true
     }
+}
 
-    if ($env:ENDOR_VSCODE_SKIP_WATCHER -ne '1') {
+if (-not $_vscodeSkip -and $_vscodeEnablePatch -eq '1') {
+    $_vscodeDone = $true
+    if ($DryRun) {
+        $_vscodeTempWorker = Join-Path ([IO.Path]::GetTempPath()) "endor-vscode-$([Guid]::NewGuid().ToString('N')).ps1"
+        [IO.File]::WriteAllText($_vscodeTempWorker, $_vscodeWorkerContent, [Text.UTF8Encoding]::new($false))
         try {
-            $taskName = 'Endor VS Code Extension Firewall'
-            $powerShellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-            $taskAction = New-ScheduledTaskAction -Execute $powerShellExe `
-                -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$_vscodeWorkerPath`" -Mode Watch"
-            $taskTrigger = New-ScheduledTaskTrigger -AtStartup
-            $taskPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-            # Task Scheduler's default priority, 7, is below normal. While Setup and antivirus keep
-            # the CPUs busy, the worker would then wait about 4 s for Windows' anti-starvation boost,
-            # and could lose the race with Setup starting VS Code. 4 is normal priority.
-            $taskSettings = New-ScheduledTaskSettingsSet -Priority 4 -RestartCount 999 `
-                -RestartInterval (New-TimeSpan -Minutes 1) `
-                -ExecutionTimeLimit ([TimeSpan]::Zero) `
-                -MultipleInstances IgnoreNew
-            Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger `
-                -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
-            Start-ScheduledTask -TaskName $taskName
+            $global:LASTEXITCODE = 0
+            & $_vscodeTempWorker -Mode Once -DryRun
+            if ($LASTEXITCODE) { $EndorWarned = $true }
         } catch {
-            Write-Warning "[endor] could not install VS Code update remediation task: $_"
+            Write-Warning "[endor] VS Code firewall dry run failed: $_"
             $EndorWarned = $true
+        } finally {
+            Remove-Item -LiteralPath $_vscodeTempWorker -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host '[dry-run]   action : INSTALL VS Code update remediation scheduled task'
+    } else {
+        New-Item -ItemType Directory -Path $_vscodeStateRoot -Force | Out-Null
+        [IO.File]::WriteAllText($_vscodeWorkerPath, $_vscodeWorkerContent, [Text.UTF8Encoding]::new($false))
+        if ($_vscodeOnWindows) {
+            & icacls.exe $_vscodeStateRoot /inheritance:r /grant:r `
+                '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+        }
+
+        # A worker failure is reported, not thrown, so the update remediation task is still installed.
+        try {
+            $global:LASTEXITCODE = 0
+            & $_vscodeWorkerPath -Mode Once
+            if ($LASTEXITCODE) { $EndorWarned = $true }
+        } catch {
+            Write-Warning "[endor] VS Code firewall worker failed: $_"
+            $EndorWarned = $true
+        }
+
+        if ($env:ENDOR_VSCODE_SKIP_WATCHER -ne '1') {
+            try {
+                $powerShellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+                $taskAction = New-ScheduledTaskAction -Execute $powerShellExe `
+                    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$_vscodeWorkerPath`" -Mode Watch"
+                $taskTrigger = New-ScheduledTaskTrigger -AtStartup
+                $taskPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+                # Task Scheduler's default priority, 7, is below normal. While Setup and antivirus keep
+                # the CPUs busy, the worker would then wait about 4 s for Windows' anti-starvation boost,
+                # and could lose the race with Setup starting VS Code. 4 is normal priority.
+                $taskSettings = New-ScheduledTaskSettingsSet -Priority 4 -RestartCount 999 `
+                    -RestartInterval (New-TimeSpan -Minutes 1) `
+                    -ExecutionTimeLimit ([TimeSpan]::Zero) `
+                    -MultipleInstances IgnoreNew
+                Register-ScheduledTask -TaskName $_vscodeTaskName -Action $taskAction -Trigger $taskTrigger `
+                    -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
+                Start-ScheduledTask -TaskName $_vscodeTaskName
+            } catch {
+                Write-Warning "[endor] could not install VS Code update remediation task: $_"
+                $EndorWarned = $true
+            }
         }
     }
 }
 
-Write-Host '[endor] [done] VS Code extension firewall'
-Remove-Variable _vscodeWorkerContent, _vscodeStateRoot, _vscodeWorkerPath,
-    _vscodeTempWorker -ErrorAction SilentlyContinue
+# -- The ExtensionGalleryServiceUrl policy --
+# Only the two values this script owns change, and a value that isn't Endor's is left alone. A
+# record next to the patch's state says whether it created the key and which sign-in provider it
+# wrote. The URL is never recorded, because it carries the credential.
+if (-not $_vscodeSkip -and $_vscodeEnablePolicy -eq '1') {
+    $_vscodeDone = $true
+    try {
+        if (-not $_vscodeOnWindows) { throw 'the policy is a Windows registry setting' }
+        $_vscodeRecordPath = Join-Path $_vscodePolicyState 'record.json'
+        $_vscodeRecord = $null
+        if (Test-Path -LiteralPath $_vscodeRecordPath) {
+            try { $_vscodeRecord = Get-Content -LiteralPath $_vscodeRecordPath -Raw | ConvertFrom-Json } catch { }
+        }
+        $_vscodeOurs = [string]$_vscodeRecord.auth
+        $_vscodeBase = [Microsoft.Win32.RegistryKey]::OpenBaseKey($_vscodePolicyHive, 'Registry64')
+        $_vscodeKey = $_vscodeBase.OpenSubKey($_vscodePolicyKey, -not $DryRun)
+        $_vscodeUrl = $null
+        $_vscodePresent = $null
+        if ($_vscodeKey) {
+            $_vscodeUrl = $_vscodeKey.GetValue('ExtensionGalleryServiceUrl')
+            $_vscodePresent = $_vscodeKey.GetValue('ExtensionGalleryAuthProvider')
+        }
+        if ($null -ne $_vscodeUrl -and [string]$_vscodeUrl -ne '' -and [string]$_vscodeUrl -notlike '*/firewall/vscode/_ak/*') {
+            Write-Warning "[endor] $_vscodePolicyName sets ExtensionGalleryServiceUrl to another gallery; leaving it. Remove that value to use the Endor firewall."
+            $EndorWarned = $true
+        } else {
+            $_vscodeOwned = $null
+            $_vscodeSetAuth = $false
+            $_vscodeDeleteAuth = $false
+            if ($_vscodePolicyAuth) {
+                if ($null -eq $_vscodePresent -or ($_vscodeOurs -and [string]$_vscodePresent -ceq $_vscodeOurs)) {
+                    $_vscodeSetAuth = [string]$_vscodePresent -cne $_vscodePolicyAuth
+                    $_vscodeOwned = $_vscodePolicyAuth
+                } elseif ([string]$_vscodePresent -cne $_vscodePolicyAuth) {
+                    Write-Warning "[endor] $_vscodePolicyName sets ExtensionGalleryAuthProvider to '$_vscodePresent'; leaving it rather than setting '$_vscodePolicyAuth'."
+                    $EndorWarned = $true
+                }
+            } elseif ($_vscodeOurs -and [string]$_vscodePresent -ceq $_vscodeOurs) {
+                $_vscodeDeleteAuth = $true
+            }
+            $_vscodeNewRecord = [ordered]@{
+                createdKey = [bool]$_vscodeRecord.createdKey -or -not $_vscodeKey
+                auth = $_vscodeOwned
+            }
+            $_vscodeChange = [string]$_vscodeUrl -cne $_vscodeServiceUrl -or $_vscodeSetAuth -or $_vscodeDeleteAuth
+            if (-not $_vscodeChange) {
+                Write-Host "[endor-vscode] policy already set: $_vscodePolicyName"
+            } elseif ($DryRun) {
+                Write-Host "[dry-run]   action : SET ExtensionGalleryServiceUrl$(if ($_vscodeOwned) { ' and ExtensionGalleryAuthProvider' })"
+                Write-Host "[dry-run]   key    : $_vscodePolicyName"
+            }
+            # The record goes first, so a key this script creates is always recorded as its own.
+            if (-not $DryRun -and ($_vscodeChange -or -not $_vscodeRecord -or
+                    [bool]$_vscodeRecord.createdKey -ne $_vscodeNewRecord.createdKey -or
+                    [string]$_vscodeRecord.auth -cne [string]$_vscodeOwned)) {
+                New-Item -ItemType Directory -Path $_vscodePolicyState -Force | Out-Null
+                & icacls.exe $_vscodePolicyState /inheritance:r /grant:r `
+                    '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+                [IO.File]::WriteAllText($_vscodeRecordPath, ($_vscodeNewRecord | ConvertTo-Json),
+                    [Text.UTF8Encoding]::new($false))
+            }
+            if ($_vscodeChange -and -not $DryRun) {
+                if (-not $_vscodeKey) { $_vscodeKey = $_vscodeBase.CreateSubKey($_vscodePolicyKey) }
+                $_vscodeKey.SetValue('ExtensionGalleryServiceUrl', $_vscodeServiceUrl, 'String')
+                if ($_vscodeSetAuth) { $_vscodeKey.SetValue('ExtensionGalleryAuthProvider', $_vscodePolicyAuth, 'String') }
+                if ($_vscodeDeleteAuth) { $_vscodeKey.DeleteValue('ExtensionGalleryAuthProvider', $false) }
+                Write-Host "[endor-vscode] policy set: $_vscodePolicyName"
+            }
+        }
+        if ($_vscodeKey) { $_vscodeKey.Dispose() }
+        $_vscodeBase.Dispose()
+    } catch {
+        Write-Warning "[endor] could not set VS Code's policy: $_"
+        $EndorWarned = $true
+    }
+
+    # An older VS Code ignores the policy. The patch, if enabled, covers it until it's updated. It
+    # can't help with the sign-in provider: the editor follows the policy's URL either way.
+    foreach ($_vscodeInstall in $_vscodeInstalls) {
+        $_vscodeVersion = $null
+        if (-not [version]::TryParse(($_vscodeInstall.Version -replace '[^0-9.].*$', ''), [ref]$_vscodeVersion)) { continue }
+        if ($_vscodeVersion -lt [version]'1.99') {
+            $_vscodeGap = "VS Code $($_vscodeInstall.Version) ($($_vscodeInstall.Path)) doesn't read the ExtensionGalleryServiceUrl policy; 1.99 and later do."
+            if ($_vscodeEnablePatch -eq '1') {
+                Write-Host "[endor] note: $_vscodeGap The patch covers it until it's updated."
+            } else {
+                Write-Warning "[endor] $_vscodeGap"
+                $EndorWarned = $true
+            }
+        } elseif ($_vscodePolicyAuth -and $_vscodeVersion -lt [version]'1.137') {
+            Write-Warning "[endor] VS Code $($_vscodeInstall.Version) ($($_vscodeInstall.Path)) ignores ExtensionGalleryAuthProvider; 1.137 and later read it."
+            $EndorWarned = $true
+        }
+    }
+    # Without ENDOR_VSCODE_POLICY_AUTH the script sets no provider, so VS Code's default applies.
+    Write-Host '[endor] note: under this policy, VS Code turns the Extensions Marketplace off until the user signs in'
+    switch ($_vscodePolicyAuth) {
+        'microsoft' { Write-Host '[endor]   with a Microsoft Entra ID work or school account (see powershell/README.md).' }
+        'github' { Write-Host '[endor]   with a GitHub account that has Copilot Business or Enterprise, or a GitHub Enterprise account (see powershell/README.md).' }
+        default { Write-Host "[endor]   with an account that VS Code's default sign-in provider accepts (see powershell/README.md)." }
+    }
+} elseif (-not $_vscodeSkip -and -not $_vscodeLegacy -and $_vscodeOnWindows) {
+    # As with the patch: a policy left by an earlier deployment stays until the admin decides.
+    try {
+        $_vscodeBase = [Microsoft.Win32.RegistryKey]::OpenBaseKey($_vscodePolicyHive, 'Registry64')
+        $_vscodeKey = $_vscodeBase.OpenSubKey($_vscodePolicyKey)
+        if ($_vscodeKey -and [string]$_vscodeKey.GetValue('ExtensionGalleryServiceUrl') -like '*/firewall/vscode/_ak/*') {
+            Write-Warning "[endor] VS Code's ExtensionGalleryServiceUrl policy from an earlier deployment is still set in $_vscodePolicyName."
+            Write-Warning "[endor]   This script doesn't enable it. Regenerate with ENDOR_VSCODE_ENABLE_POLICY=true to keep it, or run endor-remove.ps1 to remove it."
+            $EndorWarned = $true
+        }
+        if ($_vscodeKey) { $_vscodeKey.Dispose() }
+        $_vscodeBase.Dispose()
+    } catch {
+    }
+}
+
+if ($_vscodeDone) { Write-Host '[endor] [done] VS Code extension firewall' }
+Remove-Variable _vscodeWorkerContent, _vscodeStateRoot, _vscodeWorkerPath, _vscodeTaskName, _vscodeOnWindows,
+    _vscodeServiceUrl, _vscodeEnablePatch, _vscodeEnablePolicy, _vscodePolicyAuth, _vscodeLegacy,
+    _vscodePolicyHive, _vscodePolicyKey, _vscodePolicyName, _vscodePolicyState, _vscodeDone, _vscodeSkip,
+    _vscodeInstalls, _vscodeTempWorker, _vscodeLeft, _vscodeRecordPath, _vscodeRecord, _vscodeOurs,
+    _vscodeBase, _vscodeKey, _vscodeUrl, _vscodePresent, _vscodeOwned, _vscodeSetAuth, _vscodeDeleteAuth,
+    _vscodeNewRecord, _vscodeChange, _vscodeInstall, _vscodeVersion, _vscodeGap -ErrorAction SilentlyContinue
