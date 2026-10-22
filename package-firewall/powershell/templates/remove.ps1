@@ -163,8 +163,12 @@ Write-Host ''
 
 # >>> endor-vscode-remove
 # -- VS Code extension firewall --
-# Removes both methods: the product.json patch and the ExtensionGalleryServiceUrl policy. This
-# section stands on its own, and doesn't use the signed-in user.
+# Removes the VS Code methods in scope: the product.json patch, the ExtensionGalleryServiceUrl
+# policy, or both. endor-remove.ps1 removes both, and generate.ps1 builds
+# endor-vscode-disable-patch.ps1 and endor-vscode-disable-policy.ps1 from this section with the
+# scope filled in. So the section stands on its own, and doesn't use the signed-in user.
+$_vscodeRemoveScope = '{{VSCODE_REMOVE_SCOPE}}'
+if ($_vscodeRemoveScope -cnotin 'patch', 'policy') { $_vscodeRemoveScope = 'all' }
 Write-Host '[endor-remove] -- VS Code extensions ------------------------------------'
 $_vscodeStateRoot = if ($env:ENDOR_VSCODE_STATE_DIR) {
     $env:ENDOR_VSCODE_STATE_DIR
@@ -173,43 +177,45 @@ $_vscodeStateRoot = if ($env:ENDOR_VSCODE_STATE_DIR) {
 }
 $_vscodeWorkerPath = Join-Path $_vscodeStateRoot 'worker.ps1'
 
-if ($DryRun) {
-    Write-Host '[dry-run]   action : STOP and DELETE Endor VS Code Extension Firewall task'
-} elseif ($env:ENDOR_VSCODE_SKIP_WATCHER -ne '1') {
-    Stop-ScheduledTask -TaskName 'Endor VS Code Extension Firewall' -ErrorAction SilentlyContinue
-    Unregister-ScheduledTask -TaskName 'Endor VS Code Extension Firewall' -Confirm:$false -ErrorAction SilentlyContinue
-}
+if ($_vscodeRemoveScope -ne 'policy') {
+    if ($DryRun) {
+        Write-Host '[dry-run]   action : STOP and DELETE Endor VS Code Extension Firewall task'
+    } elseif ($env:ENDOR_VSCODE_SKIP_WATCHER -ne '1') {
+        Stop-ScheduledTask -TaskName 'Endor VS Code Extension Firewall' -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName 'Endor VS Code Extension Firewall' -Confirm:$false -ErrorAction SilentlyContinue
+    }
 
-if (Test-Path -LiteralPath $_vscodeWorkerPath) {
-    # Workers installed by earlier versions throw on a file they can't restore; count that as
-    # a failure too, so the state is kept for another try.
-    $_vscodeRestoreFailed = $false
-    try {
-        $global:LASTEXITCODE = 0
-        if ($DryRun) {
-            & $_vscodeWorkerPath -Mode Restore -DryRun
-        } else {
-            & $_vscodeWorkerPath -Mode Restore
+    if (Test-Path -LiteralPath $_vscodeWorkerPath) {
+        # Workers installed by earlier versions throw on a file they can't restore; count that as
+        # a failure too, so the state is kept for another try.
+        $_vscodeRestoreFailed = $false
+        try {
+            $global:LASTEXITCODE = 0
+            if ($DryRun) {
+                & $_vscodeWorkerPath -Mode Restore -DryRun
+            } else {
+                & $_vscodeWorkerPath -Mode Restore
+            }
+            if ($LASTEXITCODE) { $_vscodeRestoreFailed = $true }
+        } catch {
+            Write-Warning "[endor-remove] VS Code worker failed: $_"
+            $_vscodeRestoreFailed = $true
         }
-        if ($LASTEXITCODE) { $_vscodeRestoreFailed = $true }
-    } catch {
-        Write-Warning "[endor-remove] VS Code worker failed: $_"
-        $_vscodeRestoreFailed = $true
+        if ($_vscodeRestoreFailed) {
+            $EndorWarned = $true
+            Write-Warning '[endor-remove] VS Code restoration was incomplete; managed state was retained.'
+        } elseif (-not $DryRun) {
+            Remove-Item -LiteralPath $_vscodeStateRoot -Recurse -Force
+        }
+    } else {
+        Write-Host '[endor-remove] skip (no VS Code managed state)'
     }
-    if ($_vscodeRestoreFailed) {
-        $EndorWarned = $true
-        Write-Warning '[endor-remove] VS Code restoration was incomplete; managed state was retained.'
-    } elseif (-not $DryRun) {
-        Remove-Item -LiteralPath $_vscodeStateRoot -Recurse -Force
-    }
-} else {
-    Write-Host '[endor-remove] skip (no VS Code managed state)'
 }
 
 # The policy, in HKLM\SOFTWARE\Policies\Microsoft\VSCode: only Endor's values go, and the key too
 # if this machine's record says the installer created it and nothing else is left in it.
 # ENDOR_VSCODE_POLICY_KEY and ENDOR_VSCODE_POLICY_STATE_DIR are for tests, as in the installer.
-if ($env:OS -eq 'Windows_NT') {
+if ($_vscodeRemoveScope -ne 'patch' -and $env:OS -eq 'Windows_NT') {
     $_vscodePolicyHive = 'LocalMachine'
     $_vscodePolicyKey = 'SOFTWARE\Policies\Microsoft\VSCode'
     if ($env:ENDOR_VSCODE_POLICY_KEY) {
@@ -267,7 +273,7 @@ if ($env:OS -eq 'Windows_NT') {
         $EndorWarned = $true
     }
 }
-Remove-Variable _vscodeStateRoot, _vscodeWorkerPath
+Remove-Variable _vscodeStateRoot, _vscodeWorkerPath, _vscodeRemoveScope
 Remove-Variable _vscodeRestoreFailed, _vscodePolicyHive, _vscodePolicyKey, _vscodePolicyName, _vscodePolicyState,
     _vscodeRecord, _vscodeRecordPath, _vscodeBase, _vscodeKey, _vscodeRemove, _vscodeName -ErrorAction SilentlyContinue
 # <<< endor-vscode-remove
