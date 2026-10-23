@@ -9,9 +9,9 @@ set -euo pipefail
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PF_DIR="$(cd "$TEST_DIR/.." && pwd)"
 MIRROR_URL="https://factory.endorlabs.com/v1/namespaces/ci-smoke/firewall/gem/"
-SOURCE_URL="https://dXNlcg%3D%3D:c2VjcmV0%2B%2F%3D@factory.endorlabs.com/v1/namespaces/ci-smoke/firewall/gem/"
+SOURCE_URL="https://fakeuser:fakesecret@factory.endorlabs.com/v1/namespaces/ci-smoke/firewall/gem/"
 RUBYGEMS_URL="https://rubygems.org/"
-CORP_URL="https://deploy:s3cret@gems.corp.example.com/"
+CORP_URL="https://fakeuser:fakepassword@gems.corp.example.com/"
 
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -73,9 +73,9 @@ gem: --no-document
 :verbose: true
 EOF
 f="$h/.gemrc"
-out=$(DRY_RUN=1 apply); [[ "$out" == *'backup'* && "$out" == *'gems.corp.example.com'* && "$out" != *'s3cret'* ]]; cmp -s "$f" "$f.orig"
+out=$(DRY_RUN=1 apply); [[ "$out" == *'backup'* && "$out" == *'gems.corp.example.com'* && "$out" != *'fakepassword'* ]]; cmp -s "$f" "$f.orig"
 _ENDOR_WARNED=0; apply > "$h/apply.out" 2>&1; out=$(cat "$h/apply.out"); [[ "$_ENDOR_WARNED" == "1" ]]   # private server disabled → warn
-[[ "$out" == *'backed up'* && "$out" == *'***@gems.corp'* && "$out" != *'s3cret'* ]]
+[[ "$out" == *'backed up'* && "$out" == *'***@gems.corp'* && "$out" != *'fakepassword'* ]]
 cmp -s "$f.endor-bak" "$f.orig"; [[ "$(mode "$f.endor-bak")" == "600" ]]
 grep -qxF "gem: --no-document" "$f"; grep -qxF "# keep me" "$f"; grep -qxF ":verbose: true" "$f"
 ! grep -qF "$RUBYGEMS_URL" "$f"; ! grep -qF "gems.corp" "$f"; [[ "$(grep -c '^:sources:' "$f")" == "1" ]]
