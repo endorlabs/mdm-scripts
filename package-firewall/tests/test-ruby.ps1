@@ -10,10 +10,10 @@ $TestDir     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PfDir       = (Resolve-Path (Join-Path $TestDir '..')).Path
 $MirrorUrl   = 'https://factory.endorlabs.com/v1/namespaces/ci-smoke/firewall/gem/'
 $HostKey     = 'FACTORY__ENDORLABS__COM'
-$Creds       = 'dXNlcg%3D%3D:c2VjcmV0%2B%2F%3D'
+$Creds       = 'fakeuser:fakesecret'
 $SourceUrl   = "https://$Creds@factory.endorlabs.com/v1/namespaces/ci-smoke/firewall/gem/"
 $CorpUrl     = 'https://artifactory.example.com/api/gems/rubygems/'
-$CorpGemUrl  = 'https://deploy:s3cret@gems.corp.example.com/'
+$CorpGemUrl  = 'https://fakeuser:fakepassword@gems.corp.example.com/'
 $RubyGemsUrl = 'https://rubygems.org/'
 $TempDir     = Join-Path ([IO.Path]::GetTempPath()) "endor-ruby-tests-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $TempDir | Out-Null
@@ -226,10 +226,10 @@ Write-Host 'test: gem -- existing .gemrc: backed up once, sources replaced, othe
 $h = Join-Path $TempDir 'gexisting'; $f = Join-Path $h '.gemrc'
 Write-Fixture $f "---`ngem: --no-document`n# keep me`n:sources:`n- $RubyGemsUrl`n- $CorpGemUrl`n:verbose: true`n"; Copy-Item $f "$f.orig"
 $out = Invoke-GemApply $h -DryRun 6>&1 | Out-String
-Assert (($out -match 'backup') -and ($out -match 'gems\.corp\.example\.com') -and ($out -notmatch 's3cret')) 'dry-run should announce backup and masked sources'
+Assert (($out -match 'backup') -and ($out -match 'gems\.corp\.example\.com') -and ($out -notmatch 'fakepassword')) 'dry-run should announce backup and masked sources'
 Assert (Test-SameContent $f "$f.orig") 'dry-run wrote'
 $EndorWarned = $false; $out = Invoke-GemApply $h 6>&1 3>$null | Out-String; Assert $EndorWarned 'private server should warn'
-Assert (($out -match 'backed up') -and ($out -match '\*\*\*@gems\.corp') -and ($out -notmatch 's3cret')) 'NOTE / backup message wrong'
+Assert (($out -match 'backed up') -and ($out -match '\*\*\*@gems\.corp') -and ($out -notmatch 'fakepassword')) 'NOTE / backup message wrong'
 Assert (Test-SameContent "$f.endor-bak" "$f.orig") 'backup differs from original'
 $t = Get-Text $f
 Assert ($t.Contains("gem: --no-document`n") -and $t.Contains("# keep me`n") -and $t.Contains(":verbose: true`n")) 'user keys lost'
@@ -323,7 +323,7 @@ $rm = Get-Content (Join-Path $out 'endor-remove.ps1') -Raw
 Assert ($rm.Contains("Remove-BundleConfig -FilePath (Join-Path `$UserHome '.bundle\config') -MirrorUrl '$MirrorUrl'") -and $rm.Contains('Remove-Gemrc') -and $rm.Contains("'BUNDLE_$HostKey'")) 'endor-remove.ps1 lacks Ruby'
 
 Write-Host 'test: credential variable follows Bundler''s host mapping (EU host with port, dashed host)'
-$env:ENDOR_NAMESPACE = 'ci-smoke-eu'; $env:ENDOR_FQDN = 'https://factory.eu.endorlabs.com:8443'; $env:ENDOR_API_KEY_ID = 'k'; $env:ENDOR_API_SECRET = 's'
+$env:ENDOR_NAMESPACE = 'ci-smoke-eu'; $env:ENDOR_FQDN = 'https://factory.eu.endorlabs.com:8443'; $env:ENDOR_API_KEY_ID = 'fake-key-id'; $env:ENDOR_API_SECRET = 'fake-secret'
 & (Join-Path $PfDir 'powershell/generate.ps1') *> $null
 $eu = Get-Content (Join-Path $PfDir 'powershell/out/ci-smoke-eu/endor-ruby.ps1') -Raw
 Assert ($eu.Contains("'BUNDLE_FACTORY__EU__ENDORLABS__COM'") -and $eu.Contains('https://factory.eu.endorlabs.com:8443/v1/namespaces/ci-smoke-eu/firewall/gem/')) 'EU host key wrong'
