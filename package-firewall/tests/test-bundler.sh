@@ -9,7 +9,7 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PF_DIR="$(cd "$TEST_DIR/.." && pwd)"
 MIRROR_URL="https://factory.endorlabs.com/v1/namespaces/ci-smoke/firewall/gem/"
 HOST_KEY="FACTORY__ENDORLABS__COM"
-CREDS="dXNlcg%3D%3D:c2VjcmV0%2B%2F%3D"
+CREDS="fakeuser:fakesecret"
 CORP_URL="https://artifactory.example.com/api/gems/rubygems/"
 
 TMP_DIR=$(mktemp -d)
@@ -195,11 +195,11 @@ grep -qF "remove_bundle_config \"\$USER_HOME/.bundle/config\" \"$MIRROR_URL\" \"
 ! grep -qE '\{\{(GEM_MIRROR_URL|BUNDLE_HOST_KEY)\}\}' "$out/endor-ruby.sh" "$out/endor-remove.sh" "$out/endor-all.sh"
 
 echo "test: credential variable follows Bundler's host mapping (EU host with port, dashed host)"
-ENDOR_NAMESPACE=ci-smoke-eu ENDOR_FQDN=https://factory.eu.endorlabs.com:8443 ENDOR_API_KEY_ID=k ENDOR_API_SECRET=s \
+ENDOR_NAMESPACE=ci-smoke-eu ENDOR_FQDN=https://factory.eu.endorlabs.com:8443 ENDOR_API_KEY_ID=fake-key-id ENDOR_API_SECRET=fake-secret \
   bash "$PF_DIR/bash/generate.sh" >/dev/null
 grep -qF 'export BUNDLE_FACTORY__EU__ENDORLABS__COM="' "$PF_DIR/bash/out/ci-smoke-eu/endor-ruby.sh"
 grep -qF 'https://factory.eu.endorlabs.com:8443/v1/namespaces/ci-smoke-eu/firewall/gem/' "$PF_DIR/bash/out/ci-smoke-eu/endor-ruby.sh"
-ENDOR_NAMESPACE=ci-smoke-dash ENDOR_FQDN=https://fw-test.example.com ENDOR_API_KEY_ID=k ENDOR_API_SECRET=s \
+ENDOR_NAMESPACE=ci-smoke-dash ENDOR_FQDN=https://fw-test.example.com ENDOR_API_KEY_ID=fake-key-id ENDOR_API_SECRET=fake-secret \
   bash "$PF_DIR/bash/generate.sh" >/dev/null
 grep -qF 'export BUNDLE_FW___TEST__EXAMPLE__COM="' "$PF_DIR/bash/out/ci-smoke-dash/endor-ruby.sh"
 rm -rf "$PF_DIR/bash/out/ci-smoke-eu" "$PF_DIR/bash/out/ci-smoke-dash"
