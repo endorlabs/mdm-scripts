@@ -24,6 +24,16 @@
 #                                                — NuGet.Config writer; merges a block INTO a section
 #   Remove-NuGetBlocks    <path> ...             — strips NuGet.Config blocks, restores defaults
 #   Test-NuGetSourceConflict <path>              — warns on non-nuget.org sources outside the block
+#   Invoke-UpsertBundleConfig <path> <content> ... — %USERPROFILE%\.bundle\config writer; replaces stale
+#                                                  Endor lines left by a `bundle config` rewrite, pins a
+#                                                  user rubygems.org fallback_timeout to 0
+#   Remove-BundleConfig   <path> <mirrorurl> ... — strips the block and stale Endor lines; user keys kept
+#   Test-BundleMirrorConflict <path> <mirrorurl> — warns on a pre-existing rubygems.org mirror / mirror.all
+#   Invoke-UpsertGemrc    <path> <xdg> <content> <mirrorurl> ...
+#                                                — %USERPROFILE%\.gemrc writer; backs the original up to
+#                                                  <path>.endor-bak, replaces :sources: with the Endor block
+#   Remove-Gemrc          <path> <mirrorurl> ... — restores <path>.endor-bak, or deletes a file Endor created
+#   Test-GemrcSourceOverride <paths>             — warns on gem:/install: defaults carrying --source/-s/--clear-sources
 
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║  SENTINEL CONTRACT — DO NOT CHANGE THESE STRINGS                    ║
@@ -801,5 +811,383 @@ function Test-NuGetSourceConflict {
         Write-Warning "[endor] WARNING: non-nuget.org package source(s) in $FilePath outside the Endor block -- the block's"
         Write-Warning '[endor]          <clear /> supersedes them; re-add needed private feeds in a repo-level nuget.config.'
         $script:EndorWarned = $true
+    }
+}
+
+# -- Bundler (%USERPROFILE%\.bundle\config) helpers --
+# Bundler's global config is a flat YAML hash -- one `BUNDLE_KEY: "value"` line
+# per setting -- read by every Ruby on the machine. A successful `bundle config
+# set --global` rewrites the whole file: comments (our sentinels) are dropped,
+# keys are kept. So besides the sentinel block, Endor lines are recognised by
+# key + value, and re-runs replace stale copies instead of duplicating them.
+# A key may contain ':' and '/' (BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/); as in
+# Bundler, it ends at the first ':' followed by whitespace or end of line.
+# Mirrors the bash helpers in lib/common.sh case for case.
+$BUNDLE_MIRROR_KEY_RE   = '^BUNDLE_MIRROR__(HTTPS?://)?RUBYGEMS__ORG/?$'
+$BUNDLE_FALLBACK_KEY_RE = '^BUNDLE_MIRROR__(HTTPS?://)?RUBYGEMS__ORG/?__FALLBACK_TIMEOUT$'
+
+# Get-LinesOutsideBlock <lines> -- the lines that are not inside the Endor sentinel block
+function Get-LinesOutsideBlock {
+    param([string[]]$Lines)
+    $out = [System.Collections.Generic.List[string]]::new()
+    $inBlock = $false
+    foreach ($l in $Lines) {
+        if ($l -eq $ENDOR_BLOCK_START) { $inBlock = $true;  continue }
+        if ($l -eq $ENDOR_BLOCK_END)   { $inBlock = $false; continue }
+        if (-not $inBlock) { $out.Add($l) }
+    }
+    ,$out
+}
+
+# Get-BundleConfigKey <line> -- the key of a `KEY: value` line; $null for comments, '---' and blanks
+function Get-BundleConfigKey {
+    param([string]$Line)
+    if ($Line -match '^\s*(#|---)' -or $Line -match '^\s*$') { return $null }
+    for ($i = 0; $i -lt $Line.Length; $i++) {
+        if ($Line[$i] -ne ':') { continue }
+        if ($i -eq $Line.Length - 1 -or $Line[$i + 1] -eq ' ' -or $Line[$i + 1] -eq "`t") { return $Line.Substring(0, $i) }
+    }
+    $null
+}
+
+# Get-BundleConfigValue <line> -- the value of a `KEY: value` line without surrounding double quotes
+function Get-BundleConfigValue {
+    param([string]$Line)
+    $k = Get-BundleConfigKey $Line
+    if ($null -eq $k) { return $null }
+    $v = $Line.Substring($k.Length + 1).Trim()
+    if ($v.Length -ge 2 -and $v.StartsWith('"') -and $v.EndsWith('"')) { $v = $v.Substring(1, $v.Length - 2) }
+    $v
+}
+
+# Invoke-UpsertBundleConfig <filepath> <content> <username> [-DryRun]
+#   - File absent             -> create it ("---" header + Endor block)
+#   - Block present           -> replace only the block; everything else untouched
+#   - Stale Endor lines       -> removed (same key and value as the block, no sentinels --
+#                                what a `bundle config` rewrite leaves), so keys are never duplicated
+#   - User fallback_timeout for rubygems.org -> the same key is repeated inside the block with "0"
+#                                (last key wins), so a dead mirror never falls back to rubygems.org
+#   - -DryRun                 -> print intent, write nothing
+function Invoke-UpsertBundleConfig {
+    param(
+        [string]$FilePath,
+        [string]$Content,
+        [string]$Username,
+        [switch]$DryRun
+    )
+
+    $Content      = $Content.Replace("`r", '')
+    $contentLines = [System.Collections.Generic.List[string]]::new()
+    foreach ($l in @($Content -split "`n")) { $contentLines.Add($l) }
+    $fileExists = Test-Path $FilePath
+    $lines      = if ($fileExists) { @(Get-Content $FilePath -Encoding UTF8) } else { @() }
+    $hasBlock   = $fileExists -and ($lines -contains $ENDOR_BLOCK_START)
+    $outside    = Get-LinesOutsideBlock $lines
+
+    # A user fallback_timeout for rubygems.org is repeated inside the block with "0".
+    $fallbackKeys = @()
+    foreach ($l in $outside) {
+        $k = Get-BundleConfigKey $l
+        if ($k -and $k -match $BUNDLE_FALLBACK_KEY_RE -and $fallbackKeys -notcontains $k) { $fallbackKeys += $k }
+    }
+    foreach ($k in $fallbackKeys) { $contentLines.Add("${k}: `"0`"") }
+
+    # Stale = an outside line with one of our keys AND our value (a `bundle config` rewrite leftover).
+    $want = @{}
+    foreach ($l in $contentLines) { $k = Get-BundleConfigKey $l; if ($k) { $want[$k] = Get-BundleConfigValue $l } }
+    $kept  = [System.Collections.Generic.List[string]]::new()
+    $stale = 0
+    foreach ($l in $outside) {
+        $k = Get-BundleConfigKey $l
+        if ($k -and $want.ContainsKey($k) -and ((Get-BundleConfigValue $l) -eq $want[$k])) { $stale++; continue }
+        $kept.Add($l)
+    }
+
+    if ($DryRun) {
+        if     (-not $fileExists) { Write-Host '[dry-run]   action : CREATE file with Endor block' }
+        elseif ($hasBlock)        { Write-Host '[dry-run]   action : REPLACE existing Endor block' }
+        else                      { Write-Host '[dry-run]   action : APPEND Endor block to existing file' }
+        if ($stale -gt 0) { Write-Host "[dry-run]   note   : $stale stale Endor line(s) (left by 'bundle config') replaced by the block" }
+        if ($fallbackKeys.Count -gt 0) { Write-Host '[dry-run]   note   : rubygems.org fallback_timeout found -- pinned to 0 inside the Endor block' }
+        Write-Host "[dry-run]   file   : $FilePath"
+        Write-Host '[dry-run]   content:'
+        $contentLines | ForEach-Object { Write-Host "[dry-run]     $_" }
+        Write-Host ''
+        return
+    }
+
+    $dir = Split-Path $FilePath -Parent
+    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+
+    $final = [System.Collections.Generic.List[string]]::new()
+    if ($fileExists) { foreach ($l in $kept) { $final.Add($l) } } else { $final.Add('---') }
+    $final.Add($ENDOR_BLOCK_START)
+    foreach ($l in $contentLines) { $final.Add($l) }
+    $final.Add($ENDOR_BLOCK_END)
+    Write-EndorFile -FilePath $FilePath -Lines $final
+    Set-FileRestrictedAcl -FilePath $FilePath -Username $Username
+
+    if ($stale -gt 0) { Write-Host "[endor] NOTE: $stale stale Endor line(s) in $FilePath (left by 'bundle config') replaced by the block" }
+    if ($fallbackKeys.Count -gt 0) { Write-Host "[endor] NOTE: rubygems.org fallback_timeout in $FilePath pinned to 0 inside the Endor block (a dead mirror must not fall back to rubygems.org)" }
+}
+
+# Remove-BundleConfig <filepath> <mirrorurl> [-DryRun]
+# Strips the Endor block plus any stale Endor lines outside it (a `bundle config`
+# rewrite drops the sentinels but keeps the keys): the rubygems.org mirror keys
+# pointing at <mirrorurl> and a rubygems.org fallback_timeout pinned to 0. The
+# credential lives in HKCU, not here. User lines are left alone -- a pre-existing
+# user mirror becomes active again. The file is deleted when only "---" remains.
+function Remove-BundleConfig {
+    param([string]$FilePath, [string]$MirrorUrl, [switch]$DryRun)
+
+    if (-not (Test-Path $FilePath)) {
+        Write-Host "[endor-remove] skip (not found)    : $FilePath"
+        return
+    }
+    $lines    = @(Get-Content $FilePath -Encoding UTF8)
+    $hasBlock = $lines -contains $ENDOR_BLOCK_START
+    $kept     = [System.Collections.Generic.List[string]]::new()
+    $stale    = 0
+    foreach ($l in (Get-LinesOutsideBlock $lines)) {
+        $k = Get-BundleConfigKey $l
+        if ($k) {
+            $v = Get-BundleConfigValue $l
+            if (($k -match $BUNDLE_MIRROR_KEY_RE -and $v -eq $MirrorUrl) -or ($k -match $BUNDLE_FALLBACK_KEY_RE -and $v -eq '0')) { $stale++; continue }
+        }
+        $kept.Add($l)
+    }
+    if (-not $hasBlock -and $stale -eq 0) {
+        Write-Host "[endor-remove] skip (no Endor block): $FilePath"
+        return
+    }
+    $remaining = (@($kept | Where-Object { $_ -notmatch '^---\s*$' }) -join '') -replace '\s', ''
+
+    if ($DryRun) {
+        if (-not $remaining) { Write-Host '[dry-run]   action : REMOVE Endor lines -> file would be empty -> DELETE file' }
+        else                 { Write-Host '[dry-run]   action : REMOVE Endor block/lines, preserve remaining content' }
+        if ($stale -gt 0) { Write-Host "[dry-run]   note   : $stale stale Endor line(s) outside the block (left by 'bundle config') removed too" }
+        Write-Host "[dry-run]   file   : $FilePath"
+        Write-Host ''
+        return
+    }
+
+    if (-not $remaining) {
+        Remove-Item $FilePath -Force
+        Write-Host "[endor-remove] deleted (was empty) : $FilePath"
+    } else {
+        Write-EndorFile -FilePath $FilePath -Lines $kept
+        Write-Host "[endor-remove] block removed       : $FilePath"
+    }
+}
+
+# Test-BundleMirrorConflict <filepath> <mirrorurl>
+# Warns when, outside the Endor block, the file already mirrors rubygems.org
+# somewhere else (Artifactory, Nexus) or sets mirror.all. The Endor keys still
+# go in last and win for rubygems.org; a mirror.all beats every per-source
+# mirror and must be removed by the admin.
+function Test-BundleMirrorConflict {
+    param([string]$FilePath, [string]$MirrorUrl)
+
+    if (-not (Test-Path $FilePath)) { return }
+    $all = $false; $other = $false
+    foreach ($l in (Get-LinesOutsideBlock @(Get-Content $FilePath -Encoding UTF8))) {
+        $k = Get-BundleConfigKey $l
+        if (-not $k) { continue }
+        if     ($k -eq 'BUNDLE_MIRROR__ALL')                                                { $all = $true }
+        elseif ($k -match $BUNDLE_MIRROR_KEY_RE -and (Get-BundleConfigValue $l) -ne $MirrorUrl) { $other = $true }
+    }
+    if ($all) {
+        Write-Warning "[endor] WARNING: mirror.all in $FilePath wins over every per-source mirror, the Endor one included --"
+        Write-Warning '[endor]          remove it (bundle config unset --global mirror.all) or Bundler bypasses the firewall.'
+        $script:EndorWarned = $true
+    }
+    if ($other) {
+        Write-Warning "[endor] WARNING: $FilePath already mirrors rubygems.org elsewhere outside the Endor block -- the Endor keys"
+        Write-Warning '[endor]          are appended last and win; customers routing through a registry should use the registry-side integration.'
+        $script:EndorWarned = $true
+    }
+}
+
+# -- gem CLI (%USERPROFILE%\.gemrc) helpers --
+# .gemrc is YAML read by every Ruby on the machine (RubyGems >= 3.2 falls back to
+# %USERPROFILE%\.config\gem\gemrc only when .gemrc is absent; older ones read
+# .gemrc only). gem queries EVERY url in :sources: and installs from any of them,
+# so the firewall must be the only one: the user's :sources: key is removed, not
+# kept. The original file is backed up verbatim to <path>.endor-bak, because a
+# successful `gem sources --add/--remove` rewrites the file from memory and drops
+# every comment -- an in-file backup would not survive it. Only the block-list,
+# symbol-key form is written: it is what both RubyGems parsers accept (Psych up
+# to 3.4.20, RubyGems' own line parser from 3.4.21).
+
+# Get-GemrcHostPath <mirrorurl> -- scheme-less form that identifies our source line whatever userinfo it carries
+function Get-GemrcHostPath {
+    param([string]$MirrorUrl)
+    $MirrorUrl -replace '^[A-Za-z]+://', ''
+}
+
+# Invoke-UpsertGemrc <filepath> <xdgfile> <content> <mirrorurl> <username> [-DryRun]
+#   - <filepath> exists                    -> backed up once to <filepath>.endor-bak (unless already ours),
+#                                             its :sources: key (block or flow form) removed, Endor block appended last
+#   - <filepath> absent, <xdgfile> exists  -> <filepath> BUILT from a copy of <xdgfile> (sources replaced) + block,
+#                                             so RubyGems < 3.2 (no XDG lookup) is covered too; <xdgfile> untouched
+#   - neither exists                       -> <filepath> created ("---" + block)
+#   - Stale Endor line (after a `gem sources` rewrite: our url in a plain :sources: list, no sentinels)
+#                                          -> gone with the :sources: key, never duplicated
+#   - A disabled non-rubygems.org source   -> WARNING + exit 1 (a private gem server is unreachable through gem)
+#   - -DryRun                              -> print intent, write nothing
+function Invoke-UpsertGemrc {
+    param(
+        [string]$FilePath,
+        [string]$XdgFile,
+        [string]$Content,
+        [string]$MirrorUrl,
+        [string]$Username,
+        [switch]$DryRun
+    )
+
+    $Content      = $Content.Replace("`r", '')
+    $contentLines = @($Content -split "`n")
+    $hostPath     = Get-GemrcHostPath $MirrorUrl
+    $backup       = "$FilePath.endor-bak"
+    $base = $null; $action = ''; $doBackup = $false
+
+    if (Test-Path $FilePath) {
+        $base   = $FilePath
+        $raw    = Get-Content $FilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        $isOurs = ($raw -match [regex]::Escape($ENDOR_BLOCK_START)) -or ($raw -match [regex]::Escape($hostPath))
+        $action = if ($raw -match [regex]::Escape($ENDOR_BLOCK_START)) { 'REPLACE existing Endor block' } else { 'REPLACE :sources: with the Endor block' }
+        # Back the user's original up once: never over an existing backup, never a file that is already ours.
+        if (-not (Test-Path $backup) -and -not $isOurs) { $doBackup = $true }
+    } elseif ($XdgFile -and (Test-Path $XdgFile)) {
+        $base   = $XdgFile
+        $action = "BUILD $FilePath from $XdgFile (its :sources: replaced; the XDG file itself is left untouched)"
+    } else {
+        $action = 'CREATE file with Endor block'
+    }
+
+    # The user's :sources: key and its items go; the items are collected for the report (ours excluded).
+    $kept    = [System.Collections.Generic.List[string]]::new()
+    $removed = [System.Collections.Generic.List[string]]::new()
+    if ($base) {
+        $inSrc = $false
+        foreach ($l in (Get-LinesOutsideBlock @(Get-Content $base -Encoding UTF8))) {
+            if ($l -match '^\s*:?sources:\s*(\[.*\])?\s*(#.*)?$') {
+                $inSrc = ($l -notmatch '\[')
+                if (-not $inSrc -and -not $l.Contains($hostPath)) { $removed.Add($l) }
+                continue
+            }
+            if ($inSrc -and $l -match '^\s*-(\s|$)') {
+                if (-not $l.Contains($hostPath)) { $removed.Add($l) }
+                continue
+            }
+            $inSrc = $false
+            $kept.Add($l)
+        }
+    }
+    # Private = any disabled url that is not rubygems.org (urls, not lines: a flow-style list is one line).
+    $private = $false
+    foreach ($m in [regex]::Matches(($removed -join "`n"), 'https?://[^\]\s,"]+')) {
+        if ($m.Value -notmatch 'rubygems\.org') { $private = $true }
+    }
+    $masked = @($removed | ForEach-Object { $_ -replace '//[^/@\s]+@', '//***@' })
+
+    if ($DryRun) {
+        Write-Host "[dry-run]   action : $action"
+        if ($doBackup) { Write-Host "[dry-run]   backup : $FilePath -> $backup (restored on removal)" }
+        if ($removed.Count -gt 0) {
+            Write-Host '[dry-run]   note   : existing gem source(s) disabled (gem queries every source):'
+            $masked | ForEach-Object { Write-Host "[dry-run]            $_" }
+        }
+        Write-Host "[dry-run]   file   : $FilePath"
+        Write-Host '[dry-run]   content:'
+        $contentLines | ForEach-Object { Write-Host "[dry-run]     $_" }
+        Write-Host ''
+        return
+    }
+
+    $dir = Split-Path $FilePath -Parent
+    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    if ($doBackup) {
+        Copy-Item -LiteralPath $FilePath -Destination $backup -Force
+        Set-FileRestrictedAcl -FilePath $backup -Username $Username
+        Write-Host "[endor] original $FilePath backed up to $backup (restored on removal)"
+    }
+
+    $final = [System.Collections.Generic.List[string]]::new()
+    if ($base) { foreach ($l in $kept) { $final.Add($l) } } else { $final.Add('---') }
+    $final.Add($ENDOR_BLOCK_START)
+    foreach ($l in $contentLines) { $final.Add($l) }
+    $final.Add($ENDOR_BLOCK_END)
+    Write-EndorFile -FilePath $FilePath -Lines $final
+    Set-FileRestrictedAcl -FilePath $FilePath -Username $Username
+
+    if ($removed.Count -gt 0) {
+        Write-Host "[endor] NOTE: existing gem source(s) in $FilePath disabled -- gem queries every source, so the firewall must be the only one:"
+        $masked | ForEach-Object { Write-Host "[endor]         $_" }
+    }
+    if ($private) {
+        Write-Warning "[endor] WARNING: a non-rubygems.org gem source (private gem server?) was disabled in $FilePath --"
+        Write-Warning '[endor]          it is unreachable through gem until removal; gems from it must come via the firewall or Bundler source blocks.'
+        $script:EndorWarned = $true
+    }
+}
+
+# Remove-Gemrc <filepath> <mirrorurl> [-DryRun]
+#   - <filepath>.endor-bak exists -> the user's original is put back over <filepath> and the backup deleted
+#   - no backup, <filepath> is ours (Endor block or our source url) -> deleted (it was created by Endor;
+#                                    when it was built from the XDG file, that file becomes active again)
+#   - no backup, not ours          -> skipped
+function Remove-Gemrc {
+    param([string]$FilePath, [string]$MirrorUrl, [switch]$DryRun)
+
+    $backup   = "$FilePath.endor-bak"
+    $hostPath = Get-GemrcHostPath $MirrorUrl
+    if (Test-Path $backup) {
+        if ($DryRun) {
+            Write-Host "[dry-run]   action : RESTORE $FilePath from $backup, then delete the backup"
+            Write-Host ''
+            return
+        }
+        Move-Item -LiteralPath $backup -Destination $FilePath -Force
+        Write-Host "[endor-remove] original restored   : $FilePath"
+        return
+    }
+    if (-not (Test-Path $FilePath)) {
+        Write-Host "[endor-remove] skip (not found)    : $FilePath"
+        return
+    }
+    $raw = Get-Content $FilePath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    if (-not ($raw -match [regex]::Escape($ENDOR_BLOCK_START)) -and -not ($raw -match [regex]::Escape($hostPath))) {
+        Write-Host "[endor-remove] skip (no Endor block): $FilePath"
+        return
+    }
+    if ($DryRun) {
+        Write-Host "[dry-run]   action : DELETE $FilePath (created by Endor -- no pre-install backup exists)"
+        Write-Host ''
+        return
+    }
+    Remove-Item -LiteralPath $FilePath -Force
+    Write-Host "[endor-remove] deleted (Endor-made) : $FilePath"
+}
+
+# Test-GemrcSourceOverride <filepaths>
+# Command-default keys (`gem:`, `install:`, ...) apply on top of :sources:; one carrying
+# --source / -s / --clear-sources lets gem reach another server. Checked for the user
+# file, the XDG file and every Ruby's system-wide gemrc -- those are never edited.
+# Lines inside the Endor block are ignored; missing files are skipped.
+function Test-GemrcSourceOverride {
+    param([string[]]$FilePaths)
+
+    foreach ($f in $FilePaths) {
+        if (-not $f -or -not (Test-Path $f)) { continue }
+        $found = $false
+        foreach ($l in (Get-LinesOutsideBlock @(Get-Content $f -Encoding UTF8))) {
+            if ($l -match '^\s*[A-Za-z][A-Za-z_]*:\s' -and ($l -match '--source' -or $l -match '--clear-sources' -or $l -match '(^|\s)-s(\s|$)')) { $found = $true; break }
+        }
+        if ($found) {
+            Write-Warning "[endor] WARNING: $f sets gem command defaults with --source / -s / --clear-sources outside the Endor block --"
+            Write-Warning '[endor]          they add or replace sources on every gem command and bypass the firewall; remove that option.'
+            $script:EndorWarned = $true
+        }
     }
 }

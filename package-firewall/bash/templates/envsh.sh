@@ -1,6 +1,6 @@
 # templates/envsh.sh
 # Writes ~/.config/endor/env.sh — the single credential source for all
-# env-var-based tools (npm, yarn 2+, maven, poetry).
+# env-var-based tools (npm, yarn 2+, maven, poetry, bundler).
 # Then adds a one-line source directive to shell profiles.
 #
 # Block content comes from shared/blocks/envsh.txt; attribution tokens are
@@ -15,6 +15,7 @@ ENDOR_ENV_SH="$USER_HOME/.config/endor/env.sh"
 # Fill the attribution-dependent tokens (values from the credentials block).
 ENVSH_BLOCK=${ENVSH_BLOCK//'{{ATTR_USER}}'/"$ENDOR_ATTR_USER"}
 ENVSH_BLOCK=${ENVSH_BLOCK//'{{NPM_AUTH_B64}}'/"$ENDOR_AUTH_B64"}
+ENVSH_BLOCK=${ENVSH_BLOCK//'{{BUNDLE_CREDS}}'/"$ENDOR_BUNDLE_CREDS"}
 
 if [[ "$ENVSH_BLOCK" == *'{{'* ]]; then
   echo "[endor] WARNING: unresolved {{...}} token in env.sh block — a token in" >&2

@@ -21,6 +21,14 @@
 #   .NET / NuGet:
 #     ~/.nuget/NuGet/NuGet.Config  (sections kept; nuget.org restored if no source is left)
 #
+#   Ruby / Bundler:
+#     ~/.bundle/config  (Endor mirror keys removed, including stale copies left by `bundle config`;
+#                        user keys kept; the credential is in env.sh)
+#
+#   Ruby / gem:
+#     ~/.gemrc          (pre-install original restored from ~/.gemrc.endor-bak, or deleted if Endor created it)
+#     root's .gemrc     (same; only when running as root)
+#
 #   VS Code:
 #     Restores default gallery properties and removes update remediation. On macOS this
 #     swaps Microsoft's original app back in and deletes the per-device signing identity.
@@ -158,6 +166,23 @@ echo ""
 echo "[endor-remove] ── NuGet / .NET ────────────────────────────────────────────────"
 
 remove_nuget_blocks "$USER_HOME/.nuget/NuGet/NuGet.Config" "$CONSOLE_USER" "$USER_GROUP"
+
+# ── Bundler config file ───────────────────────────────────────────────────────
+echo ""
+echo "[endor-remove] ── Ruby / Bundler ──────────────────────────────────────────────"
+
+remove_bundle_config "$USER_HOME/.bundle/config" "{{GEM_MIRROR_URL}}" "$CONSOLE_USER" "$USER_GROUP"
+
+# ── gem config files ──────────────────────────────────────────────────────────
+echo ""
+echo "[endor-remove] ── Ruby / gem ──────────────────────────────────────────────────"
+
+remove_gemrc "$USER_HOME/.gemrc" "{{GEM_MIRROR_URL}}" "$CONSOLE_USER" "$USER_GROUP"
+if [[ "$EUID" -eq 0 ]]; then
+  _ROOT_HOME=$(resolve_user_home root)
+  remove_gemrc "$_ROOT_HOME/.gemrc" "{{GEM_MIRROR_URL}}" root "$(id -gn root)"
+  unset _ROOT_HOME
+fi
 
 # >>> endor-vscode-remove
 # ── VS Code extension firewall ────────────────────────────────────────────────

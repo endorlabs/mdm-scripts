@@ -26,6 +26,21 @@
 #                                              — NuGet.Config writer; merges a block INTO a section
 #   remove_nuget_blocks     <file> <owner> <group> — strips NuGet.Config blocks, restores defaults
 #   warn_if_nuget_source_conflict <file>       — warns on non-nuget.org sources outside the block
+#   upsert_bundle_config    <file> <content> <owner> <group>
+#                                              — ~/.bundle/config writer; also replaces stale Endor
+#                                                lines left by a `bundle config` rewrite, pins a user
+#                                                rubygems.org fallback_timeout to 0
+#   remove_bundle_config    <file> <mirror_url> <owner> <group>
+#                                              — strips the block and stale Endor lines; user keys kept
+#   warn_if_bundle_mirror_conflict <file> <mirror_url>
+#                                              — warns on a pre-existing rubygems.org mirror / mirror.all
+#   upsert_gemrc            <file> <xdg_file> <content> <mirror_url> <owner> <group>
+#                                              — ~/.gemrc writer; backs the original up to <file>.endor-bak,
+#                                                replaces the user's :sources: with the Endor block, builds
+#                                                <file> from <xdg_file> when only that exists
+#   remove_gemrc            <file> <mirror_url> <owner> <group>
+#                                              — restores <file>.endor-bak, or deletes a file Endor created
+#   warn_if_gemrc_source_override <file>...   — warns on gem:/install: defaults carrying --source/-s/--clear-sources
 
 # Sentinel markers — identical across all config files so re-runs and remove work reliably
 ENDOR_BLOCK_START="# ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ====="
@@ -685,4 +700,351 @@ warn_if_nuget_source_conflict() {
     echo "[endor]          <clear /> supersedes them; re-add needed private feeds in a repo-level nuget.config." >&2
     _ENDOR_WARNED=1
   fi
+}
+
+# ── Bundler (~/.bundle/config) helpers ────────────────────────────────────────
+# Bundler's global config is a flat YAML hash — one `BUNDLE_KEY: "value"` line
+# per setting — read by every Ruby on the machine. A successful `bundle config
+# set --global` rewrites the whole file: comments (our sentinels) are dropped,
+# keys are kept. So besides the sentinel block, Endor lines are recognised by
+# key + value, and re-runs replace stale copies instead of duplicating them.
+# A key may contain ':' and '/' (BUNDLE_MIRROR__HTTPS://RUBYGEMS__ORG/); as in
+# Bundler, it ends at the first ':' followed by whitespace or end of line.
+
+_BUNDLE_MIRROR_KEY_RE='^BUNDLE_MIRROR__(HTTPS?://)?RUBYGEMS__ORG/?$'
+_BUNDLE_FALLBACK_KEY_RE='^BUNDLE_MIRROR__(HTTPS?://)?RUBYGEMS__ORG/?__FALLBACK_TIMEOUT$'
+
+# awk prelude shared by the helpers: keyof(line) → key or "", valof(line) → value without quotes.
+_BUNDLE_AWK='
+function keyof(line,   i, n) {
+  if (line ~ /^[[:space:]]*(#|---)/ || line ~ /^[[:space:]]*$/) return ""
+  n = length(line)
+  for (i = 1; i <= n; i++)
+    if (substr(line, i, 1) == ":" && (i == n || substr(line, i + 1, 1) ~ /[ \t]/)) return substr(line, 1, i - 1)
+  return ""
+}
+function valof(line,   k, v) {
+  k = keyof(line); if (k == "") return ""
+  v = substr(line, length(k) + 2); gsub(/^[ \t]+|[ \t]+$/, "", v)
+  if (v ~ /^".*"$/) v = substr(v, 2, length(v) - 2)
+  return v
+}
+'
+
+# upsert_bundle_config <file> <content> <owner> <group>
+#   - File absent             → create it ("---" header + Endor block); ~/.bundle owned by the user
+#   - Block present           → replace only the block; everything else untouched
+#   - Stale Endor lines       → removed (same key and value as the block, no sentinels —
+#                               what a `bundle config` rewrite leaves), so keys are never duplicated
+#   - User fallback_timeout for rubygems.org → the same key is repeated inside the block with "0"
+#                               (last key wins), so a dead mirror never falls back to rubygems.org
+#   - DRY_RUN=1               → print intent, write nothing
+upsert_bundle_config() {
+  local file="$1" content="$2" owner="$3" group="$4"
+  local tmp contentfile exists=0 has_block=0 stale=0 fallback_keys="" k
+
+  if [[ -f "$file" ]]; then
+    exists=1
+    grep -qF "$ENDOR_BLOCK_START" "$file" 2>/dev/null && has_block=1
+    fallback_keys=$(awk -v s="$ENDOR_BLOCK_START" -v e="$ENDOR_BLOCK_END" -v re="$_BUNDLE_FALLBACK_KEY_RE" "$_BUNDLE_AWK"'
+      index($0, s) { skip = 1; next }
+      index($0, e) { skip = 0; next }
+      !skip { k = keyof($0); if (k != "" && toupper(k) ~ re && !seen[k]++) print k }' "$file")
+  fi
+  while IFS= read -r k; do
+    if [[ -n "$k" ]]; then content="${content}"$'\n'"${k}: \"0\""; fi
+  done <<< "$fallback_keys"
+
+  # Content via temp file + getline: BSD awk rejects multi-line -v values.
+  contentfile=$(mktemp); printf '%s\n' "$content" > "$contentfile"
+  if [[ "$exists" == "1" ]]; then
+    stale=$(awk -v s="$ENDOR_BLOCK_START" -v e="$ENDOR_BLOCK_END" -v cf="$contentfile" "$_BUNDLE_AWK"'
+      BEGIN { while ((getline l < cf) > 0) { k = keyof(l); if (k != "") want[k] = valof(l) } close(cf) }
+      index($0, s) { skip = 1; next }
+      index($0, e) { skip = 0; next }
+      !skip { k = keyof($0); if (k != "" && (k in want) && valof($0) == want[k]) n++ }
+      END { print n + 0 }' "$file")
+  fi
+
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    if   [[ "$exists" == "0" ]];    then echo "[dry-run]   action : CREATE file with Endor block"
+    elif [[ "$has_block" == "1" ]]; then echo "[dry-run]   action : REPLACE existing Endor block"
+    else                                 echo "[dry-run]   action : APPEND Endor block to existing file"
+    fi
+    if [[ "$stale" -gt 0 ]]; then
+      echo "[dry-run]   note   : ${stale} stale Endor line(s) (left by 'bundle config') replaced by the block"
+    fi
+    if [[ -n "$fallback_keys" ]]; then
+      echo "[dry-run]   note   : rubygems.org fallback_timeout found — pinned to 0 inside the Endor block"
+    fi
+    echo "[dry-run]   file   : $file"
+    echo "[dry-run]   content:"
+    sed 's/^/[dry-run]     /' "$contentfile"
+    echo ""
+    rm -f "$contentfile"
+    return 0
+  fi
+
+  # ~/.bundle must stay the user's: Bundler writes its cache there. chown of a
+  # dir the user already owns is a no-op.
+  mkdir -p "$(dirname "$file")"
+  chown "$owner:$group" "$(dirname "$file")"
+
+  tmp=$(mktemp)
+  if [[ "$exists" == "1" ]]; then
+    awk -v s="$ENDOR_BLOCK_START" -v e="$ENDOR_BLOCK_END" -v cf="$contentfile" "$_BUNDLE_AWK"'
+      BEGIN { while ((getline l < cf) > 0) { k = keyof(l); if (k != "") want[k] = valof(l) } close(cf) }
+      index($0, s) { skip = 1; next }
+      index($0, e) { skip = 0; next }
+      skip { next }
+      { k = keyof($0); if (k != "" && (k in want) && valof($0) == want[k]) next; print }' "$file" > "$tmp"
+  else
+    printf -- '---\n' > "$tmp"
+  fi
+  printf '%s\n%s\n%s\n' "$ENDOR_BLOCK_START" "$content" "$ENDOR_BLOCK_END" >> "$tmp"
+  mv "$tmp" "$file"; rm -f "$contentfile"
+  chown "$owner:$group" "$file"; chmod 600 "$file"
+
+  if [[ "$stale" -gt 0 ]]; then
+    echo "[endor] NOTE: ${stale} stale Endor line(s) in ${file} (left by 'bundle config') replaced by the block"
+  fi
+  if [[ -n "$fallback_keys" ]]; then
+    echo "[endor] NOTE: rubygems.org fallback_timeout in ${file} pinned to 0 inside the Endor block (a dead mirror must not fall back to rubygems.org)"
+  fi
+}
+
+# remove_bundle_config <file> <mirror_url> <owner> <group>
+# Strips the Endor block plus any stale Endor lines outside it (a `bundle config`
+# rewrite drops the sentinels but keeps the keys): the rubygems.org mirror keys
+# pointing at <mirror_url> and a rubygems.org fallback_timeout pinned to 0. The
+# credential lives in env.sh, not here. User lines are left alone — a pre-existing
+# user mirror becomes active again. The file is deleted when only "---" remains.
+remove_bundle_config() {
+  local file="$1" mirror_url="$2" owner="$3" group="$4"
+  local tmp counts stale has_block remaining
+
+  [[ -f "$file" ]] || { echo "[endor-remove] skip (not found)    : $file"; return 0; }
+
+  tmp=$(mktemp)
+  counts=$(awk -v s="$ENDOR_BLOCK_START" -v e="$ENDOR_BLOCK_END" -v url="$mirror_url" \
+               -v mre="$_BUNDLE_MIRROR_KEY_RE" -v fre="$_BUNDLE_FALLBACK_KEY_RE" -v out="$tmp" "$_BUNDLE_AWK"'
+    index($0, s) { skip = 1; blk = 1; next }
+    index($0, e) { skip = 0; next }
+    skip { next }
+    {
+      k = keyof($0)
+      if (k != "") {
+        K = toupper(k); v = valof($0)
+        if ((K ~ mre && v == url) || (K ~ fre && v == "0")) { n++; next }
+      }
+      print > out
+    }
+    END { printf "%d %d", n + 0, blk + 0 }' "$file")
+  read -r stale has_block <<< "$counts"
+
+  if [[ "$has_block" == "0" && "$stale" == "0" ]]; then
+    rm -f "$tmp"
+    echo "[endor-remove] skip (no Endor block): $file"
+    return 0
+  fi
+  remaining=$(awk '!/^---[[:space:]]*$/' "$tmp" | tr -d '[:space:]')
+
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    if [[ -z "$remaining" ]]; then echo "[dry-run]   action : REMOVE Endor lines → file would be empty → DELETE file"
+    else                          echo "[dry-run]   action : REMOVE Endor block/lines, preserve remaining content"
+    fi
+    if [[ "$stale" -gt 0 ]]; then
+      echo "[dry-run]   note   : ${stale} stale Endor line(s) outside the block (left by 'bundle config') removed too"
+    fi
+    echo "[dry-run]   file   : $file"; echo ""
+    rm -f "$tmp"; return 0
+  fi
+
+  if [[ -z "$remaining" ]]; then
+    rm -f "$file" "$tmp"
+    echo "[endor-remove] deleted (was empty) : $file"
+  else
+    mv "$tmp" "$file"; chown "$owner:$group" "$file"; chmod 600 "$file"
+    echo "[endor-remove] block removed       : $file"
+  fi
+}
+
+# warn_if_bundle_mirror_conflict <file> <mirror_url>
+# Warns when, outside the Endor block, the file already mirrors rubygems.org
+# somewhere else (Artifactory, Nexus) or sets mirror.all. The Endor keys still
+# go in last and win for rubygems.org; a mirror.all beats every per-source
+# mirror and must be removed by the admin.
+warn_if_bundle_mirror_conflict() {
+  local file="$1" mirror_url="$2" found all other
+  [[ -f "$file" ]] || return 0
+  found=$(awk -v s="$ENDOR_BLOCK_START" -v e="$ENDOR_BLOCK_END" -v url="$mirror_url" -v mre="$_BUNDLE_MIRROR_KEY_RE" "$_BUNDLE_AWK"'
+    index($0, s) { skip = 1; next }
+    index($0, e) { skip = 0; next }
+    skip { next }
+    {
+      k = keyof($0); if (k == "") next
+      K = toupper(k)
+      if (K == "BUNDLE_MIRROR__ALL") all = 1
+      else if (K ~ mre && valof($0) != url) other = 1
+    }
+    END { printf "%d %d", all + 0, other + 0 }' "$file")
+  read -r all other <<< "$found"
+  if [[ "$all" == "1" ]]; then
+    echo "[endor] WARNING: mirror.all in ${file} wins over every per-source mirror, the Endor one included —" >&2
+    echo "[endor]          remove it (bundle config unset --global mirror.all) or Bundler bypasses the firewall." >&2
+    _ENDOR_WARNED=1
+  fi
+  if [[ "$other" == "1" ]]; then
+    echo "[endor] WARNING: ${file} already mirrors rubygems.org elsewhere outside the Endor block — the Endor keys" >&2
+    echo "[endor]          are appended last and win; customers routing through a registry should use the registry-side integration." >&2
+    _ENDOR_WARNED=1
+  fi
+}
+
+# ── gem CLI (~/.gemrc) helpers ────────────────────────────────────────────────
+# ~/.gemrc is YAML read by every Ruby on the machine (RubyGems >= 3.2 falls back
+# to ~/.config/gem/gemrc only when ~/.gemrc is absent; older ones read ~/.gemrc
+# only). gem queries EVERY url in :sources: and installs from any of them, so the
+# firewall must be the only one: the user's :sources: key is removed, not kept.
+# The original file is backed up verbatim to <file>.endor-bak, because a
+# successful `gem sources --add/--remove` rewrites the file from memory and drops
+# every comment — an in-file backup would not survive it. Only the block-list,
+# symbol-key form is written: it is what both RubyGems parsers accept (Psych up
+# to 3.4.20, RubyGems' own line parser from 3.4.21).
+
+# _gemrc_hostpath <mirror_url> — scheme-less form that identifies our source line whatever userinfo it carries
+_gemrc_hostpath() { printf '%s' "${1#*://}"; }
+
+# upsert_gemrc <file> <xdg_file> <content> <mirror_url> <owner> <group>
+#   - <file> exists                       → backed up once to <file>.endor-bak (unless it is already ours),
+#                                           its :sources: key (block or flow form) removed, Endor block appended last
+#   - <file> absent, <xdg_file> exists    → <file> BUILT from a copy of <xdg_file> (sources replaced) + block,
+#                                           so RubyGems < 3.2 (no XDG lookup) is covered too; <xdg_file> untouched
+#   - neither exists                      → <file> created ("---" + block)
+#   - Stale Endor line (after a `gem sources` rewrite: our url in a plain :sources: list, no sentinels)
+#                                         → gone with the :sources: key, never duplicated
+#   - A disabled non-rubygems.org source  → WARNING + exit 1 (a private gem server is unreachable through gem)
+#   - DRY_RUN=1                           → print intent, write nothing
+upsert_gemrc() {
+  local file="$1" xdg="$2" content="$3" mirror_url="$4" owner="$5" group="$6"
+  local hostpath base="" action tmp removed backup="$1.endor-bak" do_backup=0 private=0
+  hostpath=$(_gemrc_hostpath "$mirror_url")
+
+  if [[ -f "$file" ]]; then
+    base="$file"
+    if grep -qF "$ENDOR_BLOCK_START" "$file" 2>/dev/null; then action="REPLACE existing Endor block"
+    else                                                       action="REPLACE :sources: with the Endor block"
+    fi
+    # Back the user's original up once: never over an existing backup, never a file that is already ours.
+    if [[ ! -e "$backup" ]] && ! grep -qF "$ENDOR_BLOCK_START" "$file" && ! grep -qF "$hostpath" "$file"; then
+      do_backup=1
+    fi
+  elif [[ -n "$xdg" && -f "$xdg" ]]; then
+    base="$xdg"; action="BUILD $file from $xdg (its :sources: replaced; the XDG file itself is left untouched)"
+  else
+    action="CREATE file with Endor block"
+  fi
+
+  # The user's :sources: key and its items go; the items are collected for the report (ours excluded).
+  removed=$(mktemp); tmp=$(mktemp)
+  if [[ -n "$base" ]]; then
+    awk -v s="$ENDOR_BLOCK_START" -v e="$ENDOR_BLOCK_END" -v rm="$removed" -v hp="$hostpath" '
+      index($0, s) { skip = 1; next }
+      index($0, e) { skip = 0; next }
+      skip { next }
+      /^[[:space:]]*:?sources:[[:space:]]*(\[.*\])?[[:space:]]*(#.*)?$/ {
+        insrc = ($0 !~ /\[/); if (!insrc && index($0, hp) == 0) print $0 > rm; next
+      }
+      insrc && /^[[:space:]]*-([[:space:]]|$)/ { if (index($0, hp) == 0) print $0 > rm; next }
+      { insrc = 0; print }
+    ' "$base" > "$tmp"
+  else
+    printf -- '---\n' > "$tmp"
+  fi
+  # Private = any disabled url that is not rubygems.org (urls, not lines: a flow-style list is one line).
+  if [[ -s "$removed" ]] && grep -oE 'https?://[^] ,"[:space:]]+' "$removed" | grep -v -q 'rubygems\.org'; then private=1; fi
+
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "[dry-run]   action : $action"
+    if [[ "$do_backup" == "1" ]]; then echo "[dry-run]   backup : $file → $backup (restored on removal)"; fi
+    if [[ -s "$removed" ]]; then
+      echo "[dry-run]   note   : existing gem source(s) disabled (gem queries every source):"
+      sed -E 's#//[^/@[:space:]]+@#//***@#g; s/^/[dry-run]            /' "$removed"
+    fi
+    echo "[dry-run]   file   : $file"
+    echo "[dry-run]   content:"
+    printf '%s\n' "$content" | sed 's/^/[dry-run]     /'
+    echo ""
+    rm -f "$removed" "$tmp"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$file")"
+  if [[ "$do_backup" == "1" ]]; then
+    cp -p "$file" "$backup"; chown "$owner:$group" "$backup"; chmod 600 "$backup"
+    echo "[endor] original $file backed up to $backup (restored on removal)"
+  fi
+  printf '%s\n%s\n%s\n' "$ENDOR_BLOCK_START" "$content" "$ENDOR_BLOCK_END" >> "$tmp"
+  mv "$tmp" "$file"; chown "$owner:$group" "$file"; chmod 600 "$file"
+
+  if [[ -s "$removed" ]]; then
+    echo "[endor] NOTE: existing gem source(s) in $file disabled — gem queries every source, so the firewall must be the only one:"
+    sed -E 's#//[^/@[:space:]]+@#//***@#g; s/^/[endor]         /' "$removed"
+  fi
+  if [[ "$private" == "1" ]]; then
+    echo "[endor] WARNING: a non-rubygems.org gem source (private gem server?) was disabled in $file —" >&2
+    echo "[endor]          it is unreachable through gem until removal; gems from it must come via the firewall or Bundler source blocks." >&2
+    _ENDOR_WARNED=1
+  fi
+  rm -f "$removed"
+}
+
+# remove_gemrc <file> <mirror_url> <owner> <group>
+#   - <file>.endor-bak exists → the user's original is put back over <file> and the backup deleted
+#   - no backup, <file> is ours (Endor block or our source url) → <file> deleted (it was created by Endor;
+#                               when it was built from the XDG file, that file becomes active again)
+#   - no backup, not ours      → skipped
+remove_gemrc() {
+  local file="$1" mirror_url="$2" owner="$3" group="$4" backup="$1.endor-bak" hostpath
+  hostpath=$(_gemrc_hostpath "$mirror_url")
+
+  if [[ -e "$backup" ]]; then
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+      echo "[dry-run]   action : RESTORE $file from $backup, then delete the backup"; echo ""; return 0
+    fi
+    mv -f "$backup" "$file"; chown "$owner:$group" "$file"; chmod 600 "$file"
+    echo "[endor-remove] original restored   : $file"
+    return 0
+  fi
+  [[ -f "$file" ]] || { echo "[endor-remove] skip (not found)    : $file"; return 0; }
+  if ! grep -qF "$ENDOR_BLOCK_START" "$file" 2>/dev/null && ! grep -qF "$hostpath" "$file" 2>/dev/null; then
+    echo "[endor-remove] skip (no Endor block): $file"; return 0
+  fi
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "[dry-run]   action : DELETE $file (created by Endor — no pre-install backup exists)"; echo ""; return 0
+  fi
+  rm -f "$file"
+  echo "[endor-remove] deleted (Endor-made) : $file"
+}
+
+# warn_if_gemrc_source_override <file>...
+# Command-default keys (`gem:`, `install:`, …) apply on top of :sources:; one carrying
+# --source / -s / --clear-sources lets gem reach another server. Checked for the user
+# file, the XDG file and every Ruby's system-wide gemrc — those are never edited.
+# Lines inside the Endor block are ignored; missing files are skipped.
+warn_if_gemrc_source_override() {
+  local f
+  for f in "$@"; do
+    [[ -f "$f" ]] || continue
+    if awk -v s="$ENDOR_BLOCK_START" -v e="$ENDOR_BLOCK_END" '
+        index($0, s) { skip = 1; next }
+        index($0, e) { skip = 0; next }
+        skip { next }
+        /^[[:space:]]*[A-Za-z][A-Za-z_]*:[[:space:]]/ && (/--source/ || /--clear-sources/ || /(^|[[:space:]])-s([[:space:]]|$)/) { found = 1 }
+        END { exit(found ? 0 : 1) }' "$f" 2>/dev/null; then
+      echo "[endor] WARNING: $f sets gem command defaults with --source / -s / --clear-sources outside the Endor block —" >&2
+      echo "[endor]          they add or replace sources on every gem command and bypass the firewall; remove that option." >&2
+      _ENDOR_WARNED=1
+    fi
+  done
 }
