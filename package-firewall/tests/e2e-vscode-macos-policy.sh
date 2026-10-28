@@ -8,6 +8,8 @@
 #      and, with no account signed in, keeps the Marketplace off;
 #   3. check that endor-vscode-disable-policy.sh warns while the managed preference is there, and
 #      not once it is gone.
+# endor-vscode.sh and endor-vscode-disable-policy.sh run the way Jamf Pro runs a policy's script
+# (see jamf-run.sh).
 #
 # It writes to /Library/Managed Preferences and restarts cfprefsd, so it runs only on a
 # GitHub-hosted runner, or with ENDOR_E2E_ALLOW_HOST_CHANGES=1 on a disposable Mac. It needs
@@ -43,6 +45,8 @@ fi
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$TEST_DIR/../.." && pwd)"
+# shellcheck source=jamf-run.sh
+source "$TEST_DIR/jamf-run.sh"
 NAMESPACE="ci-e2e-policy"
 OUT="$ROOT_DIR/package-firewall/bash/out/$NAMESPACE"
 FIREWALL_PREFIX="https://factory.endorlabs.com/v1/namespaces/$NAMESPACE/firewall/vscode/_ak/"
@@ -102,6 +106,7 @@ cleanup() {
   if [[ -d "$PROFILE/logs" ]]; then
     cp -R "$PROFILE/logs" "$ARTIFACTS/vscode-logs"
   fi
+  jamf_cleanup
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -141,14 +146,20 @@ done
 sudo /bin/mkdir -p "$MANAGED_DIR"
 sudo /usr/bin/install -m 0644 -o root -g wheel "$WORK/payload.plist" "$MANAGED"
 reload_preferences
-sudo env ENDOR_VSCODE_APP="$APP" bash "$OUT/endor-vscode.sh" > "$ARTIFACTS/install.log" 2>&1 \
+# ENDOR_VSCODE_APP points the installer's version check at the downloaded app.
+jamf_run ENDOR_VSCODE_APP="$APP" "$OUT/endor-vscode.sh" "$ARTIFACTS/install-dry-run.log" --dry-run \
+  || fail "the dry run of endor-vscode.sh exited non-zero (see install-dry-run.log)"
+grep -qF "DRY RUN" "$ARTIFACTS/install-dry-run.log" \
+  || fail "endor-vscode.sh did not take --dry-run from Jamf's parameter 4 (see install-dry-run.log)"
+pass "endor-vscode.sh takes --dry-run from Jamf's parameter 4"
+jamf_run ENDOR_VSCODE_APP="$APP" "$OUT/endor-vscode.sh" "$ARTIFACTS/install.log" \
   || fail "endor-vscode.sh exited non-zero (see install.log)"
 grep -qF "VS Code's policy is set by a configuration profile." "$ARTIFACTS/install.log" \
   || fail "endor-vscode.sh did not find the policy (see install.log)"
 if grep -q "doesn't read" "$ARTIFACTS/install.log"; then
   fail "endor-vscode.sh says VS Code $VERSION is too old for the policy"
 fi
-pass "endor-vscode.sh reports the policy as set by a configuration profile"
+pass "endor-vscode.sh, run as Jamf runs a script, reports the policy as set by a configuration profile"
 
 step "Launch VS Code"
 mkdir -p "$PROFILE/User" "$WORK/extensions"
@@ -169,7 +180,7 @@ pass "with no account signed in, VS Code keeps the Marketplace off"
 quit_vscode
 
 step "Turn the policy off"
-if sudo bash "$OUT/endor-vscode-disable-policy.sh" > "$ARTIFACTS/disable-policy.log" 2>&1; then
+if jamf_run "$OUT/endor-vscode-disable-policy.sh" "$ARTIFACTS/disable-policy.log"; then
   fail "endor-vscode-disable-policy.sh exited 0 while a profile sets the policy"
 fi
 grep -qF "Remove the profile in your MDM" "$ARTIFACTS/disable-policy.log" \
@@ -177,7 +188,7 @@ grep -qF "Remove the profile in your MDM" "$ARTIFACTS/disable-policy.log" \
 pass "endor-vscode-disable-policy.sh warns while the profile is installed"
 sudo /bin/rm -f "$MANAGED"
 reload_preferences
-sudo bash "$OUT/endor-vscode-disable-policy.sh" >> "$ARTIFACTS/disable-policy.log" 2>&1 \
-  || fail "endor-vscode-disable-policy.sh exited non-zero once the profile was gone (see disable-policy.log)"
+jamf_run "$OUT/endor-vscode-disable-policy.sh" "$ARTIFACTS/disable-policy-after.log" \
+  || fail "endor-vscode-disable-policy.sh exited non-zero once the profile was gone (see disable-policy-after.log)"
 pass "endor-vscode-disable-policy.sh is clean once the profile is gone"
 echo "VS Code macOS policy end-to-end test passed"

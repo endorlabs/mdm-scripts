@@ -11,8 +11,10 @@ on:
       - package-firewall/bash/generate.sh
       - package-firewall/bash/templates/vscode.sh
       - package-firewall/bash/templates/remove.sh
+      - package-firewall/bash/lib/common.sh
       - package-firewall/shared/vscode/**
       - package-firewall/tests/e2e-vscode-macos-policy.sh
+      - package-firewall/tests/jamf-run.sh
       - .github/workflows/vscode-macos-policy-e2e.yml
   push:
     branches: [main]
@@ -20,8 +22,10 @@ on:
       - package-firewall/bash/generate.sh
       - package-firewall/bash/templates/vscode.sh
       - package-firewall/bash/templates/remove.sh
+      - package-firewall/bash/lib/common.sh
       - package-firewall/shared/vscode/**
       - package-firewall/tests/e2e-vscode-macos-policy.sh
+      - package-firewall/tests/jamf-run.sh
       - .github/workflows/vscode-macos-policy-e2e.yml
   schedule:
     # Weekly, to catch VS Code releases that change how the policy is read.
