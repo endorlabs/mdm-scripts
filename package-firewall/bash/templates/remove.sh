@@ -33,7 +33,8 @@
 #     Restores default gallery properties and removes update remediation. On macOS this
 #     swaps Microsoft's original app back in and deletes the per-device signing identity.
 #     On Linux it also removes Endor's ExtensionGalleryServiceUrl policy from
-#     /etc/vscode/policy.json.
+#     /etc/vscode/policy.json. On macOS it reports an Endor configuration profile, which only
+#     the MDM can remove.
 #
 #   Shell profiles (env.sh source line):
 #     ~/.zshrc
@@ -498,7 +499,25 @@ sys.exit(main(sys.argv))
 ENDOR_VSCODE_POLICY_PY
 _vscode_policy_file="${ENDOR_VSCODE_POLICY_FILE:-/etc/vscode/policy.json}"
 _vscode_policy_state="${ENDOR_VSCODE_POLICY_STATE_DIR:-/var/lib/endor/vscode-policy}"
-if [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" && "$_vscode_remove_os" != "Linux" ]]; then
+if [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" && "$_vscode_remove_os" == "Darwin" ]]; then
+  # On macOS the policy comes from a configuration profile, which only the MDM can remove.
+  # ENDOR_VSCODE_MANAGED_PREFS is for tests, as in the installer.
+  _vscode_managed="${ENDOR_VSCODE_MANAGED_PREFS:-/Library/Managed Preferences}"
+  _vscode_profile_left=""
+  for _vscode_file in "$_vscode_managed/com.microsoft.VSCode.plist" "$_vscode_managed"/*/com.microsoft.VSCode.plist; do
+    [[ -f "$_vscode_file" ]] || continue
+    case "$(/usr/bin/plutil -extract ExtensionGalleryServiceUrl raw -o - "$_vscode_file" 2>/dev/null || true)" in
+      */firewall/vscode/_ak/*) _vscode_profile_left="$_vscode_file"; break ;;
+    esac
+  done
+  if [[ -n "$_vscode_profile_left" ]]; then
+    echo "[endor-remove] WARNING: a configuration profile sets VS Code's ExtensionGalleryServiceUrl ($_vscode_profile_left)." >&2
+    echo "[endor-remove]   Remove the profile in your MDM; this script can't." >&2
+    _ENDOR_WARNED=1
+  else
+    echo "[endor-remove] skip (no VS Code configuration profile)"
+  fi
+elif [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" && "$_vscode_remove_os" != "Linux" ]]; then
   :
 elif [[ ! -e "$_vscode_policy_file" && ! -e "$_vscode_policy_state" ]]; then
   echo "[endor-remove] skip (no VS Code policy file)"
@@ -517,6 +536,7 @@ fi
 unset -f _vscode_run_worker
 unset _vscode_remove_os _VSCODE_STATE_DIR _vscode_plist _vscode_restore_ok
 unset _VSCODE_POLICY_PY _vscode_policy_file _vscode_policy_state _vscode_strict
+unset _vscode_managed _vscode_profile_left _vscode_file
 # <<< endor-vscode-remove
 
 echo ""

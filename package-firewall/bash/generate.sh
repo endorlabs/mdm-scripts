@@ -58,6 +58,9 @@
 #   endor-vscode.sh   — VS Code:    extension gallery firewall + update watcher
 #   endor-all.sh      — All of the above (single-script MDM deploy)
 #   endor-remove.sh   — Offboarding: strips Endor config from all files
+#   endor-vscode.mobileconfig, endor-vscode-policy.plist
+#                     — With ENDOR_VSCODE_ENABLE_POLICY: VS Code's policy for macOS, as a
+#                       configuration profile and as a plain property list, for the MDM
 #
 # All scripts accept --dry-run: prints what would change without writing anything.
 # All scripts are idempotent — safe to re-push on MDM check-in cycles.
@@ -68,6 +71,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/lib"
 TMPL_DIR="$SCRIPT_DIR/templates"
 SHARED_BLOCKS_DIR="$SCRIPT_DIR/../shared/blocks"
+SHARED_VSCODE_DIR="$SCRIPT_DIR/../shared/vscode"
 
 # ─── Validate required env vars ───────────────────────────────────────────────
 : "${ENDOR_NAMESPACE:?ENDOR_NAMESPACE is required}"
@@ -580,6 +584,80 @@ build_remove_script "$OUT_DIR/endor-remove.sh"
 } > "$OUT_DIR/endor-all.sh"
 chmod 700 "$OUT_DIR/endor-all.sh"
 
+# ─── VS Code policy for macOS ─────────────────────────────────────────────────
+# On macOS, VS Code reads its policy from managed preferences, so the policy goes to Macs as an
+# MDM configuration profile. The property list holds the same keys, for MDMs that take a
+# preference domain and a file (Jamf's Application & Custom Settings, Intune's Preference file).
+# Both carry the credential, so they are mode 600; and both go when the policy is off, so an old
+# credential doesn't linger in out/.
+VSCODE_PROFILE="$OUT_DIR/endor-vscode.mobileconfig"
+VSCODE_POLICY_PLIST="$OUT_DIR/endor-vscode-policy.plist"
+
+sha256_hex() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256; else sha256sum; fi | cut -d' ' -f1
+}
+
+# uuid_from <text>: a UUID in the RFC 4122 version 5 layout, from a SHA-256 of the text. The
+# profile's UUIDs then change only when its content does.
+uuid_from() {
+  local hex
+  hex=$(printf '%s' "$1" | sha256_hex)
+  printf '%s-%s-5%s-%x%s-%s' "${hex:0:8}" "${hex:8:4}" "${hex:13:3}" \
+    $(( (16#${hex:16:1} & 3) | 8 )) "${hex:17:3}" "${hex:20:12}" | tr '[:lower:]' '[:upper:]'
+}
+
+# render_vscode_profile [profile-uuid payload-uuid]: the profile, without the template's comment.
+# Without UUIDs, their placeholders stay, which is what the UUIDs are derived from.
+render_vscode_profile() {
+  awk -v url="$VSCODE_SERVICE_URL" -v auth="$VSCODE_POLICY_AUTH" \
+      -v profile_uuid="${1:-}" -v payload_uuid="${2:-}" '
+    function fill(line, tag, value,    at) {
+      at = index(line, tag)
+      if (value == "" || !at) return line
+      return substr(line, 1, at - 1) value substr(line, at + length(tag))
+    }
+    /^<!--/ { comment = 1 }
+    comment { if (index($0, "-->")) comment = 0; next }
+    index($0, "{{VSCODE_POLICY_AUTH_ENTRY}}") {
+      if (auth != "") {
+        print "\t\t\t<key>ExtensionGalleryAuthProvider</key>"
+        print "\t\t\t<string>" auth "</string>"
+      }
+      next
+    }
+    {
+      line = fill($0, "{{VSCODE_SERVICE_URL}}", url)
+      line = fill(line, "{{VSCODE_PROFILE_UUID}}", profile_uuid)
+      print fill(line, "{{VSCODE_PAYLOAD_UUID}}", payload_uuid)
+    }
+  ' "$SHARED_VSCODE_DIR/com.microsoft.VSCode.mobileconfig"
+}
+
+if [[ "$VSCODE_ENABLE_POLICY" == "1" ]]; then
+  vscode_profile_base=$(render_vscode_profile)
+  (
+    umask 077
+    render_vscode_profile "$(uuid_from "profile:$vscode_profile_base")" \
+      "$(uuid_from "payload:$vscode_profile_base")" > "$VSCODE_PROFILE"
+    {
+      echo '<?xml version="1.0" encoding="UTF-8"?>'
+      echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+      echo '<plist version="1.0">'
+      echo '<dict>'
+      printf '\t<key>ExtensionGalleryServiceUrl</key>\n\t<string>%s</string>\n' "$VSCODE_SERVICE_URL"
+      if [[ -n "$VSCODE_POLICY_AUTH" ]]; then
+        printf '\t<key>ExtensionGalleryAuthProvider</key>\n\t<string>%s</string>\n' "$VSCODE_POLICY_AUTH"
+      fi
+      echo '</dict>'
+      echo '</plist>'
+    } > "$VSCODE_POLICY_PLIST"
+  )
+  chmod 600 "$VSCODE_PROFILE" "$VSCODE_POLICY_PLIST"
+  unset vscode_profile_base
+else
+  rm -f "$VSCODE_PROFILE" "$VSCODE_POLICY_PLIST"
+fi
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "✓  Generated → $OUT_DIR"
@@ -593,6 +671,10 @@ printf "   %-24s  %s\n" "endor-ruby.sh"   "bundler (~/.bundle/config) · gem (~/
 printf "   %-24s  %s\n" "endor-vscode.sh" "VS Code extension gallery + update remediation"
 printf "   %-24s  %s\n" "endor-all.sh"    "all of the above (single-script deploy)"
 printf "   %-24s  %s\n" "endor-remove.sh" "offboarding — strips all Endor config"
+if [[ "$VSCODE_ENABLE_POLICY" == "1" ]]; then
+  printf "   %-24s  %s\n" "endor-vscode.mobileconfig" "VS Code policy for macOS: upload to your MDM"
+  printf "   %-24s  %s\n" "endor-vscode-policy.plist" "the same keys, for MDMs that take a preference file"
+fi
 echo ""
 if [[ "$VSCODE_ENABLE_PATCH" == "0" && "$VSCODE_ENABLE_POLICY" == "0" ]]; then
   echo "WARNING: VS Code: no method enabled, so endor-vscode.sh and endor-all.sh leave VS Code alone." >&2
@@ -609,7 +691,7 @@ else
   if [[ "$VSCODE_ENABLE_POLICY" == "1" ]]; then
     echo "   With the policy, VS Code turns the Extensions Marketplace off for anyone not signed in"
     echo "   with an eligible account. See README.md before deploying."
-    echo "   On macOS the policy needs a configuration profile from your MDM; see README.md."
+    echo "   On macOS, upload endor-vscode.mobileconfig to your MDM; see bash/README.md."
   fi
 fi
 echo "   All scripts accept --dry-run to preview changes without writing anything."

@@ -70,13 +70,14 @@ Running either generator produces these scripts in `out/<namespace>/`:
 | `endor-maven.*` | Configure Maven only |
 | `endor-nuget.*` | Configure NuGet / .NET only |
 | `endor-ruby.*` | Configure Ruby — Bundler and gem — only |
-| `endor-vscode.*` | Patch VS Code `product.json` and install update remediation |
+| `endor-vscode.*` | Configure VS Code by the methods you enable: the `product.json` patch and/or the gallery policy (see [VS Code](#vs-code)) |
 | `endor-all.*` | Configure all package managers (single-script deploy) |
 | `endor-remove.*` | Strip all Endor configuration from a machine |
+| `endor-vscode.mobileconfig`, `endor-vscode-policy.plist` | bash generator, with `ENDOR_VSCODE_ENABLE_POLICY`: VS Code's policy for Macs, as a configuration profile and as a property list, to upload to your MDM |
 
 Each generated script carries all Endor configuration it needs; VS Code's Linux remediation also uses systemd and Python 3 as noted below.
 
-> **Security**: add `out/` to `.gitignore`. Generated scripts contain API credentials in plaintext.
+> **Security**: add `out/` to `.gitignore`. Generated scripts and the VS Code profile contain API credentials in plaintext.
 
 ## VS Code
 
@@ -119,7 +120,7 @@ patch off everywhere; `generate.sh` warns about it.
 |---|---|---|
 | Covers | The editor and `code --install-extension` | The editor only. `code --install-extension` ignores the policy |
 | Sign-in | Not needed | Required: an eligible account, above |
-| Where it lives | `product.json` in each VS Code install | Linux: `/etc/vscode/policy.json`. Windows: `HKLM\SOFTWARE\Policies\Microsoft\VSCode`. macOS: a configuration profile from your MDM |
+| Where it lives | `product.json` in each VS Code install | Linux: `/etc/vscode/policy.json`. Windows: `HKLM\SOFTWARE\Policies\Microsoft\VSCode`. macOS: managed preferences, from the `endor-vscode.mobileconfig` profile you upload to your MDM |
 | What keeps it applied | A watcher reapplies it after every VS Code update (below) | Nothing needs to: updates don't touch it |
 | macOS | The daemon re-signs VS Code with a certificate unique to each Mac. Users see a keychain prompt after each update, and the app no longer carries Microsoft's Team ID ([details](bash/README.md#macos-code-signing)) | VS Code is left as Microsoft shipped it. Deliver the policy with an MDM profile: users can't override managed preferences, but can override any other kind |
 | VS Code versions | All | 1.99 or later; 1.106 or later on Linux; 1.137 or later for `ENDOR_VSCODE_POLICY_AUTH` |
