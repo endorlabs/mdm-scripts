@@ -334,6 +334,17 @@ jobs:
             echo "No package-firewall/tests directory on this branch yet - skipping."
           fi
 
+      # Jamf Pro runs a script with launchd's environment: PATH /usr/bin:/bin:/usr/sbin:/sbin, so
+      # #!/usr/bin/env bash is /bin/bash 3.2, and no HOME or locale. Run the VS Code suites in it.
+      - name: Run the VS Code suites in Jamf's environment
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          cd package-firewall/tests
+          for suite in test-vscode.sh test-vscode-policy.sh; do
+            env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash "./$suite"
+          done
+
   tests-windows:
     name: Tests (windows-latest)
     runs-on: windows-latest
