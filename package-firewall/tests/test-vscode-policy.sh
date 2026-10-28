@@ -562,6 +562,63 @@ for script in "$OUT/endor-vscode-disable-patch.sh" "$OUT/endor-vscode-disable-po
   fi
 done
 
+# A Mac with no one logged in: logname finds no login, and the console belongs to
+# ENDOR_TEST_CONSOLE_OWNER. Other stat calls go to the real stat.
+NO_USER_BIN="$TMP_DIR/no-user-bin"
+mkdir -p "$NO_USER_BIN"
+printf '#!/bin/sh\nexit 1\n' > "$NO_USER_BIN/logname"
+cat > "$NO_USER_BIN/stat" <<'STAT'
+#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = /dev/console ]; then
+    echo "$ENDOR_TEST_CONSOLE_OWNER"
+    exit 0
+  fi
+done
+exec /usr/bin/stat "$@"
+STAT
+chmod 755 "$NO_USER_BIN/logname" "$NO_USER_BIN/stat"
+# console_user_with <owner>: what find_console_user prints when the console belongs to owner.
+console_user_with() {
+  PATH="$NO_USER_BIN:$PATH" ENDOR_TEST_CONSOLE_OWNER="$1" bash -c 'source "$1"; find_console_user' _ \
+    "$ROOT_DIR/package-firewall/bash/lib/common.sh"
+}
+
+echo "test: the console user is found, and no one at the login window or in Setup Assistant"
+[[ "$(console_user_with alice)" == "alice" ]] || fail "find_console_user did not find the console's owner"
+for owner in root _mbsetupuser loginwindow; do
+  [[ -z "$(console_user_with "$owner")" ]] || fail "find_console_user took $owner for a logged-in user"
+done
+
+echo "test: with no one logged in, endor-remove.sh still removes VS Code's configuration"
+PATCH=1 generate
+for owner in root _mbsetupuser; do
+  # Otherwise endor-remove.sh would change this machine's own dotfiles.
+  [[ -z "$(console_user_with "$owner")" ]] || fail "the fakes don't hide the user logged in here"
+  new_case "no-user-$owner"
+  install
+  expect_rc 0
+  RC=0
+  OUTPUT=$(PATH="$NO_USER_BIN:$PATH" ENDOR_TEST_CONSOLE_OWNER="$owner" \
+    ENDOR_VSCODE_PRODUCT_JSON="$CASE/app/product.json" \
+    ENDOR_VSCODE_STATE_DIR="$CASE/state" \
+    ENDOR_VSCODE_POLICY_FILE="$POLICY_FILE" \
+    ENDOR_VSCODE_POLICY_STATE_DIR="$POLICY_STATE" \
+    ENDOR_VSCODE_SKIP_WATCHER=1 \
+    "$OUT/endor-remove.sh" 2>&1) || RC=$?
+  expect_rc 1
+  expect_output "no user is logged in, so the configuration in the user's home folder was left."
+  expect_output "Machine-wide configuration removed"
+  if grep -qF "── JavaScript" <<<"$OUTPUT"; then
+    fail "endor-remove.sh went through a user's files with no one logged in"
+  fi
+  [[ "$(product_url)" == "https://marketplace.visualstudio.com/_apis/public/gallery" ]] \
+    || fail "endor-remove.sh did not restore product.json with no one logged in"
+  [[ ! -e "$CASE/state" ]] || fail "endor-remove.sh left the patch's state with no one logged in"
+  [[ ! -e "$POLICY_FILE" ]] || fail "endor-remove.sh left the policy file with no one logged in"
+done
+generate
+
 echo "test: the generator refuses a remove template without exactly one marked VS Code section"
 copy="$TMP_DIR/generator-copy"
 mkdir -p "$copy/package-firewall"

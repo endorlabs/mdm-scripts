@@ -369,6 +369,21 @@ USER_GROUP=$(id -gn "$CONSOLE_USER" 2>/dev/null || echo "staff")
 USERBLOCK
 }
 
+# remove_user_detection_block — for endor-remove.sh, which removes the machine-wide configuration
+# (VS Code's) when no one is logged in, and leaves the user's files to a later run.
+remove_user_detection_block() {
+  cat << 'REMOVEUSERBLOCK'
+# ── Detect console user and home (empty when no one is logged in) ─────────────
+CONSOLE_USER=$(find_console_user)
+USER_HOME=""
+USER_GROUP=""
+if [[ -n "$CONSOLE_USER" ]]; then
+  USER_HOME=$(resolve_user_home "$CONSOLE_USER")
+  USER_GROUP=$(id -gn "$CONSOLE_USER" 2>/dev/null || echo "staff")
+fi
+REMOVEUSERBLOCK
+}
+
 # credentials_block — attribution values computed on the dev machine at install
 # time (the <console-user>@<machine> label doesn't exist at generation time).
 credentials_block() {
@@ -398,10 +413,11 @@ echo "[endor] user attribution → ${ENDOR_ATTR_LABEL}"
 CREDBLOCK
 }
 
-# script_header <output> <description>
+# script_header <output> <description> [user detection block]
 script_header() {
   local output="$1"
   local description="$2"
+  local user_block="${3:-user_detection_block}"
   echo "#!/usr/bin/env bash"
   echo "# MDM-deployable: ${description}"
   echo "# Generated for namespace=${ENDOR_NAMESPACE} fqdn=${FQDN}."
@@ -416,7 +432,7 @@ script_header() {
   echo ""
   arg_parsing_block
   echo ""
-  user_detection_block
+  "$user_block"
   echo ""
 }
 
@@ -483,7 +499,8 @@ build_remove_script() {
   local output="$1"
 
   {
-    script_header "$output" "Removes Endor Package Firewall configuration from all managed config files."
+    script_header "$output" "Removes Endor Package Firewall configuration from all managed config files." \
+      remove_user_detection_block
     substitute < "$TMPL_DIR/remove.sh"
   } > "$output"
 

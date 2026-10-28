@@ -130,7 +130,9 @@ Each script in `out/<namespace>/` carries all Endor configuration it needs. The 
 
 Upload the script file. Ensure it runs as **root** — the script detects the logged-in console user internally and writes config files to the correct home directory.
 
-The scripts take one optional argument, `--dry-run`. They ignore the target volume, computer name and user that Jamf Pro passes as `$1`–`$3`, and any script parameters left empty, so `--dry-run` also works as a Jamf parameter.
+With no one logged in (at the login window, or in Setup Assistant during enrollment), the package-manager scripts, `endor-all.sh` included, exit 1 without changing anything, so run them while a user is logged in, for example at login or at a recurring check-in. `endor-vscode.sh` and the disable scripts are machine-wide and need no user. `endor-remove.sh` removes the machine-wide configuration (VS Code's, and root's `.gemrc`), leaves the user's files, and exits 1, so run it again once the user logs in.
+
+The scripts take one optional argument, `--dry-run`. They ignore the target volume, computer name and user that Jamf Pro passes as `$1`–`$3`, and any script parameters left empty, so `--dry-run` also works as a Jamf parameter. Leave the other parameters empty: any other value makes the script exit 1.
 
 ---
 
