@@ -47,6 +47,9 @@
 #   - Files with other content have only the block stripped
 #   - --dry-run: prints what would happen, writes nothing
 #   - Safe to run multiple times (idempotent)
+#   - With no one logged in (the login window, Setup Assistant), only the machine-wide
+#     configuration goes: root's .gemrc and VS Code's. The user's files stay, and the script
+#     warns, so an MDM can run it again once the user logs in.
 
 echo ""
 echo "[endor-remove] ── Endor Package Firewall removal ──────────────────────────"
@@ -56,129 +59,136 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
 fi
 echo ""
 
-# ── env.sh and shell profile source lines ────────────────────────────────────
-echo "[endor-remove] ── env.sh ────────────────────────────────────────────────────"
+if [[ -n "$CONSOLE_USER" ]]; then
+  # ── env.sh and shell profile source lines ────────────────────────────────────
+  echo "[endor-remove] ── env.sh ────────────────────────────────────────────────────"
 
-remove_block "$USER_HOME/.config/endor/env.sh" "$CONSOLE_USER" "$USER_GROUP"
+  remove_block "$USER_HOME/.config/endor/env.sh" "$CONSOLE_USER" "$USER_GROUP"
 
-if [[ "${DRY_RUN:-0}" != "1" ]]; then
-  rmdir "$USER_HOME/.config/endor" 2>/dev/null || true
-fi
+  if [[ "${DRY_RUN:-0}" != "1" ]]; then
+    rmdir "$USER_HOME/.config/endor" 2>/dev/null || true
+  fi
 
-echo ""
-echo "[endor-remove] ── Shell profiles (env.sh source line) ───────────────────────"
+  echo ""
+  echo "[endor-remove] ── Shell profiles (env.sh source line) ───────────────────────"
 
-for _profile in \
-  "$USER_HOME/.zshrc" \
-  "$USER_HOME/.bash_profile" \
-  "$USER_HOME/.bashrc"; do
-  remove_block "$_profile" "$CONSOLE_USER" "$USER_GROUP"
-done
-unset _profile
+  for _profile in \
+    "$USER_HOME/.zshrc" \
+    "$USER_HOME/.bash_profile" \
+    "$USER_HOME/.bashrc"; do
+    remove_block "$_profile" "$CONSOLE_USER" "$USER_GROUP"
+  done
+  unset _profile
 
-# ── JavaScript config files ───────────────────────────────────────────────────
-echo ""
-echo "[endor-remove] ── JavaScript ───────────────────────────────────────────────"
+  # ── JavaScript config files ───────────────────────────────────────────────────
+  echo ""
+  echo "[endor-remove] ── JavaScript ───────────────────────────────────────────────"
 
-remove_block "$USER_HOME/.npmrc"      "$CONSOLE_USER" "$USER_GROUP"
-remove_block "$USER_HOME/.yarnrc"     "$CONSOLE_USER" "$USER_GROUP"
-remove_block "$USER_HOME/.yarnrc.yml" "$CONSOLE_USER" "$USER_GROUP"
+  remove_block "$USER_HOME/.npmrc"      "$CONSOLE_USER" "$USER_GROUP"
+  remove_block "$USER_HOME/.yarnrc"     "$CONSOLE_USER" "$USER_GROUP"
+  remove_block "$USER_HOME/.yarnrc.yml" "$CONSOLE_USER" "$USER_GROUP"
 
-# yarn 1.x rewrites ~/.yarnrc on its own and can copy the Endor registry
-# outside the managed block. Delete only lines that exactly match our URL —
-# they can't be anyone else's config.
-_YARNRC="$USER_HOME/.yarnrc"
-_ENDOR_YARN_LINE='registry "{{NPM_REGISTRY_URL}}"'
-if [[ -f "$_YARNRC" ]] && awk -v s="$ENDOR_BLOCK_START" -v e="$ENDOR_BLOCK_END" '
-      index($0, s) { skip=1; next }
-      index($0, e) { skip=0; next }
-      !skip        { print }
-    ' "$_YARNRC" | grep -qxF "$_ENDOR_YARN_LINE"; then
-  if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    echo "[dry-run]   action : DELETE yarn-copied Endor registry line from $_YARNRC"
-  else
-    _tmp=$(mktemp)
-    grep -vxF "$_ENDOR_YARN_LINE" "$_YARNRC" | grep -vx 'always-auth true' > "$_tmp" || true
-    if [[ -z "$(tr -d '[:space:]' < "$_tmp")" ]]; then
-      rm -f "$_YARNRC" "$_tmp"
-      echo "[endor-remove] deleted (was empty) : $_YARNRC"
+  # yarn 1.x rewrites ~/.yarnrc on its own and can copy the Endor registry
+  # outside the managed block. Delete only lines that exactly match our URL —
+  # they can't be anyone else's config.
+  _YARNRC="$USER_HOME/.yarnrc"
+  _ENDOR_YARN_LINE='registry "{{NPM_REGISTRY_URL}}"'
+  if [[ -f "$_YARNRC" ]] && awk -v s="$ENDOR_BLOCK_START" -v e="$ENDOR_BLOCK_END" '
+        index($0, s) { skip=1; next }
+        index($0, e) { skip=0; next }
+        !skip        { print }
+      ' "$_YARNRC" | grep -qxF "$_ENDOR_YARN_LINE"; then
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+      echo "[dry-run]   action : DELETE yarn-copied Endor registry line from $_YARNRC"
     else
-      mv "$_tmp" "$_YARNRC"
-      chown "$CONSOLE_USER:$USER_GROUP" "$_YARNRC"
-      chmod 600 "$_YARNRC"
-      echo "[endor-remove] yarn-copied line removed: $_YARNRC"
+      _tmp=$(mktemp)
+      grep -vxF "$_ENDOR_YARN_LINE" "$_YARNRC" | grep -vx 'always-auth true' > "$_tmp" || true
+      if [[ -z "$(tr -d '[:space:]' < "$_tmp")" ]]; then
+        rm -f "$_YARNRC" "$_tmp"
+        echo "[endor-remove] deleted (was empty) : $_YARNRC"
+      else
+        mv "$_tmp" "$_YARNRC"
+        chown "$CONSOLE_USER:$USER_GROUP" "$_YARNRC"
+        chmod 600 "$_YARNRC"
+        echo "[endor-remove] yarn-copied line removed: $_YARNRC"
+      fi
     fi
   fi
-fi
-unset _YARNRC _ENDOR_YARN_LINE _tmp
+  unset _YARNRC _ENDOR_YARN_LINE _tmp
 
-# ── Python config files ───────────────────────────────────────────────────────
-echo ""
-echo "[endor-remove] ── Python ────────────────────────────────────────────────────"
+  # ── Python config files ───────────────────────────────────────────────────────
+  echo ""
+  echo "[endor-remove] ── Python ────────────────────────────────────────────────────"
 
-# remove_block also restores pip keys disabled with '#endor-bak#' at install time
-for pip_conf in \
-  "$USER_HOME/.pip/pip.conf" \
-  "$USER_HOME/.config/pip/pip.conf" \
-  "$USER_HOME/Library/Application Support/pip/pip.conf"; do
-  remove_block "$pip_conf" "$CONSOLE_USER" "$USER_GROUP"
-done
-unset pip_conf
+  # remove_block also restores pip keys disabled with '#endor-bak#' at install time
+  for pip_conf in \
+    "$USER_HOME/.pip/pip.conf" \
+    "$USER_HOME/.config/pip/pip.conf" \
+    "$USER_HOME/Library/Application Support/pip/pip.conf"; do
+    remove_block "$pip_conf" "$CONSOLE_USER" "$USER_GROUP"
+  done
+  unset pip_conf
 
-remove_block "$USER_HOME/.config/uv/uv.toml" "$CONSOLE_USER" "$USER_GROUP"
+  remove_block "$USER_HOME/.config/uv/uv.toml" "$CONSOLE_USER" "$USER_GROUP"
 
-# ── Go config file ────────────────────────────────────────────────────────────
-echo ""
-echo "[endor-remove] ── Go ────────────────────────────────────────────────────────────"
+  # ── Go config file ────────────────────────────────────────────────────────────
+  echo ""
+  echo "[endor-remove] ── Go ────────────────────────────────────────────────────────────"
 
-# Resolve go env file path the same way the install script does.
-_GO_ENV_FILE=""
-for _go_bin in \
-  /usr/local/go/bin/go \
-  /opt/homebrew/bin/go \
-  /opt/homebrew/opt/go/bin/go \
-  /usr/local/bin/go \
-  /usr/bin/go; do
-  if [[ -x "$_go_bin" ]]; then
-    _GO_ENV_FILE=$(HOME="$USER_HOME" GOENV="" "$_go_bin" env GOENV 2>/dev/null || true)
-    break
+  # Resolve go env file path the same way the install script does.
+  _GO_ENV_FILE=""
+  for _go_bin in \
+    /usr/local/go/bin/go \
+    /opt/homebrew/bin/go \
+    /opt/homebrew/opt/go/bin/go \
+    /usr/local/bin/go \
+    /usr/bin/go; do
+    if [[ -x "$_go_bin" ]]; then
+      _GO_ENV_FILE=$(HOME="$USER_HOME" GOENV="" "$_go_bin" env GOENV 2>/dev/null || true)
+      break
+    fi
+  done
+  if [[ -z "$_GO_ENV_FILE" ]]; then
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      _GO_ENV_FILE="$USER_HOME/Library/Application Support/go/env"
+    else
+      _GO_ENV_FILE="${XDG_CONFIG_HOME:-$USER_HOME/.config}/go/env"
+    fi
   fi
-done
-if [[ -z "$_GO_ENV_FILE" ]]; then
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    _GO_ENV_FILE="$USER_HOME/Library/Application Support/go/env"
-  else
-    _GO_ENV_FILE="${XDG_CONFIG_HOME:-$USER_HOME/.config}/go/env"
-  fi
+  unset _go_bin
+
+  remove_block "$_GO_ENV_FILE" "$CONSOLE_USER" "$USER_GROUP"
+  unset _GO_ENV_FILE
+
+  # ── Maven config file ────────────────────────────────────────────────────────────
+  echo ""
+  echo "[endor-remove] ── Maven ────────────────────────────────────────────────────────────"
+
+  remove_xml_block "$USER_HOME/.m2/settings.xml" "$CONSOLE_USER" "$USER_GROUP"
+
+  # ── NuGet config file ─────────────────────────────────────────────────────────
+  echo ""
+  echo "[endor-remove] ── NuGet / .NET ────────────────────────────────────────────────"
+
+  remove_nuget_blocks "$USER_HOME/.nuget/NuGet/NuGet.Config" "$CONSOLE_USER" "$USER_GROUP"
+
+  # ── Bundler config file ───────────────────────────────────────────────────────
+  echo ""
+  echo "[endor-remove] ── Ruby / Bundler ──────────────────────────────────────────────"
+
+  remove_bundle_config "$USER_HOME/.bundle/config" "{{GEM_MIRROR_URL}}" "$CONSOLE_USER" "$USER_GROUP"
+
+  # ── gem config files ──────────────────────────────────────────────────────────
+  echo ""
+  echo "[endor-remove] ── Ruby / gem ──────────────────────────────────────────────────"
+
+  remove_gemrc "$USER_HOME/.gemrc" "{{GEM_MIRROR_URL}}" "$CONSOLE_USER" "$USER_GROUP"
+else
+  echo "[endor-remove] WARNING: no user is logged in, so the configuration in the user's home folder was left." >&2
+  echo "[endor-remove]   Run this again while the user is logged in to remove it." >&2
+  _ENDOR_WARNED=1
 fi
-unset _go_bin
 
-remove_block "$_GO_ENV_FILE" "$CONSOLE_USER" "$USER_GROUP"
-unset _GO_ENV_FILE
-
-# ── Maven config file ────────────────────────────────────────────────────────────
-echo ""
-echo "[endor-remove] ── Maven ────────────────────────────────────────────────────────────"
-
-remove_xml_block "$USER_HOME/.m2/settings.xml" "$CONSOLE_USER" "$USER_GROUP"
-
-# ── NuGet config file ─────────────────────────────────────────────────────────
-echo ""
-echo "[endor-remove] ── NuGet / .NET ────────────────────────────────────────────────"
-
-remove_nuget_blocks "$USER_HOME/.nuget/NuGet/NuGet.Config" "$CONSOLE_USER" "$USER_GROUP"
-
-# ── Bundler config file ───────────────────────────────────────────────────────
-echo ""
-echo "[endor-remove] ── Ruby / Bundler ──────────────────────────────────────────────"
-
-remove_bundle_config "$USER_HOME/.bundle/config" "{{GEM_MIRROR_URL}}" "$CONSOLE_USER" "$USER_GROUP"
-
-# ── gem config files ──────────────────────────────────────────────────────────
-echo ""
-echo "[endor-remove] ── Ruby / gem ──────────────────────────────────────────────────"
-
-remove_gemrc "$USER_HOME/.gemrc" "{{GEM_MIRROR_URL}}" "$CONSOLE_USER" "$USER_GROUP"
 if [[ "$EUID" -eq 0 ]]; then
   _ROOT_HOME=$(resolve_user_home root)
   remove_gemrc "$_ROOT_HOME/.gemrc" "{{GEM_MIRROR_URL}}" root "$(id -gn root)"
@@ -187,83 +197,90 @@ fi
 
 # >>> endor-vscode-remove
 # ── VS Code extension firewall ────────────────────────────────────────────────
-# Removes both methods: the product.json patch and the ExtensionGalleryServiceUrl policy. This
-# section stands on its own, and doesn't use the console user.
+# Removes the VS Code methods in scope: the product.json patch, the ExtensionGalleryServiceUrl
+# policy, or both. endor-remove.sh removes both, and generate.sh builds
+# endor-vscode-disable-patch.sh and endor-vscode-disable-policy.sh from this section with the
+# scope filled in. So the section stands on its own, and doesn't use the console user.
+_vscode_remove_scope='{{VSCODE_REMOVE_SCOPE}}'
+case "$_vscode_remove_scope" in patch|policy) ;; *) _vscode_remove_scope=all ;; esac
 echo ""
 echo "[endor-remove] ── VS Code extensions ───────────────────────────────────────"
 
 _vscode_remove_os=$(uname -s)
-case "$_vscode_remove_os" in
-  Darwin)
-    _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/Library/Application Support/Endor Labs/vscode-firewall}"
-    _vscode_plist="/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist"
-    if [[ "${DRY_RUN:-0}" == "1" ]]; then
-      echo "[dry-run]   action : UNLOAD and DELETE $_vscode_plist"
-    elif [[ "${ENDOR_VSCODE_SKIP_WATCHER:-0}" != "1" ]]; then
-      /bin/launchctl bootout system/com.endorlabs.vscode-firewall >/dev/null 2>&1 || true
-      rm -f "$_vscode_plist"
-    fi
-    ;;
-  Linux)
-    _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/var/lib/endor/vscode-firewall}"
-    if [[ "${DRY_RUN:-0}" == "1" ]]; then
-      echo "[dry-run]   action : DELETE /etc/dpkg/dpkg.cfg.d/endor-vscode-firewall"
-      echo "[dry-run]   action : DISABLE and DELETE endor-vscode-firewall systemd units"
-    elif [[ "${ENDOR_VSCODE_SKIP_WATCHER:-0}" != "1" ]]; then
-      # The dpkg hook goes first, so no package install patches VS Code again during removal.
-      rm -f /etc/dpkg/dpkg.cfg.d/endor-vscode-firewall
-      if command -v systemctl >/dev/null 2>&1; then
-        systemctl disable --now endor-vscode-firewall.path endor-vscode-firewall.timer >/dev/null 2>&1 || true
-        systemctl stop endor-vscode-firewall.service >/dev/null 2>&1 || true
+if [[ "$_vscode_remove_scope" != "policy" ]]; then
+  case "$_vscode_remove_os" in
+    Darwin)
+      _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/Library/Application Support/Endor Labs/vscode-firewall}"
+      _vscode_plist="/Library/LaunchDaemons/com.endorlabs.vscode-firewall.plist"
+      if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        echo "[dry-run]   action : UNLOAD and DELETE $_vscode_plist"
+      elif [[ "${ENDOR_VSCODE_SKIP_WATCHER:-0}" != "1" ]]; then
+        /bin/launchctl bootout system/com.endorlabs.vscode-firewall >/dev/null 2>&1 || true
+        rm -f "$_vscode_plist"
       fi
-      rm -f \
-        /etc/systemd/system/endor-vscode-firewall.path \
-        /etc/systemd/system/endor-vscode-firewall.timer \
-        /etc/systemd/system/endor-vscode-firewall.service
-      command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload || true
-    fi
-    ;;
-  *)
-    _VSCODE_STATE_DIR=""
-    ;;
-esac
+      ;;
+    Linux)
+      _VSCODE_STATE_DIR="${ENDOR_VSCODE_STATE_DIR:-/var/lib/endor/vscode-firewall}"
+      if [[ "${DRY_RUN:-0}" == "1" ]]; then
+        echo "[dry-run]   action : DELETE /etc/dpkg/dpkg.cfg.d/endor-vscode-firewall"
+        echo "[dry-run]   action : DISABLE and DELETE endor-vscode-firewall systemd units"
+      elif [[ "${ENDOR_VSCODE_SKIP_WATCHER:-0}" != "1" ]]; then
+        # The dpkg hook goes first, so no package install patches VS Code again during removal.
+        rm -f /etc/dpkg/dpkg.cfg.d/endor-vscode-firewall
+        if command -v systemctl >/dev/null 2>&1; then
+          systemctl disable --now endor-vscode-firewall.path endor-vscode-firewall.timer >/dev/null 2>&1 || true
+          systemctl stop endor-vscode-firewall.service >/dev/null 2>&1 || true
+        fi
+        rm -f \
+          /etc/systemd/system/endor-vscode-firewall.path \
+          /etc/systemd/system/endor-vscode-firewall.timer \
+          /etc/systemd/system/endor-vscode-firewall.service
+        command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload || true
+      fi
+      ;;
+    *)
+      _VSCODE_STATE_DIR=""
+      ;;
+  esac
 
-# On macOS the worker swaps Microsoft's original app back in (or restores product.json in a
-# re-signed copy), then --purge deletes its signing identity from the System keychain.
-_vscode_run_worker() {
-  if [[ "$_vscode_remove_os" == "Darwin" ]]; then
-    ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" ENDOR_VSCODE_LOCK_WAIT=600 \
-      /bin/bash "$_VSCODE_STATE_DIR/worker.sh" "$@"
-  else
-    ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" "$_VSCODE_STATE_DIR/worker.sh" "$@"
-  fi
-}
-
-_vscode_restore_ok=1
-if [[ -n "$_VSCODE_STATE_DIR" && -x "$_VSCODE_STATE_DIR/worker.sh" ]]; then
-  if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    _vscode_run_worker --restore --dry-run || _vscode_restore_ok=0
-  else
-    _vscode_run_worker --restore || _vscode_restore_ok=0
-    # Workers from before --purge existed never created a signing identity.
-    if [[ "$_vscode_restore_ok" == "1" ]] && grep -q -- '--purge)' "$_VSCODE_STATE_DIR/worker.sh"; then
-      _vscode_run_worker --purge || _vscode_restore_ok=0
+  # On macOS the worker swaps Microsoft's original app back in (or restores product.json in a
+  # re-signed copy), then --purge deletes its signing identity from the System keychain.
+  _vscode_run_worker() {
+    if [[ "$_vscode_remove_os" == "Darwin" ]]; then
+      ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" ENDOR_VSCODE_LOCK_WAIT=600 \
+        /bin/bash "$_VSCODE_STATE_DIR/worker.sh" "$@"
+    else
+      ENDOR_VSCODE_STATE_DIR="$_VSCODE_STATE_DIR" "$_VSCODE_STATE_DIR/worker.sh" "$@"
     fi
-    if [[ "$_vscode_restore_ok" == "1" ]]; then
-      rm -rf "$_VSCODE_STATE_DIR"
-      if [[ "$_vscode_remove_os" == "Darwin" ]]; then
-        rm -f "/Library/Logs/Endor Labs/vscode-firewall.log" "/Library/Logs/Endor Labs/vscode-firewall.log.1"
-        rmdir "/Library/Logs/Endor Labs" 2>/dev/null || true
+  }
+
+  _vscode_restore_ok=1
+  if [[ -n "$_VSCODE_STATE_DIR" && -x "$_VSCODE_STATE_DIR/worker.sh" ]]; then
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+      _vscode_run_worker --restore --dry-run || _vscode_restore_ok=0
+    else
+      _vscode_run_worker --restore || _vscode_restore_ok=0
+      # Workers from before --purge existed never created a signing identity.
+      if [[ "$_vscode_restore_ok" == "1" ]] && grep -q -- '--purge)' "$_VSCODE_STATE_DIR/worker.sh"; then
+        _vscode_run_worker --purge || _vscode_restore_ok=0
+      fi
+      if [[ "$_vscode_restore_ok" == "1" ]]; then
+        rm -rf "$_VSCODE_STATE_DIR"
+        # The daemon's log belongs to the real state folder, not to one a test points at.
+        if [[ "$_vscode_remove_os" == "Darwin" && -z "${ENDOR_VSCODE_STATE_DIR:-}" ]]; then
+          rm -f "/Library/Logs/Endor Labs/vscode-firewall.log" "/Library/Logs/Endor Labs/vscode-firewall.log.1"
+          rmdir "/Library/Logs/Endor Labs" 2>/dev/null || true
+        fi
       fi
     fi
+  else
+    echo "[endor-remove] skip (no VS Code managed state)"
   fi
-else
-  echo "[endor-remove] skip (no VS Code managed state)"
-fi
 
-if [[ "$_vscode_restore_ok" != "1" ]]; then
-  echo "[endor-remove] WARNING: VS Code restoration was incomplete; managed state was retained." >&2
-  _ENDOR_WARNED=1
+  if [[ "$_vscode_restore_ok" != "1" ]]; then
+    echo "[endor-remove] WARNING: VS Code restoration was incomplete; managed state was retained." >&2
+    _ENDOR_WARNED=1
+  fi
 fi
 
 # The policy, in /etc/vscode/policy.json on Linux: only Endor's keys go, and the file too if this
@@ -497,44 +514,46 @@ def main(argv):
 
 sys.exit(main(sys.argv))
 ENDOR_VSCODE_POLICY_PY
-_vscode_policy_file="${ENDOR_VSCODE_POLICY_FILE:-/etc/vscode/policy.json}"
-_vscode_policy_state="${ENDOR_VSCODE_POLICY_STATE_DIR:-/var/lib/endor/vscode-policy}"
-if [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" && "$_vscode_remove_os" == "Darwin" ]]; then
-  # On macOS the policy comes from a configuration profile, which only the MDM can remove.
-  # ENDOR_VSCODE_MANAGED_PREFS is for tests, as in the installer.
-  _vscode_managed="${ENDOR_VSCODE_MANAGED_PREFS:-/Library/Managed Preferences}"
-  _vscode_profile_left=""
-  for _vscode_file in "$_vscode_managed/com.microsoft.VSCode.plist" "$_vscode_managed"/*/com.microsoft.VSCode.plist; do
-    [[ -f "$_vscode_file" ]] || continue
-    case "$(/usr/bin/plutil -extract ExtensionGalleryServiceUrl raw -o - "$_vscode_file" 2>/dev/null || true)" in
-      */firewall/vscode/_ak/*) _vscode_profile_left="$_vscode_file"; break ;;
-    esac
-  done
-  if [[ -n "$_vscode_profile_left" ]]; then
-    echo "[endor-remove] WARNING: a configuration profile sets VS Code's ExtensionGalleryServiceUrl ($_vscode_profile_left)." >&2
-    echo "[endor-remove]   Remove the profile in your MDM; this script can't." >&2
+if [[ "$_vscode_remove_scope" != "patch" ]]; then
+  _vscode_policy_file="${ENDOR_VSCODE_POLICY_FILE:-/etc/vscode/policy.json}"
+  _vscode_policy_state="${ENDOR_VSCODE_POLICY_STATE_DIR:-/var/lib/endor/vscode-policy}"
+  if [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" && "$_vscode_remove_os" == "Darwin" ]]; then
+    # On macOS the policy comes from a configuration profile, which only the MDM can remove.
+    # ENDOR_VSCODE_MANAGED_PREFS is for tests, as in the installer.
+    _vscode_managed="${ENDOR_VSCODE_MANAGED_PREFS:-/Library/Managed Preferences}"
+    _vscode_profile_left=""
+    for _vscode_file in "$_vscode_managed/com.microsoft.VSCode.plist" "$_vscode_managed"/*/com.microsoft.VSCode.plist; do
+      [[ -f "$_vscode_file" ]] || continue
+      case "$(/usr/bin/plutil -extract ExtensionGalleryServiceUrl raw -o - "$_vscode_file" 2>/dev/null || true)" in
+        */firewall/vscode/_ak/*) _vscode_profile_left="$_vscode_file"; break ;;
+      esac
+    done
+    if [[ -n "$_vscode_profile_left" ]]; then
+      echo "[endor-remove] WARNING: a configuration profile sets VS Code's ExtensionGalleryServiceUrl ($_vscode_profile_left)." >&2
+      echo "[endor-remove]   Remove the profile in your MDM; this script can't." >&2
+      _ENDOR_WARNED=1
+    else
+      echo "[endor-remove] skip (no VS Code configuration profile)"
+    fi
+  elif [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" && "$_vscode_remove_os" != "Linux" ]]; then
+    :
+  elif [[ ! -e "$_vscode_policy_file" && ! -e "$_vscode_policy_state" ]]; then
+    echo "[endor-remove] skip (no VS Code policy file)"
+  elif ! command -v python3 >/dev/null 2>&1; then
+    echo "[endor-remove] WARNING: python3 is required to remove VS Code's policy from $_vscode_policy_file." >&2
     _ENDOR_WARNED=1
   else
-    echo "[endor-remove] skip (no VS Code configuration profile)"
-  fi
-elif [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" && "$_vscode_remove_os" != "Linux" ]]; then
-  :
-elif [[ ! -e "$_vscode_policy_file" && ! -e "$_vscode_policy_state" ]]; then
-  echo "[endor-remove] skip (no VS Code policy file)"
-elif ! command -v python3 >/dev/null 2>&1; then
-  echo "[endor-remove] WARNING: python3 is required to remove VS Code's policy from $_vscode_policy_file." >&2
-  _ENDOR_WARNED=1
-else
-  _vscode_strict=1
-  [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" ]] || _vscode_strict=0
-  if ! python3 -I -c "$_VSCODE_POLICY_PY" remove "$_vscode_policy_file" "$_vscode_policy_state" \
-      "${DRY_RUN:-0}" "$_vscode_strict"; then
-    echo "[endor-remove] WARNING: VS Code's policy was not removed from $_vscode_policy_file." >&2
-    _ENDOR_WARNED=1
+    _vscode_strict=1
+    [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" ]] || _vscode_strict=0
+    if ! python3 -I -c "$_VSCODE_POLICY_PY" remove "$_vscode_policy_file" "$_vscode_policy_state" \
+        "${DRY_RUN:-0}" "$_vscode_strict"; then
+      echo "[endor-remove] WARNING: VS Code's policy was not removed from $_vscode_policy_file." >&2
+      _ENDOR_WARNED=1
+    fi
   fi
 fi
 unset -f _vscode_run_worker
-unset _vscode_remove_os _VSCODE_STATE_DIR _vscode_plist _vscode_restore_ok
+unset _vscode_remove_os _VSCODE_STATE_DIR _vscode_plist _vscode_restore_ok _vscode_remove_scope
 unset _VSCODE_POLICY_PY _vscode_policy_file _vscode_policy_state _vscode_strict
 unset _vscode_managed _vscode_profile_left _vscode_file
 # <<< endor-vscode-remove
@@ -542,6 +561,8 @@ unset _vscode_managed _vscode_profile_left _vscode_file
 echo ""
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
   echo "[endor-remove] ✓ Dry run complete — no files modified."
+elif [[ -z "$CONSOLE_USER" ]]; then
+  echo "[endor-remove] Machine-wide configuration removed; the user's files remain (see the warning above)."
 else
   echo "[endor-remove] ✓ Removal complete."
   echo "[endor-remove]   Package managers will fall back to their default registries."

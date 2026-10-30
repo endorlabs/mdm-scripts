@@ -6,9 +6,12 @@
 #   3. stage NEW where VS Code's updater puts a downloaded update, let the daemon prepare it, then
 #      quit VS Code and let ShipIt install it, as "Restart to Update" does;
 #   4. replace the app with a fresh Microsoft copy and let the daemon migrate it;
-#   5. run endor-remove.sh and check that Microsoft's original app is back.
+#   5. turn the patch off with endor-vscode-disable-patch.sh, after a dry run, and check that
+#      Microsoft's original app is back;
+#   6. deploy endor-vscode.sh again, run endor-remove.sh and check the same.
 # Steps 3 and 4 also check that each change starts the daemon through its watched paths, not
-# its 60-second timer.
+# its 60-second timer. endor-vscode.sh and both removal scripts run the way Jamf Pro runs a
+# policy's script (see jamf-run.sh).
 #
 # It changes the Mac it runs on: it replaces /Applications/Visual Studio Code.app, installs the
 # LaunchDaemon and a signing identity in the System keychain, and runs endor-remove.sh. So it runs
@@ -41,6 +44,8 @@ fi
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$TEST_DIR/../.." && pwd)"
+# shellcheck source=jamf-run.sh
+source "$TEST_DIR/jamf-run.sh"
 GENERATOR="$ROOT_DIR/package-firewall/bash/generate.sh"
 NAMESPACE="ci-e2e"
 OUT="$ROOT_DIR/package-firewall/bash/out/$NAMESPACE"
@@ -342,6 +347,33 @@ check_signed() {
   pass "$2 is patched and signed by this Mac; its requirement also accepts Microsoft's builds"
 }
 
+# check_restored <what>: after <what> removed the patch, Microsoft's original NEW is back, and the
+# daemon, its state and the signing identity are gone.
+check_restored() {
+  local certs
+  cs_ok "$APP" "$MS_REQ" || fail "VS Code is not Microsoft-signed after $1"
+  [[ "$(cdhash "$APP")" == "$(cdhash "$WORK/ms-new.app")" ]] \
+    || fail "after $1, the app is not Microsoft's original build"
+  cmp -s "$APP/$PRODUCT_REL" "$WORK/ms-new.app/$PRODUCT_REL" || fail "after $1, product.json differs from Microsoft's"
+  pass "after $1, Microsoft's original VS Code $NEW is back: same CDHash and product.json"
+  if sudo /bin/launchctl print "system/$DAEMON_LABEL" >/dev/null 2>&1 || [[ -e "$DAEMON_PLIST" ]]; then
+    fail "$1 left the LaunchDaemon installed"
+  fi
+  if sudo test -e "$STATE_DIR"; then
+    fail "$1 left $STATE_DIR"
+  fi
+  certs=$(lower "$(security find-certificate -a -Z /Library/Keychains/System.keychain 2>/dev/null)")
+  [[ "$certs" != *"$SHA1"* ]] || fail "$1 left the signing certificate in the System keychain"
+  pass "$1 removed the LaunchDaemon, its state and the signing identity"
+}
+
+# record_identity: the signing identity the worker made, for check_signed and check_restored.
+record_identity() {
+  SHA1=$(lower "$(sudo cat "$STATE_DIR/signing/cert.sha1" 2>/dev/null)")
+  [[ "$SHA1" =~ ^[0-9a-f]{40}$ ]] || fail "the worker recorded no signing identity"
+  OURS_REQ="identifier \"$BUNDLE_ID\" and certificate leaf = H\"$SHA1\""
+}
+
 file_url() { printf 'file://%s/' "$(printf '%s' "$1" | sed 's/%/%25/g; s/ /%20/g')"; }
 
 # stage_bundle: unpack Microsoft's NEW where VS Code's updater (Squirrel) unpacks a download.
@@ -398,14 +430,15 @@ shipit_finished() {
   grep -qE 'Installation completed successfully|aborting update|Too many attempts' "$WORK/shipit.log" 2>/dev/null
 }
 
-# save_daemon_logs: the worker's log and launchd's view of the daemon. endor-remove.sh deletes
-# the log, so this runs before removal as well as at the end.
+# save_daemon_logs [name]: the worker's log and launchd's view of the daemon. Removal deletes the
+# log, so this runs before each removal as well as at the end; the name keeps the copies apart.
 save_daemon_logs() {
+  local suffix="${1:+-$1}"
   if sudo test -f "$WORKER_LOG"; then
-    sudo cat "$WORKER_LOG" > "$ARTIFACTS/worker.log"
+    sudo cat "$WORKER_LOG" > "$ARTIFACTS/worker$suffix.log"
   fi
   if [[ -e "$DAEMON_PLIST" ]]; then
-    sudo /bin/launchctl print "system/$DAEMON_LABEL" > "$ARTIFACTS/launchd-print.txt" 2>&1 || true
+    sudo /bin/launchctl print "system/$DAEMON_LABEL" > "$ARTIFACTS/launchd-print$suffix.txt" 2>&1 || true
   fi
 }
 
@@ -441,6 +474,7 @@ finish() {
   if [[ -e "$DAEMON_PLIST" && -f "$OUT/endor-remove.sh" ]]; then
     sudo /bin/bash "$OUT/endor-remove.sh" >> "$ARTIFACTS/teardown.log" 2>&1
   fi
+  jamf_cleanup
   rm -rf "$WORK"
   if [[ "$rc" -eq 0 ]]; then
     summary "" "All checks passed."
@@ -481,11 +515,11 @@ start_stat_recorder
 step "Deploy endor-vscode.sh while VS Code $OLD is running"
 generate || fail "generate.sh failed"
 running=$(main_pids | head -n 1)
-if ! sudo /bin/bash "$OUT/endor-vscode.sh" > "$ARTIFACTS/install.log" 2>&1; then
+if ! jamf_run "$OUT/endor-vscode.sh" "$ARTIFACTS/install.log"; then
   tail -n 30 "$ARTIFACTS/install.log" >&2
   fail "endor-vscode.sh exited non-zero"
 fi
-pass "endor-vscode.sh succeeded"
+pass "endor-vscode.sh succeeded, run as Jamf runs a script"
 sudo /bin/launchctl print "system/$DAEMON_LABEL" >/dev/null 2>&1 || fail "the LaunchDaemon is not loaded"
 [[ "$(daemon_runs)" =~ ^[0-9]+$ ]] || fail "launchctl print shows no run count for the daemon"
 pass "the LaunchDaemon is loaded"
@@ -497,9 +531,7 @@ if grep -qxE '/Applications/?|/Users/[^/]+/Library/Caches/?' <<< "$watched"; the
   fail "the daemon watches a whole folder that changes all the time: $(tr '\n' ' ' <<< "$watched")"
 fi
 pass "the daemon watches only VS Code and each user's ShipIt folder, which need not exist yet"
-SHA1=$(lower "$(sudo cat "$STATE_DIR/signing/cert.sha1" 2>/dev/null)")
-[[ "$SHA1" =~ ^[0-9a-f]{40}$ ]] || fail "the worker recorded no signing identity"
-OURS_REQ="identifier \"$BUNDLE_ID\" and certificate leaf = H\"$SHA1\""
+record_identity
 live_is B "$OLD_BV" || fail "the worker does not report state B: $(worker_status | grep '^state')"
 pass "the worker reports state B (patched, signed by this Mac, nothing left to do)"
 check_signed "$APP" "VS Code $OLD"
@@ -573,27 +605,44 @@ wait_until 600 live_is B "$NEW_BV" || fail "the worker does not report state B a
 check_signed "$APP" "The migrated VS Code $NEW"
 sudo rm -rf "$WORK/replaced.app"
 
+step "Turn the patch off with endor-vscode-disable-patch.sh"
+# An admin previews it with --dry-run as Jamf's parameter 4.
+if ! jamf_run "$OUT/endor-vscode-disable-patch.sh" "$ARTIFACTS/disable-patch-dry-run.log" --dry-run; then
+  tail -n 30 "$ARTIFACTS/disable-patch-dry-run.log" >&2
+  fail "the dry run of endor-vscode-disable-patch.sh exited non-zero"
+fi
+grep -qF "Dry run complete" "$ARTIFACTS/disable-patch-dry-run.log" \
+  || fail "endor-vscode-disable-patch.sh did not take --dry-run from Jamf's parameter 4"
+if ! sudo /bin/launchctl print "system/$DAEMON_LABEL" >/dev/null 2>&1 || ! signed_by_us "$APP"; then
+  fail "the dry run of endor-vscode-disable-patch.sh changed something"
+fi
+pass "with --dry-run in Jamf's parameter 4, endor-vscode-disable-patch.sh only reports"
+save_daemon_logs before-disable-patch
+if ! jamf_run "$OUT/endor-vscode-disable-patch.sh" "$ARTIFACTS/disable-patch.log"; then
+  tail -n 30 "$ARTIFACTS/disable-patch.log" >&2
+  fail "endor-vscode-disable-patch.sh exited non-zero"
+fi
+pass "endor-vscode-disable-patch.sh succeeded, run as Jamf runs a script"
+check_restored "endor-vscode-disable-patch.sh"
+
+step "Deploy endor-vscode.sh again"
+if ! jamf_run "$OUT/endor-vscode.sh" "$ARTIFACTS/install-again.log"; then
+  tail -n 30 "$ARTIFACTS/install-again.log" >&2
+  fail "endor-vscode.sh exited non-zero"
+fi
+sudo /bin/launchctl print "system/$DAEMON_LABEL" >/dev/null 2>&1 || fail "the LaunchDaemon is not loaded"
+record_identity
+wait_until 600 live_is B "$NEW_BV" || fail "the worker does not report state B after deploying again"
+check_signed "$APP" "VS Code $NEW, deployed again"
+
 step "Remove with endor-remove.sh"
-save_daemon_logs
-if ! sudo /bin/bash "$OUT/endor-remove.sh" > "$ARTIFACTS/remove.log" 2>&1; then
+save_daemon_logs before-remove
+if ! jamf_run "$OUT/endor-remove.sh" "$ARTIFACTS/remove.log"; then
   tail -n 30 "$ARTIFACTS/remove.log" >&2
   fail "endor-remove.sh exited non-zero"
 fi
-pass "endor-remove.sh succeeded"
-cs_ok "$APP" "$MS_REQ" || fail "VS Code is not Microsoft-signed after removal"
-[[ "$(cdhash "$APP")" == "$(cdhash "$WORK/ms-new.app")" ]] \
-  || fail "the restored app is not Microsoft's original build"
-cmp -s "$APP/$PRODUCT_REL" "$WORK/ms-new.app/$PRODUCT_REL" || fail "product.json differs from Microsoft's"
-pass "Microsoft's original VS Code $NEW is back: same CDHash and product.json"
-if sudo /bin/launchctl print "system/$DAEMON_LABEL" >/dev/null 2>&1 || [[ -e "$DAEMON_PLIST" ]]; then
-  fail "the LaunchDaemon is still installed"
-fi
-if sudo test -e "$STATE_DIR"; then
-  fail "$STATE_DIR is still there"
-fi
-certs=$(lower "$(security find-certificate -a -Z /Library/Keychains/System.keychain 2>/dev/null)")
-[[ "$certs" != *"$SHA1"* ]] || fail "the signing certificate is still in the System keychain"
-pass "the LaunchDaemon, its state and the signing identity are gone"
+pass "endor-remove.sh succeeded, run as Jamf runs a script"
+check_restored "endor-remove.sh"
 if [[ "$(spctl --status 2>&1)" == *enabled* ]]; then
   out=$(spctl -a -vv -t exec "$APP" 2>&1) || true
   [[ "$out" == *"Notarized Developer ID"* ]] || fail "Gatekeeper does not accept the restored app: $out"

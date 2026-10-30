@@ -254,6 +254,30 @@ try {
     if ((Get-PolicyValue 'ExtensionGalleryServiceUrl') -cne $ExpectedUrl) { throw 'the policy was removed' }
     Invoke-Generate
 
+    Write-Host 'test: each disable script turns off its own method, and leaves the other'
+    Invoke-Generate -Patch '1'
+    New-Case 'disable'
+    $output = Invoke-Install
+    Assert-Rc 0 $output
+    $product = { (Get-Content -LiteralPath $Case.Product -Raw | ConvertFrom-Json).extensionsGallery.serviceUrl }
+    if ((& $product) -cne $ExpectedUrl -or (Get-PolicyValue 'ExtensionGalleryServiceUrl') -cne $ExpectedUrl) {
+        throw 'the installer did not apply both methods'
+    }
+    $output = Invoke-Script (Join-Path $Out 'endor-vscode-disable-policy.ps1')
+    Assert-Rc 0 $output
+    Assert-Output $output 'ExtensionGalleryServiceUrl policy is off'
+    if ((Get-PolicyValue 'ExtensionGalleryServiceUrl') -ne '<no key>') { throw 'disable-policy left the key it created' }
+    if ((& $product) -cne $ExpectedUrl -or -not (Test-Path -LiteralPath $Case.State)) { throw 'disable-policy touched the patch' }
+    $output = Invoke-Install
+    Assert-Rc 0 $output
+    $output = Invoke-Script (Join-Path $Out 'endor-vscode-disable-patch.ps1')
+    Assert-Rc 0 $output
+    Assert-Output $output 'product.json patch is off'
+    if ((& $product) -cne 'https://marketplace.visualstudio.com/_apis/public/gallery') { throw 'disable-patch did not restore product.json' }
+    if (Test-Path -LiteralPath $Case.State) { throw "disable-patch left the patch's state" }
+    if ((Get-PolicyValue 'ExtensionGalleryServiceUrl') -cne $ExpectedUrl) { throw 'disable-patch touched the policy' }
+    Invoke-Generate
+
     $global:LASTEXITCODE = 0
     Write-Host 'VS Code policy PowerShell tests passed'
 } finally {

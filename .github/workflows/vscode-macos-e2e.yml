@@ -11,7 +11,9 @@ on:
       - package-firewall/bash/generate.sh
       - package-firewall/bash/templates/vscode.sh
       - package-firewall/bash/templates/remove.sh
+      - package-firewall/bash/lib/common.sh
       - package-firewall/tests/e2e-vscode-macos.sh
+      - package-firewall/tests/jamf-run.sh
       - .github/workflows/vscode-macos-e2e.yml
   push:
     branches: [main]
@@ -19,7 +21,9 @@ on:
       - package-firewall/bash/generate.sh
       - package-firewall/bash/templates/vscode.sh
       - package-firewall/bash/templates/remove.sh
+      - package-firewall/bash/lib/common.sh
       - package-firewall/tests/e2e-vscode-macos.sh
+      - package-firewall/tests/jamf-run.sh
       - .github/workflows/vscode-macos-e2e.yml
   schedule:
     # Weekly, to catch new VS Code releases and runner image updates.
@@ -60,7 +64,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Intel runners take 25 to 35 minutes, Apple silicon about 15: each deep codesign check of the
     # universal app takes about a minute on Intel, and the watch checks wait on the daemon's timer.
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 

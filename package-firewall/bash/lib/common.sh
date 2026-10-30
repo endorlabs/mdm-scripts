@@ -3,7 +3,9 @@
 # Do NOT source this file directly — it is embedded at generation time.
 #
 # Functions:
-#   detect_console_user                        — finds the logged-in user when running as root
+#   find_console_user                          — finds the logged-in user when running as root;
+#                                                prints nothing when no one is logged in
+#   detect_console_user                        — the same, but exits when no one is logged in
 #   resolve_user_home       <user>             — resolves home via dscl / getent / POSIX
 #   upsert_block            <file> <content> <owner> <group>
 #                                              — non-destructive, idempotent sentinel-block writer
@@ -84,22 +86,42 @@ endor_attr_username() {
   printf '%s:%s' "$inner" "$key_id" | endor_b64
 }
 
-# detect_console_user
+# find_console_user
 # MDM tools (Kandji, Jamf) run scripts as root. $HOME resolves to /var/root, which
-# is not where developer config files live. Returns the name of the actual logged-in
-# console user so config is written to the correct home directory.
-detect_console_user() {
+# is not where developer config files live. Prints the name of the actual logged-in
+# console user so config is written to the correct home directory, or nothing when no
+# one is logged in: the console belongs to root at the login window, and to
+# _mbsetupuser during Setup Assistant.
+find_console_user() {
   local user=""
 
   if command -v logname &>/dev/null; then
     user=$(logname 2>/dev/null || true)
   fi
 
-  if [[ -z "$user" || "$user" == "root" ]] && [[ -r /dev/console ]]; then
-    user=$(stat -f '%Su' /dev/console 2>/dev/null || true)
+  if [[ -z "$user" || "$user" == "root" ]] && [[ -e /dev/console ]]; then
+    # GNU stat's -f reports on the file system instead, and doesn't take a format.
+    if stat -c %U / >/dev/null 2>&1; then
+      user=$(stat -c %U /dev/console 2>/dev/null || true)
+    else
+      user=$(stat -f '%Su' /dev/console 2>/dev/null || true)
+    fi
   fi
 
-  if [[ -z "$user" || "$user" == "root" ]]; then
+  case "$user" in
+    root|loginwindow|_mbsetupuser) user="" ;;
+  esac
+
+  echo "$user"
+}
+
+# detect_console_user
+# find_console_user, for scripts that write to the user's home: exits when no one is logged in.
+detect_console_user() {
+  local user
+  user=$(find_console_user)
+
+  if [[ -z "$user" ]]; then
     echo "[endor] ERROR: could not detect console user. Ensure a user is logged in." >&2
     exit 1
   fi

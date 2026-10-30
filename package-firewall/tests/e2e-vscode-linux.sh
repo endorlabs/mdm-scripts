@@ -168,22 +168,15 @@ pass "the timer patched a reset product.json within ${WAITED}s"
 sudo systemctl start endor-vscode-firewall.path
 
 info "5. remove"
-if sudo bash "$OUT/endor-remove.sh" > "$ARTIFACTS/remove.log" 2>&1; then
-  :
-elif grep -q "could not detect console user" "$ARTIFACTS/remove.log"; then
-  # endor-remove.sh needs a signed-in user for the other ecosystems. Its VS Code section doesn't,
-  # so run only that.
-  echo "::notice::no signed-in user on this runner; running only the VS Code section of endor-remove.sh"
-  {
-    echo 'set -euo pipefail'
-    echo 'DRY_RUN=0; _ENDOR_WARNED=0'
-    sed -n '/^# >>> endor-vscode-remove$/,/^# <<< endor-vscode-remove$/p' "$OUT/endor-remove.sh"
-    echo 'exit "$_ENDOR_WARNED"'
-  } > "$WORK/remove-vscode.sh"
-  sudo bash "$WORK/remove-vscode.sh" >> "$ARTIFACTS/remove.log" 2>&1 \
-    || fail "the VS Code section of endor-remove.sh failed (see remove.log)"
-else
-  fail "endor-remove.sh failed (see remove.log)"
+if ! sudo bash "$OUT/endor-remove.sh" > "$ARTIFACTS/remove.log" 2>&1; then
+  # With no one signed in, endor-remove.sh still removes VS Code's configuration, and exits 1
+  # because it leaves the user's files. Any other warning is a failure.
+  if grep -qF "no user is logged in" "$ARTIFACTS/remove.log" \
+      && [[ "$(grep -c "WARNING" "$ARTIFACTS/remove.log")" -eq 1 ]]; then
+    echo "::notice::no signed-in user on this runner; endor-remove.sh left the user's files"
+  else
+    fail "endor-remove.sh failed (see remove.log)"
+  fi
 fi
 [[ "$(service_url)" == "$DEFAULT_SERVICE_URL" ]] || fail "removal did not restore serviceUrl"
 python3 -I -c 'import json, sys; assert json.load(open(sys.argv[1]))["extensionsGallery"]["extensionUrlTemplate"] == sys.argv[2]' \

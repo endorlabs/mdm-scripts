@@ -125,11 +125,14 @@ Each script in `out/<namespace>/` carries all Endor configuration it needs. The 
 | `endor-ruby.sh` | Team uses Ruby (Bundler, gem) only |
 | `endor-vscode.sh` | Team uses Microsoft VS Code Stable extensions |
 | `endor-all.sh` | Team uses multiple ecosystems — single-script deploy |
+| `endor-vscode-disable-patch.sh`, `endor-vscode-disable-policy.sh` | Turning off one VS Code method, for example when switching to the other |
 
 
 Upload the script file. Ensure it runs as **root** — the script detects the logged-in console user internally and writes config files to the correct home directory.
 
-The scripts take one optional argument, `--dry-run`. They ignore the target volume, computer name and user that Jamf Pro passes as `$1`–`$3`, and any script parameters left empty, so `--dry-run` also works as a Jamf parameter.
+With no one logged in (at the login window, or in Setup Assistant during enrollment), the package-manager scripts, `endor-all.sh` included, exit 1 without changing anything, so run them while a user is logged in, for example at login or at a recurring check-in. `endor-vscode.sh` and the disable scripts are machine-wide and need no user. `endor-remove.sh` removes the machine-wide configuration (VS Code's, and root's `.gemrc`), leaves the user's files, and exits 1, so run it again once the user logs in.
+
+The scripts take one optional argument, `--dry-run`. They ignore the target volume, computer name and user that Jamf Pro passes as `$1`–`$3`, and any script parameters left empty, so `--dry-run` also works as a Jamf parameter. Leave the other parameters empty: any other value makes the script exit 1.
 
 ---
 
@@ -508,7 +511,10 @@ an Endor URL in `product.json`) or the policy (an Endor URL in
 `/etc/vscode/policy.json`, or in a configuration profile on a Mac) is still in
 place from an earlier deployment, the script leaves it, warns and exits 1. To
 clear the warning, regenerate with that method's variable to keep it, or remove
-it: run `endor-remove.sh`, or on a Mac delete the profile in your MDM.
+it: run `endor-vscode-disable-patch.sh` or `endor-vscode-disable-policy.sh`, or
+on a Mac delete the profile in your MDM. See [Switching
+methods](../README.md#switching-methods-and-turning-one-off) for the order that
+keeps the firewall on.
 
 #### macOS code signing
 
@@ -642,7 +648,9 @@ To remove the Endor firewall configuration from a machine, deploy
 `endor-remove.sh`. It removes package-manager sentinel blocks, unloads the VS
 Code launchd daemon or systemd units, timer and dpkg hook, and restores the stable default values for
 `serviceUrl` and `extensionUrlTemplate`. Other `product.json` modifications are
-left intact. On Linux it also removes Endor's keys from `/etc/vscode/policy.json`,
+left intact. To remove only one VS Code method, deploy
+`endor-vscode-disable-patch.sh` or `endor-vscode-disable-policy.sh` instead. On
+Linux `endor-remove.sh` also removes Endor's keys from `/etc/vscode/policy.json`,
 and the file itself if `endor-vscode.sh` created it and nothing else is in it. On
 macOS, remove the policy's configuration profile in your MDM; `endor-remove.sh`
 warns while a profile still sets an Endor URL.
