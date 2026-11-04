@@ -18,7 +18,7 @@ Write-Host '[endor] -- environment variables -----------------------------------
 
 # -- User attribution: compute the attributed username + derived credentials --
 $_secret              = '{{API_SECRET}}'
-$ENDOR_ATTR_LABEL     = Get-EndorAttrLabel $ConsoleUser
+$ENDOR_ATTR_LABEL     = "$ConsoleUser@$(Get-EndorHostLabel)"
 $ENDOR_ATTR_USER      = Get-EndorAttrUsername -Label $ENDOR_ATTR_LABEL -ApiKeyId '{{API_KEY_ID}}'
 $ENDOR_AUTH_B64       = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("${ENDOR_ATTR_USER}:${_secret}"))
 $ENDOR_API_SECRET_B64 = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($_secret))

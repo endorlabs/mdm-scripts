@@ -78,13 +78,6 @@ function Get-EndorHostLabel {
     if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { [System.Net.Dns]::GetHostName() }
 }
 
-# Get-EndorAttrLabel <user> — the label every ecosystem attributes to: <user>@<machine>.
-# To label users another way, change only this function.
-function Get-EndorAttrLabel {
-    param([string]$User)
-    "$User@$(Get-EndorHostLabel)"
-}
-
 # Write-EndorFile <path> <lines>
 # UTF-8 WITHOUT BOM. Windows PowerShell 5.1's `-Encoding UTF8` writes a BOM,
 # which pip's configparser rejects — pip.ini would be silently ignored.

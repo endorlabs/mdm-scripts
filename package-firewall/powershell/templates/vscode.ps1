@@ -521,24 +521,42 @@ if (-not $_vscodeSkip -and -not $_vscodeLegacy -and ($_vscodeEnablePolicy -eq '1
 }
 
 # -- User attribution --
-# The gallery URL that this script writes carries the label of the other ecosystems' credentials
-# (Get-EndorAttrLabel), so the firewall logs who installed an extension. The token in the URL is
-# base64url(<key ID>:<secret>); the key ID becomes the attributed username, which the firewall
-# decodes. product.json and the policy are machine-wide, so the label is that of the user logged in
-# at the latest run with one. Each method keeps it in attr-label, beside its state, for runs with no
-# one logged in. Until a run with someone logged in, and in a script from a generator that doesn't
-# inline lib/common.ps1, the URL is unattributed.
+# The gallery URL that this script writes carries the same label as the logged-in user's other
+# ecosystems, so the firewall logs who installed an extension: the label in the user's
+# ENDOR_ATTR_USER environment variable, which a deployment may have set to the user's email; or,
+# before the other ecosystems' scripts have run, <user>@<machine>, as they would set it. The token
+# in the URL is base64url(<key ID>:<secret>); the key ID becomes the attributed username, which the
+# firewall decodes. product.json and the policy are machine-wide, so the label is that of the user
+# logged in at the latest run with one. Each method keeps it in attr-label, beside its state, for
+# runs with no one logged in. Until a run with someone logged in, and in a script from a generator
+# that doesn't inline lib/common.ps1, the URL is unattributed.
 $_vscodeGalleryUrl = $_vscodeServiceUrl
 $_vscodeLabel = ''
 $_vscodeLabelUser = ''
+$_vscodeLabelFrom = ''
 $_vscodeLabelFiles = @()
 if ($_vscodeEnablePatch -eq '1') { $_vscodeLabelFiles += Join-Path $_vscodeStateRoot 'attr-label' }
 if ($_vscodeEnablePolicy -eq '1') { $_vscodeLabelFiles += Join-Path $_vscodePolicyState 'attr-label' }
 if (-not $_vscodeSkip -and $_vscodeLabelFiles.Count -and
-        @(Get-Command Find-ConsoleUser, Get-EndorAttrLabel, Get-EndorAttrUsername -ErrorAction SilentlyContinue).Count -eq 3) {
-    try { $_vscodeLabelUser = [string](Find-ConsoleUser).Username } catch { }
+        @(Get-Command Find-ConsoleUser, Get-EndorHostLabel, Get-EndorAttrUsername -ErrorAction SilentlyContinue).Count -eq 3) {
+    $_vscodeUser = $null
+    try { $_vscodeUser = Find-ConsoleUser } catch { }
+    $_vscodeLabelUser = [string]$_vscodeUser.Username
     if ($_vscodeLabelUser) {
-        $_vscodeLabel = Get-EndorAttrLabel $_vscodeLabelUser
+        # The other ecosystems' scripts set ENDOR_ATTR_USER to
+        # base64(base64("userattr:" + label) + ":" + key ID).
+        try {
+            $_vscodeAttr = [string](Get-ItemProperty -LiteralPath "Registry::HKEY_USERS\$($_vscodeUser.SID)\Environment" `
+                -Name ENDOR_ATTR_USER -ErrorAction Stop).ENDOR_ATTR_USER
+            $_vscodeOuter = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_vscodeAttr))
+            $_vscodeInner = [Text.Encoding]::UTF8.GetString(
+                [Convert]::FromBase64String($_vscodeOuter.Substring(0, $_vscodeOuter.IndexOf(':'))))
+            if ($_vscodeInner -cmatch '^userattr:([^\x00-\x1f\x7f]+)$') {
+                $_vscodeLabel = $Matches[1]
+                $_vscodeLabelFrom = " (as in $_vscodeLabelUser's ENDOR_ATTR_USER)"
+            }
+        } catch { }
+        if (-not $_vscodeLabel) { $_vscodeLabel = "$_vscodeLabelUser@$(Get-EndorHostLabel)" }
     } else {
         foreach ($_vscodeLabelFile in $_vscodeLabelFiles) {
             if (Test-Path -LiteralPath $_vscodeLabelFile -PathType Leaf) {
@@ -546,6 +564,7 @@ if (-not $_vscodeSkip -and $_vscodeLabelFiles.Count -and
                 if ($_vscodeLabel) { break }
             }
         }
+        $_vscodeLabelFrom = ' (kept from an earlier run: no logged-in user was found)'
     }
     if (-not $_vscodeLabel) {
         Write-Host "[endor] note: no logged-in user was found, so VS Code's gallery URL carries no user attribution until a run with one."
@@ -562,11 +581,7 @@ if (-not $_vscodeSkip -and $_vscodeLabelFiles.Count -and
             $_vscodeGalleryUrl = $_vscodeServiceUrl.Substring(0, $_vscodeAt + 5) + [Convert]::ToBase64String(
                 [Text.Encoding]::UTF8.GetBytes("${_vscodeAttrUser}:$($_vscodePair.Substring($_vscodeColon + 1))")
             ).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-            if ($_vscodeLabelUser) {
-                Write-Host "[endor] VS Code user attribution -> $_vscodeLabel"
-            } else {
-                Write-Host "[endor] VS Code user attribution -> $_vscodeLabel (kept from an earlier run: no logged-in user was found)"
-            }
+            Write-Host "[endor] VS Code user attribution -> $_vscodeLabel$_vscodeLabelFrom"
         } catch {
             $_vscodeGalleryUrl = $_vscodeServiceUrl
             $_vscodeLabel = ''
@@ -794,6 +809,7 @@ if ($_vscodeLabel -and -not $DryRun) {
 
 if ($_vscodeDone) { Write-Host '[endor] [done] VS Code extension firewall' }
 Remove-Variable _vscodeWorkerContent, _vscodeWorker, _vscodeGalleryUrl, _vscodeLabel, _vscodeLabelUser,
+    _vscodeLabelFrom, _vscodeUser, _vscodeAttr, _vscodeOuter, _vscodeInner,
     _vscodeLabelFiles, _vscodeLabelFile, _vscodeAt, _vscodeToken, _vscodePair, _vscodeColon, _vscodeAttrUser,
     _vscodeStateRoot, _vscodeWorkerPath, _vscodeTaskName, _vscodeOnWindows,
     _vscodeServiceUrl, _vscodeEnablePatch, _vscodeEnablePolicy, _vscodePolicyAuth, _vscodeLegacy,

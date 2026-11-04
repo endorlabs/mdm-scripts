@@ -289,11 +289,15 @@ you can; the script also works from the default 32-bit host.
 
 #### User attribution
 
-As in the other scripts, the credential carries a label, so the firewall's logs
-and notifications show who installed an extension: `<console-user>@<COMPUTERNAME>`.
-`product.json`, the worker and the policy all carry it. Both methods are
-machine-wide, so the label is that of the user logged in at the latest run with
-someone logged in, User Installer copies in other profiles included:
+The credential carries the same label as the logged-in user's other
+ecosystems, so the firewall's logs and notifications show who installed an
+extension. The label is the one in the user's `ENDOR_ATTR_USER` environment
+variable, which the package-manager scripts set, so a deployment that labels
+users by email carries that over to VS Code. Before those scripts have run, it
+is `<console-user>@<COMPUTERNAME>`, as they would set it. `product.json`, the
+worker and the policy all carry the label. Both methods are machine-wide, so the
+label is that of the user logged in at the latest run with someone logged in,
+User Installer copies in other profiles included:
 
 - The script keeps the label in `attr-label`, in each method's folder under
   `%ProgramData%\Endor Labs`, so a run with no one logged in changes nothing.
@@ -305,9 +309,6 @@ someone logged in, User Installer copies in other profiles included:
   is that administrator's.
 - A policy you deliver yourself (Group Policy, ADMX or the Intune Settings
   Catalog) carries no label.
-
-To label users another way, for example by email address, change
-`Get-EndorAttrLabel` in `lib\common.ps1`; every script uses it.
 
 #### The patch
 

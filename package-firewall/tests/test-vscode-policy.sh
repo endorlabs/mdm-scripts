@@ -625,9 +625,21 @@ token = base64.urlsafe_b64encode(user + b":" + secret.encode()).decode().rstrip(
 print("https://factory.endorlabs.com/v1/namespaces/%s/firewall/vscode/_ak/%s" % (namespace, token))
 PY
 }
-# label_of <user>: the label the scripts attribute that user's runs to.
+# label_of <user>: the label the scripts attribute that user's runs to, with no env.sh: as
+# credentials_block sets it.
 label_of() {
-  bash -c 'source "$1"; endor_attr_label "$2"' _ "$ROOT_DIR/package-firewall/bash/lib/common.sh" "$1"
+  bash -c 'source "$1"; printf "%s@%s" "$2" "$(endor_host_label)"' _ \
+    "$ROOT_DIR/package-firewall/bash/lib/common.sh" "$1"
+}
+# attr_user <label> <key ID>: an ENDOR_ATTR_USER as the other ecosystems' scripts write it.
+attr_user() {
+  python3 -I - "$1" "$2" <<'PY'
+import base64
+import os
+import sys
+inner = base64.b64encode(b"userattr:" + os.fsencode(sys.argv[1]))
+print(base64.b64encode(inner + b":" + sys.argv[2].encode()).decode())
+PY
 }
 worker_url() { sed -n "s/^FIREWALL_URL='\(.*\)'\$/\1/p" "$CASE/state/worker.sh"; }
 # expect_urls <url>: product.json, the policy and the worker all have the URL.
@@ -750,12 +762,47 @@ expect_rc 0
   || fail "the patch lost the label when the policy went"
 PATCH=1 generate
 
+echo "test: the label in the user's env.sh, which the other ecosystems' scripts write, wins"
+new_case attribution-env
+ENV_SH="$CASE/home/.config/endor/env.sh"
+mkdir -p "$(dirname "$ENV_SH")"
+# A deployment that labels users by email, with a key of its own. The script must not run it.
+{
+  echo "# ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ====="
+  echo "export ENDOR_API_KEY_ID=\"other-key-id\""
+  echo "export ENDOR_ATTR_USER=\"$(attr_user alice@example.com other-key-id)\""
+  echo "touch \"$CASE/sourced\""
+  echo "# ===== END ENDOR PACKAGE FIREWALL ====="
+} > "$ENV_SH"
+ENDOR_TEST_CONSOLE_OWNER=alice ENDOR_TEST_HOME="$CASE/home" install
+expect_rc 0
+expect_output "VS Code user attribution → alice@example.com (as in alice's env.sh)"
+expect_urls "$(attributed_url alice@example.com)"
+[[ "$(cat "$CASE/state/attr-label")" == "alice@example.com" ]] || fail "the env.sh label was not kept"
+[[ ! -e "$CASE/sourced" ]] || fail "the installer ran env.sh"
+install
+expect_rc 0
+expect_urls "$(attributed_url alice@example.com)"
+# Without a label in env.sh, or through a symbolic link, the label is <user>@<machine>.
+for broken in no-label link; do
+  case "$broken" in
+    no-label) printf 'export ENDOR_ATTR_USER="%s"\n' "$(printf 'not-a-label' | base64)" > "$ENV_SH" ;;
+    link)
+      mv "$ENV_SH" "$CASE/env.sh"
+      printf 'export ENDOR_ATTR_USER="%s"\n' "$(attr_user mallory@example.com other-key-id)" > "$CASE/env.sh"
+      ln -s "$CASE/env.sh" "$ENV_SH" ;;
+  esac
+  ENDOR_TEST_CONSOLE_OWNER=alice ENDOR_TEST_HOME="$CASE/home" install
+  expect_rc 0
+  expect_urls "$(attributed_url "$alice")"
+done
+
 echo "test: a script without the helpers from lib/common.sh is unattributed"
 new_case attribution-no-helpers
 SCRIPT="$TMP_DIR/no-helpers-vscode.sh"
 sed '/^# ── Common functions (inlined from lib\/common.sh)/,/^# ───/d' "$OUT/endor-vscode.sh" > "$SCRIPT"
 chmod 700 "$SCRIPT"
-if grep -q '^endor_attr_label()' "$SCRIPT"; then fail "the helpers are still in $SCRIPT"; fi
+if grep -q '^endor_attr_username()' "$SCRIPT"; then fail "the helpers are still in $SCRIPT"; fi
 ENDOR_TEST_CONSOLE_OWNER=alice install
 expect_rc 0
 expect_urls "$EXPECTED_URL"

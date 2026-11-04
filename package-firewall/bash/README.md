@@ -372,11 +372,16 @@ excluded.
 
 #### User attribution
 
-As in the other scripts, the credential carries a label, so the firewall's logs
-and notifications show who installed an extension: `<console-user>@<computer
-name>`. `product.json`, the worker and the Linux policy all carry it. Both
-methods are machine-wide, so the label is that of the user logged in at the
-latest run with someone logged in:
+The credential carries the same label as the logged-in user's other
+ecosystems, so the firewall's logs and notifications show who installed an
+extension. The label is the one in `ENDOR_ATTR_USER` in the user's
+`~/.config/endor/env.sh`, which the package-manager scripts write, so a
+deployment that labels users by email carries that over to VS Code. Before
+those scripts have run, it is `<console-user>@<computer name>`, as they would
+write it. The script reads `env.sh` and never runs it. `product.json`, the
+worker and the Linux policy all carry the label. Both methods are machine-wide,
+so the label is that of the user logged in at the latest run with someone
+logged in:
 
 - The script keeps the label in `attr-label`, in each method's state folder, so
   a run with no one logged in changes nothing. Removal deletes it.
@@ -391,9 +396,6 @@ latest run with someone logged in:
 - The script finds the user as the package-manager scripts do: from the login
   session it runs in, or the owner of `/dev/console`. On Linux, an MDM agent
   running as a system service has neither, so there it finds no one.
-
-To label users another way, for example by email address, change
-`endor_attr_label` in `lib/common.sh`; every script uses it.
 
 #### The patch
 

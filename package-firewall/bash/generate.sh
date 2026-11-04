@@ -242,7 +242,8 @@ fi
 # ─── Compute derived values ────────────────────────────────────────────────────
 # Only machine-independent values are derived here. Attribution values
 # (<console-user>@<machine>) are computed at install time — see credentials_block, and
-# templates/vscode.sh, which puts the label into VSCODE_SERVICE_URL's token.
+# templates/vscode.sh, which puts the label of the user's other ecosystems into
+# VSCODE_SERVICE_URL's token.
 FQDN_HOST="${FQDN#https://}"
 TRUSTED_HOST="${FQDN_HOST%%:*}"
 
@@ -395,7 +396,7 @@ credentials_block() {
 ENDOR_API_KEY_ID='{{API_KEY_ID}}'
 ENDOR_API_SECRET='{{API_SECRET}}'
 
-ENDOR_ATTR_LABEL="$(endor_attr_label "$CONSOLE_USER")"
+ENDOR_ATTR_LABEL="${CONSOLE_USER}@$(endor_host_label)"
 ENDOR_ATTR_USER="$(endor_attr_username "$ENDOR_ATTR_LABEL" "$ENDOR_API_KEY_ID")"
 
 # npm _auth = base64(username:password)

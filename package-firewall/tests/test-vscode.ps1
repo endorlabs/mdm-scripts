@@ -29,7 +29,7 @@ function Set-FakeConsoleUser {
     $text = Get-Content -Raw $path
     $common = [regex]::Match($text, '(?ms)^# -- Common functions \(inlined from lib/common\.ps1\) --\r?$.*?^# --\r?$')
     if (-not $common.Success) { throw 'endor-vscode.ps1 does not inline lib/common.ps1' }
-    $fake = "function Find-ConsoleUser { if (`$env:ENDOR_TEST_CONSOLE_USER) { [PSCustomObject]@{ Username = `$env:ENDOR_TEST_CONSOLE_USER } } }`n"
+    $fake = "function Find-ConsoleUser { if (`$env:ENDOR_TEST_CONSOLE_USER) { [PSCustomObject]@{ Username = `$env:ENDOR_TEST_CONSOLE_USER; SID = `$env:ENDOR_TEST_CONSOLE_SID } } }`n"
     $text = $text.Insert($common.Index + $common.Value.LastIndexOf('# --'), $fake)
     [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($true))
 }
@@ -81,10 +81,11 @@ function Get-AttributedUrl {
     "https://factory.endorlabs.com/v1/namespaces/$Namespace/firewall/vscode/_ak/$token"
 }
 
-# Get-Label <user>: the label the scripts attribute that user's runs to.
+# Get-Label <user>: the label the scripts attribute that user's runs to, with no ENDOR_ATTR_USER:
+# as envvars.ps1 sets it.
 function Get-Label {
     param([string]$User)
-    & { . (Join-Path $RootDir 'package-firewall\powershell\lib\common.ps1'); Get-EndorAttrLabel $User }
+    & { . (Join-Path $RootDir 'package-firewall\powershell\lib\common.ps1'); "$User@$(Get-EndorHostLabel)" }
 }
 
 function Get-WorkerUrl {
