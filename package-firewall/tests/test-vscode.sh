@@ -14,6 +14,8 @@ DEFAULT_EXTENSION_URL_TEMPLATE="https://www.vscode-unpkg.net/_gallery/{publisher
 
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
+# shellcheck source=fake-console.sh
+source "$TEST_DIR/fake-console.sh"
 
 OUT="$ROOT_DIR/package-firewall/bash/out/$NAMESPACE"
 

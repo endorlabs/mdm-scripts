@@ -27,6 +27,30 @@ function Get-ServiceUrl {
 }
 $ExpectedUrl = Get-ServiceUrl $Secret
 
+# Get-AttributedUrl <label>: the gallery URL attributed to label, built as the firewall decodes it:
+# base64url(base64(base64("userattr:" + label) + ":" + key ID) + ":" + secret).
+function Get-AttributedUrl {
+    param([string]$Label)
+    $utf8 = [Text.Encoding]::UTF8
+    $inner = [Convert]::ToBase64String($utf8.GetBytes("userattr:$Label"))
+    $user = [Convert]::ToBase64String($utf8.GetBytes("${inner}:$KeyId"))
+    $token = [Convert]::ToBase64String($utf8.GetBytes("${user}:$Secret")).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    "https://factory.endorlabs.com/v1/namespaces/$Namespace/firewall/vscode/_ak/$token"
+}
+
+# Replaces Find-ConsoleUser in the generated endor-vscode.ps1, so no one is logged in unless
+# ENDOR_TEST_CONSOLE_USER names a user, and the user running the tests stays out of the URLs they
+# check. The fake goes at the end of the inlined lib/common.ps1, where it overrides the real one.
+function Set-FakeConsoleUser {
+    $path = Join-Path $Out 'endor-vscode.ps1'
+    $text = Get-Content -Raw $path
+    $common = [regex]::Match($text, '(?ms)^# -- Common functions \(inlined from lib/common\.ps1\) --\r?$.*?^# --\r?$')
+    if (-not $common.Success) { throw 'endor-vscode.ps1 does not inline lib/common.ps1' }
+    $fake = "function Find-ConsoleUser { if (`$env:ENDOR_TEST_CONSOLE_USER) { [PSCustomObject]@{ Username = `$env:ENDOR_TEST_CONSOLE_USER } } }`n"
+    $text = $text.Insert($common.Index + $common.Value.LastIndexOf('# --'), $fake)
+    [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($true))
+}
+
 function Invoke-Generate {
     param([string]$ApiSecret = $Secret, [string]$Patch = '0', [string]$Policy = '1', [string]$Auth = '')
     $env:ENDOR_NAMESPACE = $Namespace
@@ -38,6 +62,7 @@ function Invoke-Generate {
     $global:LASTEXITCODE = 0
     & $Generator *> $null
     if ($LASTEXITCODE) { throw "generator failed with exit code $LASTEXITCODE" }
+    Set-FakeConsoleUser
 }
 
 # Each case gets a VS Code install, product.json state, policy key and record of its own.
@@ -116,6 +141,8 @@ function Assert-Output {
 }
 
 try {
+    Remove-Item Env:\ENDOR_TEST_CONSOLE_USER -ErrorAction SilentlyContinue
+
     Write-Host 'test: the policy goes into a new key, once'
     Invoke-Generate
     New-Case 'create'
@@ -278,13 +305,31 @@ try {
     if ((Get-PolicyValue 'ExtensionGalleryServiceUrl') -cne $ExpectedUrl) { throw 'disable-patch touched the policy' }
     Invoke-Generate
 
+    Write-Host 'test: the logged-in user''s label goes into the policy, is kept, and removal deletes it'
+    New-Case 'attribution'
+    $env:ENDOR_TEST_CONSOLE_USER = 'alice'
+    $output = Invoke-Install
+    Assert-Rc 0 $output
+    $alice = & { . (Join-Path $RootDir 'package-firewall\powershell\lib\common.ps1'); Get-EndorAttrLabel 'alice' }
+    Assert-Output $output "VS Code user attribution -> $alice"
+    if ((Get-PolicyValue 'ExtensionGalleryServiceUrl') -cne (Get-AttributedUrl $alice)) { throw 'the policy does not have alice''s URL' }
+    if ((Get-Content -LiteralPath (Join-Path $Case.Record 'attr-label') -Raw) -cne "$alice`n") { throw 'alice''s label was not kept' }
+    if ((Get-Content -Raw (Join-Path $Case.Record 'record.json')) -match '_ak/') { throw 'the record contains the URL' }
+    Remove-Item Env:\ENDOR_TEST_CONSOLE_USER -ErrorAction SilentlyContinue
+    $output = Invoke-Install
+    Assert-Rc 0 $output
+    Assert-Output $output 'policy already set'
+    $output = Invoke-Remove
+    Assert-Rc 0 $output
+    if (Test-Path -LiteralPath $Case.Record) { throw 'removal left the kept label' }
+
     $global:LASTEXITCODE = 0
     Write-Host 'VS Code policy PowerShell tests passed'
 } finally {
     [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree('Software\Endor Labs Tests', $false)
     foreach ($name in 'ENDOR_VSCODE_PRODUCT_JSON', 'ENDOR_VSCODE_STATE_DIR', 'ENDOR_VSCODE_POLICY_KEY',
             'ENDOR_VSCODE_POLICY_STATE_DIR', 'ENDOR_VSCODE_SKIP_WATCHER', 'ENDOR_VSCODE_ENABLE_PATCH',
-            'ENDOR_VSCODE_ENABLE_POLICY', 'ENDOR_VSCODE_POLICY_AUTH') {
+            'ENDOR_VSCODE_ENABLE_POLICY', 'ENDOR_VSCODE_POLICY_AUTH', 'ENDOR_TEST_CONSOLE_USER') {
         Remove-Item "Env:\$name" -ErrorAction SilentlyContinue
     }
     Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue

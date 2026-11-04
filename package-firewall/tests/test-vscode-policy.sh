@@ -15,6 +15,8 @@ OUT="$ROOT_DIR/package-firewall/bash/out/$NAMESPACE"
 
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
+# shellcheck source=fake-console.sh
+source "$TEST_DIR/fake-console.sh"
 
 service_url() {
   printf 'https://factory.endorlabs.com/v1/namespaces/%s/firewall/vscode/_ak/%s' "$NAMESPACE" \
@@ -49,7 +51,7 @@ new_case() {
   POLICY_STATE="$CASE/policy-state"
 }
 
-# install: runs endor-vscode.sh for the current case. Sets RC and OUTPUT.
+# install: runs endor-vscode.sh, or SCRIPT, for the current case. Sets RC and OUTPUT.
 install() {
   RC=0
   OUTPUT=$(ENDOR_VSCODE_PRODUCT_JSON="$CASE/app/product.json" \
@@ -57,7 +59,7 @@ install() {
     ENDOR_VSCODE_POLICY_FILE="$POLICY_FILE" \
     ENDOR_VSCODE_POLICY_STATE_DIR="$POLICY_STATE" \
     ENDOR_VSCODE_SKIP_WATCHER=1 \
-    "$OUT/endor-vscode.sh" "$@" 2>&1) || RC=$?
+    "${SCRIPT:-$OUT/endor-vscode.sh}" "$@" 2>&1) || RC=$?
 }
 
 # remove: runs only the VS Code section of endor-remove.sh, which needs no signed-in user and
@@ -420,6 +422,12 @@ PY
   install_mac
   expect_rc 0
   expect_output "VS Code's policy is set by a configuration profile."
+  # The profile is the same for every Mac, so it has no user attribution, and still matches when
+  # the patch's URL has one.
+  ENDOR_TEST_CONSOLE_OWNER=alice install_mac
+  expect_rc 0
+  expect_output "VS Code user attribution → "
+  expect_output "VS Code's policy is set by a configuration profile."
   new_mac_case mac-user
   managed_prefs "$CASE/managed/alice/com.microsoft.VSCode.plist" "$EXPECTED_URL"
   install_mac
@@ -562,25 +570,9 @@ for script in "$OUT/endor-vscode-disable-patch.sh" "$OUT/endor-vscode-disable-po
   fi
 done
 
-# A Mac with no one logged in: logname finds no login, and the console belongs to
-# ENDOR_TEST_CONSOLE_OWNER. Other stat calls go to the real stat.
-NO_USER_BIN="$TMP_DIR/no-user-bin"
-mkdir -p "$NO_USER_BIN"
-printf '#!/bin/sh\nexit 1\n' > "$NO_USER_BIN/logname"
-cat > "$NO_USER_BIN/stat" <<'STAT'
-#!/bin/sh
-for arg in "$@"; do
-  if [ "$arg" = /dev/console ]; then
-    echo "$ENDOR_TEST_CONSOLE_OWNER"
-    exit 0
-  fi
-done
-exec /usr/bin/stat "$@"
-STAT
-chmod 755 "$NO_USER_BIN/logname" "$NO_USER_BIN/stat"
 # console_user_with <owner>: what find_console_user prints when the console belongs to owner.
 console_user_with() {
-  PATH="$NO_USER_BIN:$PATH" ENDOR_TEST_CONSOLE_OWNER="$1" bash -c 'source "$1"; find_console_user' _ \
+  ENDOR_TEST_CONSOLE_OWNER="$1" bash -c 'source "$1"; find_console_user' _ \
     "$ROOT_DIR/package-firewall/bash/lib/common.sh"
 }
 
@@ -599,7 +591,7 @@ for owner in root _mbsetupuser; do
   install
   expect_rc 0
   RC=0
-  OUTPUT=$(PATH="$NO_USER_BIN:$PATH" ENDOR_TEST_CONSOLE_OWNER="$owner" \
+  OUTPUT=$(ENDOR_TEST_CONSOLE_OWNER="$owner" \
     ENDOR_VSCODE_PRODUCT_JSON="$CASE/app/product.json" \
     ENDOR_VSCODE_STATE_DIR="$CASE/state" \
     ENDOR_VSCODE_POLICY_FILE="$POLICY_FILE" \
@@ -617,6 +609,157 @@ for owner in root _mbsetupuser; do
   [[ ! -e "$CASE/state" ]] || fail "endor-remove.sh left the patch's state with no one logged in"
   [[ ! -e "$POLICY_FILE" ]] || fail "endor-remove.sh left the policy file with no one logged in"
 done
+generate
+
+# attributed_url <label> [secret]: the gallery URL attributed to label, built as the firewall
+# decodes it: base64url(base64(base64("userattr:" + label) + ":" + key ID) + ":" + secret).
+attributed_url() {
+  python3 -I - "$NAMESPACE" "$KEY_ID" "${2:-$SECRET}" "$1" <<'PY'
+import base64
+import os
+import sys
+namespace, key_id, secret, label = sys.argv[1:5]
+inner = base64.b64encode(b"userattr:" + os.fsencode(label))
+user = base64.b64encode(inner + b":" + key_id.encode())
+token = base64.urlsafe_b64encode(user + b":" + secret.encode()).decode().rstrip("=")
+print("https://factory.endorlabs.com/v1/namespaces/%s/firewall/vscode/_ak/%s" % (namespace, token))
+PY
+}
+# label_of <user>: the label the scripts attribute that user's runs to.
+label_of() {
+  bash -c 'source "$1"; endor_attr_label "$2"' _ "$ROOT_DIR/package-firewall/bash/lib/common.sh" "$1"
+}
+worker_url() { sed -n "s/^FIREWALL_URL='\(.*\)'\$/\1/p" "$CASE/state/worker.sh"; }
+# expect_urls <url>: product.json, the policy and the worker all have the URL.
+expect_urls() {
+  [[ "$(product_url)" == "$1" ]] || fail "product.json has $(product_url), not $1"
+  [[ "$(policy_value ExtensionGalleryServiceUrl)" == "$1" ]] || fail "the policy is not $1"
+  [[ "$(worker_url)" == "$1" ]] || fail "the worker has $(worker_url), not $1"
+}
+# case_digest: everything a run can change.
+case_digest() {
+  local file
+  for file in "$CASE/app/product.json" "$POLICY_FILE" "$CASE/state/worker.sh" "$CASE/state/attr-label" \
+      "$POLICY_STATE/record.json" "$POLICY_STATE/attr-label"; do
+    printf '%s %s\n' "$file" "$(digest "$file")"
+  done
+}
+
+echo "test: the logged-in user's label goes into product.json, the policy and the worker"
+PATCH=1 generate
+alice=$(label_of alice)
+bob=$(label_of bob)
+new_case attribution
+ENDOR_TEST_CONSOLE_OWNER=alice install
+expect_rc 0
+expect_output "VS Code user attribution → $alice"
+expect_urls "$(attributed_url "$alice")"
+python3 -I - "$(product_url)" "$KEY_ID" "$SECRET" "$alice" <<'PY' || fail "the token is not the label, the key ID and the secret"
+import base64
+import os
+import sys
+url, key_id, secret, label = sys.argv[1:5]
+token = url.rsplit("/_ak/", 1)[1]
+user, _, password = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).partition(b":")
+inner, _, key = base64.b64decode(user).partition(b":")
+assert password == secret.encode(), password
+assert key == key_id.encode(), key
+assert base64.b64decode(inner) == b"userattr:" + os.fsencode(label), inner
+PY
+for file in "$CASE/state/attr-label" "$POLICY_STATE/attr-label"; do
+  [[ "$(cat "$file")" == "$alice" ]] || fail "$file doesn't hold alice's label"
+  [[ "$(file_mode "$file")" == "600" ]] || fail "$file is not mode 600"
+done
+if grep -qF "/_ak/" "$POLICY_STATE/record.json"; then fail "the record contains the URL"; fi
+
+echo "test: a run with the same user, or with no one logged in, changes nothing"
+before=$(case_digest)
+ENDOR_TEST_CONSOLE_OWNER=alice install
+expect_rc 0
+[[ "$(case_digest)" == "$before" ]] || fail "a second run with the same user changed something"
+install
+expect_rc 0
+expect_output "VS Code user attribution → $alice (kept from an earlier run: no logged-in user was found)"
+[[ "$(case_digest)" == "$before" ]] || fail "a run with no one logged in changed something"
+
+echo "test: another user's run attributes the machine to them"
+ENDOR_TEST_CONSOLE_OWNER=bob install
+expect_rc 0
+expect_urls "$(attributed_url "$bob")"
+[[ "$(cat "$CASE/state/attr-label")" == "$bob" && "$(cat "$POLICY_STATE/attr-label")" == "$bob" ]] \
+  || fail "bob's label was not kept"
+PATCH=1 generate "ci-smoke-rotated-secret"
+ENDOR_TEST_CONSOLE_OWNER=bob install
+expect_rc 0
+expect_urls "$(attributed_url "$bob" ci-smoke-rotated-secret)"
+PATCH=1 generate
+
+echo "test: removal deletes the kept labels"
+remove
+expect_rc 0
+[[ ! -e "$CASE/state" && ! -e "$POLICY_STATE" ]] || fail "removal left a kept label"
+
+echo "test: with no one logged in and no label kept, the URL is unattributed until a user's run"
+new_case attribution-none
+install
+expect_rc 0
+expect_output "no logged-in user was found, so VS Code's gallery URL carries no user attribution"
+expect_urls "$EXPECTED_URL"
+[[ ! -e "$CASE/state/attr-label" && ! -e "$POLICY_STATE/attr-label" ]] || fail "a run with no one logged in kept a label"
+# This is also what earlier versions of the script left.
+ENDOR_TEST_CONSOLE_OWNER=alice install
+expect_rc 0
+expect_urls "$(attributed_url "$alice")"
+
+echo "test: each disable script deletes its own method's label"
+disable policy
+expect_rc 0
+[[ ! -e "$POLICY_STATE" ]] || fail "disable-policy left its label"
+[[ "$(cat "$CASE/state/attr-label")" == "$alice" ]] || fail "disable-policy took the patch's label"
+disable patch
+expect_rc 0
+[[ ! -e "$CASE/state" ]] || fail "disable-patch left its label"
+
+echo "test: a dry run with a user keeps no label, and doesn't print the credential"
+new_case attribution-dry-run
+ENDOR_TEST_CONSOLE_OWNER=alice install --dry-run
+expect_rc 0
+expect_output "/_ak/<redacted>"
+url=$(attributed_url "$alice")
+if grep -qF "${url##*/_ak/}" <<<"$OUTPUT"; then fail "a dry run printed the token"; fi
+[[ ! -e "$CASE/state" && ! -e "$POLICY_STATE" ]] || fail "a dry run wrote something"
+
+echo "test: a label kept by one method reaches the other, and outlives the first method"
+new_case attribution-handover
+generate
+ENDOR_TEST_CONSOLE_OWNER=alice install
+expect_rc 0
+[[ "$(cat "$POLICY_STATE/attr-label")" == "$alice" ]] || fail "the policy did not keep alice's label"
+PATCH=1 generate
+install
+expect_rc 0
+expect_urls "$(attributed_url "$alice")"
+[[ "$(cat "$CASE/state/attr-label")" == "$alice" ]] || fail "the patch did not keep the policy's label"
+disable policy
+expect_rc 0
+before=$(digest "$CASE/app/product.json")
+PATCH=1 POLICY=0 generate
+install
+expect_rc 0
+[[ "$(digest "$CASE/app/product.json")" == "$before" && "$(product_url)" == "$(attributed_url "$alice")" ]] \
+  || fail "the patch lost the label when the policy went"
+PATCH=1 generate
+
+echo "test: a script without the helpers from lib/common.sh is unattributed"
+new_case attribution-no-helpers
+SCRIPT="$TMP_DIR/no-helpers-vscode.sh"
+sed '/^# ── Common functions (inlined from lib\/common.sh)/,/^# ───/d' "$OUT/endor-vscode.sh" > "$SCRIPT"
+chmod 700 "$SCRIPT"
+if grep -q '^endor_attr_label()' "$SCRIPT"; then fail "the helpers are still in $SCRIPT"; fi
+ENDOR_TEST_CONSOLE_OWNER=alice install
+expect_rc 0
+expect_urls "$EXPECTED_URL"
+unset SCRIPT
 generate
 
 echo "test: the generator refuses a remove template without exactly one marked VS Code section"

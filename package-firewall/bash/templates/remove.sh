@@ -382,10 +382,12 @@ def save_record(state, record):
 
 
 def forget(state):
-    try:
-        os.unlink(os.path.join(state, "record.json"))
-    except OSError:
-        pass
+    # attr-label is the installer's: the user attribution it keeps for runs with no one logged in.
+    for name in ("record.json", "attr-label"):
+        try:
+            os.unlink(os.path.join(state, name))
+        except OSError:
+            pass
     try:
         os.rmdir(state)
     except OSError:

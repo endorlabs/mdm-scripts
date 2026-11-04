@@ -287,6 +287,28 @@ needs SYSTEM or an elevated administrator; otherwise the script warns and skips
 VS Code. In Intune, set **Run script in 64-bit PowerShell host** to **Yes** if
 you can; the script also works from the default 32-bit host.
 
+#### User attribution
+
+As in the other scripts, the credential carries a label, so the firewall's logs
+and notifications show who installed an extension: `<console-user>@<COMPUTERNAME>`.
+`product.json`, the worker and the policy all carry it. Both methods are
+machine-wide, so the label is that of the user logged in at the latest run with
+someone logged in, User Installer copies in other profiles included:
+
+- The script keeps the label in `attr-label`, in each method's folder under
+  `%ProgramData%\Endor Labs`, so a run with no one logged in changes nothing.
+  Removal deletes it.
+- Until a run with someone logged in, the URL carries no label. Machines set up
+  by an earlier version get one at the first such run, and a different user's
+  run rewrites the URL the same way.
+- Run from an elevated administrator's session rather than as SYSTEM, the label
+  is that administrator's.
+- A policy you deliver yourself (Group Policy, ADMX or the Intune Settings
+  Catalog) carries no label.
+
+To label users another way, for example by email address, change
+`Get-EndorAttrLabel` in `lib\common.ps1`; every script uses it.
+
 #### The patch
 
 Patches Microsoft VS Code Stable's installation-level `product.json`. It sets
@@ -296,8 +318,10 @@ Patches Microsoft VS Code Stable's installation-level `product.json`. It sets
 https://factory.endorlabs.com/v1/namespaces/<namespace>/firewall/vscode/_ak/<base64url-token>
 ```
 
-The token is the unpadded Base64 URL encoding of
-`ENDOR_API_KEY_ID:ENDOR_API_SECRET`. The structural JSON edit preserves
+The token is the unpadded Base64 URL encoding of `<username>:ENDOR_API_SECRET`,
+where the username is the attributed username the other scripts use, or
+`ENDOR_API_KEY_ID` until the script has one (see
+[User attribution](#user-attribution)). The structural JSON edit preserves
 unrelated product and gallery fields and removes
 `extensionsGallery.extensionUrlTemplate` entirely to disable VS Code's direct
 upstream fallback.
@@ -315,7 +339,8 @@ The script:
   every minute, as a backstop. It logs what it changes to
   `%ProgramData%\Endor Labs\vscode-firewall\worker.log` (rotated at 1 MiB).
 - Modifies only `serviceUrl` and `extensionUrlTemplate`, preserving all other
-  current `product.json` values during updates and credential rotation. VS
+  current `product.json` values during updates, credential rotation and a new
+  user attribution. VS
   Code reads some of them, such as `target` and `win32VersionedUpdate`, to
   decide how to update itself.
 
@@ -496,8 +521,8 @@ To remove only one VS Code method, deploy `endor-vscode-disable-patch.ps1` or
 | `.bundle\config` | Mirror keys only — no credentials baked in (the credential is the `BUNDLE_<HOST>` registry var). ACL-restricted to owner. |
 | `.gemrc` | Contains credentials in the source URL (gem cannot use env var references). ACL-restricted to owner; `gem sources`, `gem env` and `gem install -V` print it. |
 | VS Code `product.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users because VS Code must consume it. |
-| `%ProgramData%\Endor Labs\vscode-firewall` | ACL-restricted to SYSTEM and Administrators; contains the remediation worker. |
+| `%ProgramData%\Endor Labs\vscode-firewall` | ACL-restricted to SYSTEM and Administrators; contains the remediation worker, and `attr-label`, the user attribution label. |
 | `HKLM\SOFTWARE\Policies\Microsoft\VSCode` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users, like every policy key. |
-| `%ProgramData%\Endor Labs\vscode-policy` | ACL-restricted to SYSTEM and Administrators. Records whether the script created the policy key and which sign-in provider it wrote; never the URL. |
+| `%ProgramData%\Endor Labs\vscode-policy` | ACL-restricted to SYSTEM and Administrators. Records whether the script created the policy key and which sign-in provider it wrote, and keeps the user attribution label; never the URL. |
 | API secret in MDM | Generated scripts contain the API key and secret in plaintext (used to write registry env vars). Restrict access to the Intune policy and the generated `out/` directory. |
 | `out/` directory | Add to `.gitignore`. Do not commit generated scripts to source control. |

@@ -186,7 +186,8 @@ if ($VSCODE_POLICY_AUTH -and $VSCODE_ENABLE_POLICY -ne '1') {
 # -- Compute derived values ----------------------------------------------------
 # Package-manager attribution credentials are computed at install time because
 # <console-user>@<machine> exists only on the endpoint. Machine-independent
-# values, including the VS Code path token, are derived here.
+# values, including the VS Code path token, are derived here. The token is
+# unattributed: templates/vscode.ps1 puts the label into it on the endpoint.
 $FQDN_HOST        = $FQDN -replace '^https://', ''
 $TRUSTED_HOST     = $FQDN_HOST -replace ':.*', ''
 
@@ -282,10 +283,16 @@ function Get-ScriptHeader {
     $r
 }
 
-# Get-SystemScriptHeader <scriptname> <description>
-# Machine-level integrations must run even when no interactive user is logged in.
+# Get-SystemScriptHeader <scriptname> <description> [-WithCommon]
+# Machine-level integrations must run even when no interactive user is logged in. With
+# -WithCommon, it inlines lib/common.ps1 too, for endor-vscode.ps1's user attribution.
 function Get-SystemScriptHeader {
-    param([string]$ScriptName, [string]$Description)
+    param([string]$ScriptName, [string]$Description, [switch]$WithCommon)
+    $common = ''
+    if ($WithCommon) {
+        $common = "`n# -- Common functions (inlined from lib/common.ps1) --`n" +
+            (Get-Content (Join-Path $LibDir 'common.ps1') -Raw -Encoding UTF8) + "# --`n"
+    }
     @"
 #!/usr/bin/env pwsh
 # MDM-deployable: $Description
@@ -301,6 +308,7 @@ param([switch]`$DryRun)
 
 `$ErrorActionPreference = 'Stop'
 `$EndorWarned = `$false
+$common
 
 if (`$DryRun) {
     Write-Host '[endor] DRY RUN -- no files, services, or scheduled tasks will be modified.'
@@ -340,7 +348,7 @@ function Build-SystemScript {
     param([string]$Template, [string]$OutputPath, [string]$Description)
     $name  = Split-Path $OutputPath -Leaf
     $parts = @(
-        (Get-SystemScriptHeader -ScriptName $name -Description $Description),
+        (Get-SystemScriptHeader -ScriptName $name -Description $Description -WithCommon),
         (Invoke-Substitute (Get-Content $Template -Raw -Encoding UTF8)),
         $ScriptFooter
     )

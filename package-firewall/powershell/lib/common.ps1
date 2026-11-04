@@ -3,7 +3,9 @@
 # Do NOT source this file directly — it is embedded at generation time.
 #
 # Functions:
-#   Get-ConsoleUser                              — finds the logged-in user when running as SYSTEM
+#   Find-ConsoleUser                             — finds the logged-in user when running as SYSTEM;
+#                                                  $null when no one is logged in
+#   Get-ConsoleUser                              — the same, but exits when no one is logged in
 #   Set-UserEnvVar        <name> <value> <sid>   — writes persistent HKCU env var via user SID
 #   Remove-UserEnvVar     <name> <sid>           — removes HKCU env var
 #   Send-EnvironmentChangeBroadcast              — WM_SETTINGCHANGE so new apps see HKCU env changes
@@ -76,6 +78,13 @@ function Get-EndorHostLabel {
     if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { [System.Net.Dns]::GetHostName() }
 }
 
+# Get-EndorAttrLabel <user> — the label every ecosystem attributes to: <user>@<machine>.
+# To label users another way, change only this function.
+function Get-EndorAttrLabel {
+    param([string]$User)
+    "$User@$(Get-EndorHostLabel)"
+}
+
 # Write-EndorFile <path> <lines>
 # UTF-8 WITHOUT BOM. Windows PowerShell 5.1's `-Encoding UTF8` writes a BOM,
 # which pip's configparser rejects — pip.ini would be silently ignored.
@@ -85,11 +94,13 @@ function Write-EndorFile {
     [System.IO.File]::WriteAllText($FilePath, $text, [System.Text.UTF8Encoding]::new($false))
 }
 
-# Get-ConsoleUser
+# Find-ConsoleUser [-Problem <ref>]
 # Intune scripts run as SYSTEM by default. Detects the logged-in interactive user
 # via explorer.exe and resolves their profile path + SID for registry writes.
-# Falls back gracefully when running directly as the logged-in user.
-function Get-ConsoleUser {
+# Falls back gracefully when running directly as the logged-in user. Returns $null
+# when no one is logged in, and puts the reason in -Problem.
+function Find-ConsoleUser {
+    param([ref]$Problem)
     $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 
     if (-not $currentIdentity.IsSystem) {
@@ -111,14 +122,14 @@ function Get-ConsoleUser {
             Select-Object -First 1
 
     if (-not $proc) {
-        Write-Error '[endor] ERROR: could not detect console user (no explorer.exe). Ensure a user is logged in.'
-        exit 1
+        if ($Problem) { $Problem.Value = 'could not detect console user (no explorer.exe). Ensure a user is logged in.' }
+        return $null
     }
 
     $owner = Invoke-CimMethod -InputObject $proc -MethodName 'GetOwner'
     if (-not $owner.User) {
-        Write-Error '[endor] ERROR: could not determine owner of explorer.exe.'
-        exit 1
+        if ($Problem) { $Problem.Value = 'could not determine owner of explorer.exe.' }
+        return $null
     }
 
     $username = $owner.User
@@ -134,8 +145,8 @@ function Get-ConsoleUser {
         } catch { }
     }
     if (-not $sid) {
-        Write-Error "[endor] ERROR: could not resolve SID for user '$domain\$username'."
-        exit 1
+        if ($Problem) { $Problem.Value = "could not resolve SID for user '$domain\$username'." }
+        return $null
     }
 
     $regKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
@@ -149,6 +160,18 @@ function Get-ConsoleUser {
         ProfilePath = $profilePath
         AppDataPath = $appDataPath
     }
+}
+
+# Get-ConsoleUser
+# Find-ConsoleUser, for scripts that write to the user's profile: exits when no one is logged in.
+function Get-ConsoleUser {
+    $problem = ''
+    $user = Find-ConsoleUser -Problem ([ref]$problem)
+    if (-not $user) {
+        Write-Error "[endor] ERROR: $problem"
+        exit 1
+    }
+    $user
 }
 
 # Set-UserEnvVar <name> <value> <usersid>

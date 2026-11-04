@@ -41,6 +41,8 @@ cleanup() {
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
+# shellcheck source=fake-console.sh
+source "$TEST_DIR/fake-console.sh"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -456,5 +458,30 @@ run_worker "$state" --once || true
 [[ "$(tree_digest "$STAGED")" == "$digest" ]] || fail "an update for an app that isn't ours was modified"
 stop_fakes
 run_worker "$state" --purge || fail "purge failed"
+
+echo "test: a user's attribution re-patches and re-signs once, with the same identity"
+state="$TMP_DIR/state-attribution"
+build_app "$APP" 1.0.0
+install "$state" || fail "installer failed"
+assert_firewalled "$APP" "$state"
+cert=$(cert_of "$state")
+before=$(inode "$APP")
+ENDOR_TEST_CONSOLE_OWNER=alice install "$state" || fail "installer failed with a user logged in"
+EXPECTED_URL=$(sed -n "s/^FIREWALL_URL='\(.*\)'\$/\1/p" "$state/worker.sh")
+[[ "$EXPECTED_URL" == "https://factory.endorlabs.com/v1/namespaces/$NAMESPACE/firewall/vscode/_ak/"?* \
+    && "$EXPECTED_URL" != "$(firewall_url "$SECRET")" ]] \
+  || fail "the worker's URL is not attributed"
+[[ "$(cat "$state/attr-label")" == alice@* ]] || fail "alice's label was not kept"
+[[ "$(inode "$APP")" != "$before" ]] || fail "the attributed app was not swapped in"
+assert_firewalled "$APP" "$state"
+[[ "$(cert_of "$state")" == "$cert" ]] || fail "attribution replaced the signing identity"
+before=$(inode "$APP")
+digest=$(tree_digest "$APP")
+install "$state" || fail "installer failed with no one logged in"
+[[ "$(inode "$APP")" == "$before" && "$(tree_digest "$APP")" == "$digest" ]] \
+  || fail "a run with no one logged in changed the attributed app"
+run_worker "$state" --restore || fail "restore failed"
+run_worker "$state" --purge || fail "purge failed"
+generate
 
 echo "VS Code code-signing tests passed"

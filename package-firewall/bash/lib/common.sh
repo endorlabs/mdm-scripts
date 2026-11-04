@@ -86,6 +86,12 @@ endor_attr_username() {
   printf '%s:%s' "$inner" "$key_id" | endor_b64
 }
 
+# endor_attr_label <console-user> — the label every ecosystem attributes to: <console-user>@<machine>.
+# To label users another way, change only this function.
+endor_attr_label() {
+  printf '%s@%s' "$1" "$(endor_host_label)"
+}
+
 # find_console_user
 # MDM tools (Kandji, Jamf) run scripts as root. $HOME resolves to /var/root, which
 # is not where developer config files live. Prints the name of the actual logged-in
