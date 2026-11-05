@@ -34,6 +34,8 @@ $ENDOR_BUNDLE_CREDS   = "${_attrUserEnc}:${_secretEnc}"
 $ENDOR_GEM_SOURCE_URL = "https://${_attrUserEnc}:${_secretEnc}@{{FQDN_HOST}}/v1/namespaces/{{NAMESPACE}}/firewall/gem/"
 
 Write-Host "[endor] user attribution -> $ENDOR_ATTR_LABEL"
+# VS Code's gallery URL is machine-wide, so endor-vscode.ps1 takes the label from here.
+Set-EndorAttrLabel -Label $ENDOR_ATTR_LABEL -DryRun:$DryRun
 
 $_envVars = [ordered]@{
     'ENDOR_API_KEY_ID'                          = '{{API_KEY_ID}}'

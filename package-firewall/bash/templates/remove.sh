@@ -36,6 +36,9 @@
 #     /etc/vscode/policy.json. On macOS it reports an Endor configuration profile, which only
 #     the MDM can remove.
 #
+#   User attribution:
+#     The label the package-manager scripts record for VS Code (endor_attr_label_file).
+#
 #   Shell profiles (env.sh source line):
 #     ~/.zshrc
 #     ~/.bash_profile
@@ -48,8 +51,8 @@
 #   - --dry-run: prints what would happen, writes nothing
 #   - Safe to run multiple times (idempotent)
 #   - With no one logged in (the login window, Setup Assistant), only the machine-wide
-#     configuration goes: root's .gemrc and VS Code's. The user's files stay, and the script
-#     warns, so an MDM can run it again once the user logs in.
+#     configuration goes: root's .gemrc, the recorded label and VS Code's. The user's files
+#     stay, and the script warns, so an MDM can run it again once the user logs in.
 
 echo ""
 echo "[endor-remove] ── Endor Package Firewall removal ──────────────────────────"
@@ -194,6 +197,7 @@ if [[ "$EUID" -eq 0 ]]; then
   remove_gemrc "$_ROOT_HOME/.gemrc" "{{GEM_MIRROR_URL}}" root "$(id -gn root)"
   unset _ROOT_HOME
 fi
+endor_forget_attr_label
 
 # >>> endor-vscode-remove
 # ── VS Code extension firewall ────────────────────────────────────────────────
@@ -382,12 +386,10 @@ def save_record(state, record):
 
 
 def forget(state):
-    # attr-label is the installer's: the user attribution it keeps for runs with no one logged in.
-    for name in ("record.json", "attr-label"):
-        try:
-            os.unlink(os.path.join(state, name))
-        except OSError:
-            pass
+    try:
+        os.unlink(os.path.join(state, "record.json"))
+    except OSError:
+        pass
     try:
         os.rmdir(state)
     except OSError:

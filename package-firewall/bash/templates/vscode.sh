@@ -14,8 +14,8 @@ IFS= read -r -d '' _VSCODE_WORKER_CONTENT <<'ENDOR_VSCODE_WORKER' || true
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Filled by the installer, with the URL attributed to this machine's user.
-FIREWALL_URL='{{ATTR_SERVICE_URL}}'
+# Unattributed: the end of this script puts the recorded user attribution into it, at every run.
+FIREWALL_URL='{{VSCODE_SERVICE_URL}}'
 DEFAULT_SERVICE_URL='https://marketplace.visualstudio.com/_apis/public/gallery'
 DEFAULT_EXTENSION_URL_TEMPLATE='https://www.vscode-unpkg.net/_gallery/{publisher}/{name}/latest'
 MODE="once"
@@ -1784,6 +1784,15 @@ darwin_main() {
   return "$status"
 }
 
+# The user attribution functions. The installer copies its own in here.
+# {{ATTR_FUNCTIONS}}
+
+# The label of the user the package-manager scripts set up last, read at every run, so one recorded
+# after this worker was installed arrives within a minute.
+if declare -F _vscode_gallery_url >/dev/null; then
+  FIREWALL_URL=$(_vscode_gallery_url "$FIREWALL_URL")
+fi
+
 if [[ "$(uname -s)" == "Darwin" && -z "${ENDOR_VSCODE_PRODUCT_JSON:-}" ]]; then
   darwin_main "$@"
   exit $?
@@ -1953,12 +1962,10 @@ def save_record(state, record):
 
 
 def forget(state):
-    # attr-label is the installer's: the user attribution it keeps for runs with no one logged in.
-    for name in ("record.json", "attr-label"):
-        try:
-            os.unlink(os.path.join(state, name))
-        except OSError:
-            pass
+    try:
+        os.unlink(os.path.join(state, "record.json"))
+    except OSError:
+        pass
     try:
         os.rmdir(state)
     except OSError:
@@ -2089,7 +2096,7 @@ sys.exit(main(sys.argv))
 ENDOR_VSCODE_POLICY_PY
 
 _vscode_policy() {
-  ENDOR_VSCODE_POLICY_URL="$_vscode_gallery_url" python3 -I -c "$_VSCODE_POLICY_PY" "$@"
+  ENDOR_VSCODE_POLICY_URL="$_vscode_policy_url" python3 -I -c "$_VSCODE_POLICY_PY" "$@"
 }
 
 _vscode_warn() {
@@ -2127,6 +2134,14 @@ _vscode_xml() {
   printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
 
+# ── User attribution ──────────────────────────────────────────────────────────
+# product.json and the policy are machine-wide, so their gallery URL carries the label of the user
+# the package-manager scripts (endor-all.sh and the others) set up last: they record it when they
+# configure that user (endor_record_attr_label, in lib/common.sh). The worker puts it into the URL
+# at every run, so it arrives within a minute whichever script ran first; this script puts it into
+# the policy. With no label recorded, the URL is unattributed. So is the macOS profile, which is
+# the same for the whole fleet. These functions are copied into the worker.
+
 # _vscode_b64d <base64>: decoded. macOS takes -D; before macOS 13, its -d is --debug, which
 # encodes. GNU takes only -d.
 _vscode_b64d() {
@@ -2136,54 +2151,54 @@ _vscode_b64d() {
   printf '%s' "$out"
 }
 
-# _vscode_env_label <home>: the label in the ENDOR_ATTR_USER that the other ecosystems' scripts
-# wrote to the user's env.sh: base64(base64("userattr:" + label) + ":" + key ID). The script runs
-# as root and the user owns the file, so it is read, never sourced.
-_vscode_env_label() {
-  local file="$1/.config/endor/env.sh" line outer label
-  [[ -n "$1" && -f "$file" && ! -L "$file" ]] || return 1
-  line=$(grep -m 1 -E '^export ENDOR_ATTR_USER="[A-Za-z0-9+/=]+"$' "$file") || return 1
-  line=${line#*\"}
-  outer=$(_vscode_b64d "${line%\"}") || return 1
-  [[ "$outer" == ?*:?* ]] || return 1
-  label=$(_vscode_b64d "${outer%%:*}") || return 1
-  [[ "$label" == userattr:?* && "$label" != *[[:cntrl:]]* ]] || return 1
-  printf '%s' "${label#userattr:}"
+# _vscode_attr_label: the recorded label, read as data from root's path in endor_attr_label_file.
+_vscode_attr_label() {
+  local file="${ENDOR_ATTR_LABEL_FILE:-}" label=""
+  if [[ -z "$file" ]]; then
+    case "$(uname -s)" in
+      Darwin) file="/Library/Application Support/Endor Labs/attr-label" ;;
+      *) file="/var/lib/endor/attr-label" ;;
+    esac
+  fi
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  IFS= read -r label < "$file" || true
+  [[ -n "$label" && "$label" != *[[:cntrl:]]* ]] || return 1
+  printf '%s' "$label"
 }
 
 # _vscode_attributed_url <url> <label>: the URL with the label in its token. The token is
-# base64url(<key ID>:<secret>); the key ID becomes the attributed username, as in the other
-# ecosystems' credentials, and the firewall decodes it.
+# base64url(<key ID>:<secret>). The key ID becomes the attributed username, as in the other
+# ecosystems' credentials (endor_attr_username, in lib/common.sh), and the firewall decodes it.
 _vscode_attributed_url() {
-  local token="${1##*/_ak/}" padded pair
+  local token="${1##*/_ak/}" padded pair user
   [[ "$1" == */_ak/* && -n "$token" && "$token" != */* ]] || return 1
   padded=$(printf '%s' "$token" | tr '_-' '/+')
   while (( ${#padded} % 4 )); do padded="$padded="; done
   pair=$(_vscode_b64d "$padded") || return 1
   [[ "$pair" == ?*:?* ]] || return 1
-  token=$(printf '%s:%s' "$(endor_attr_username "$2" "${pair%%:*}")" "${pair#*:}" \
-    | endor_b64 | tr -d '=' | tr '+/' '-_')
+  user=$(printf 'userattr:%s' "$2" | base64 | tr -d '\n')
+  user=$(printf '%s:%s' "$user" "${pair%%:*}" | base64 | tr -d '\n')
+  token=$(printf '%s:%s' "$user" "${pair#*:}" | base64 | tr -d '\n=' | tr '+/' '-_')
   printf '%s/_ak/%s' "${1%/_ak/*}" "$token"
 }
 
-# _vscode_fill_worker <url>: puts the URL into the worker. False when a {{...}} token is left.
-# bash 3.2 takes most of a second over the whole worker in a UTF-8 locale, and none in C.
+# _vscode_gallery_url <url>: the URL, attributed when a label is recorded.
+_vscode_gallery_url() {
+  local label
+  label=$(_vscode_attr_label) && _vscode_attributed_url "$1" "$label" && return 0
+  printf '%s' "$1"
+}
+
+# _vscode_fill_worker: copies the functions above into the worker. False when a {{...}} token is
+# left. bash 3.2 takes most of a second over the whole worker in a UTF-8 locale, and none in C.
 _vscode_fill_worker() {
-  local LC_ALL=C
-  _VSCODE_WORKER_CONTENT=${_VSCODE_WORKER_CONTENT//'{{ATTR_SERVICE_URL}}'/"$1"}
+  local LC_ALL=C functions
+  functions=$(declare -f _vscode_b64d _vscode_attr_label _vscode_attributed_url _vscode_gallery_url)
+  _VSCODE_WORKER_CONTENT=${_VSCODE_WORKER_CONTENT//'# {{ATTR_FUNCTIONS}}'/"$functions"}
   [[ "$_VSCODE_WORKER_CONTENT" != *'{{'* ]]
 }
 
-# _vscode_keep_label <file>: keeps the label in the URL, for runs with no one logged in, so each
-# method has it whichever method's folder it came from. Only the label: the URL carries the
-# credential.
-_vscode_keep_label() {
-  [[ -n "$1" && -n "$_vscode_label" && -d "$(dirname "$1")" ]] || return 0
-  [[ "$(cat "$1" 2>/dev/null)" != "$_vscode_label" ]] || return 0
-  if ! ( umask 077 && printf '%s\n' "$_vscode_label" > "$1.tmp" && mv -f "$1.tmp" "$1" ); then
-    _vscode_warn "could not keep the VS Code user attribution in $1."
-  fi
-}
+_vscode_policy_url="$_VSCODE_SERVICE_URL"
 
 if [[ "$_VSCODE_ENABLE_PATCH" == "0" && "$_VSCODE_ENABLE_POLICY" == "0" ]]; then
   if [[ "$_vscode_legacy" == "1" ]]; then
@@ -2198,51 +2213,14 @@ elif [[ -z "$_VSCODE_STATE_DIR" ]]; then
   _vscode_warn "VS Code firewall supports macOS and Linux only in this script."
 fi
 
-# ── User attribution ──────────────────────────────────────────────────────────
-# The gallery URL that this script writes carries the same label as the logged-in user's other
-# ecosystems, so the firewall logs who installed an extension: the label in the ENDOR_ATTR_USER
-# of the user's env.sh, which a deployment may have set to the user's email; or, before the other
-# ecosystems' scripts have run, <user>@<machine>, as they would set it. product.json and the policy
-# are machine-wide, so the label is that of the user logged in at the latest run with one. Each
-# method keeps it in attr-label, beside its state, for runs with no one logged in. Until a run with
-# someone logged in, and in a script from a generator that doesn't inline lib/common.sh, the URL is
-# unattributed. So is the macOS profile, which is the same for the whole fleet.
-_vscode_gallery_url="$_VSCODE_SERVICE_URL"
-_vscode_label=""
-_vscode_label_user=""
-_vscode_label_from=""
-_vscode_patch_label=""
-_vscode_policy_label=""
-[[ "$_VSCODE_ENABLE_PATCH" != "1" || -z "$_VSCODE_STATE_DIR" ]] \
-  || _vscode_patch_label="$_VSCODE_STATE_DIR/attr-label"
-[[ "$_VSCODE_ENABLE_POLICY" != "1" || "$_vscode_policy_kind" != "file" ]] \
-  || _vscode_policy_label="$_VSCODE_POLICY_STATE_DIR/attr-label"
-if [[ -n "$_vscode_patch_label$_vscode_policy_label" ]] \
-    && declare -F find_console_user resolve_user_home endor_host_label endor_attr_username endor_b64 >/dev/null; then
-  _vscode_label_user=$(find_console_user)
-  if [[ -n "$_vscode_label_user" ]]; then
-    if _vscode_label=$(_vscode_env_label "$(resolve_user_home "$_vscode_label_user")"); then
-      _vscode_label_from=" (as in $_vscode_label_user's env.sh)"
-    else
-      _vscode_label="${_vscode_label_user}@$(endor_host_label)"
-    fi
+if [[ ( "$_VSCODE_ENABLE_PATCH" == "1" && -n "$_VSCODE_STATE_DIR" ) \
+    || ( "$_VSCODE_ENABLE_POLICY" == "1" && "$_vscode_policy_kind" == "file" ) ]]; then
+  if _vscode_label=$(_vscode_attr_label); then
+    echo "[endor] VS Code user attribution → $_vscode_label (recorded by the package-manager scripts)"
   else
-    for _vscode_label_file in "$_vscode_patch_label" "$_vscode_policy_label"; do
-      [[ -n "$_vscode_label_file" && -f "$_vscode_label_file" ]] || continue
-      IFS= read -r _vscode_label < "$_vscode_label_file" || true
-      [[ -z "$_vscode_label" ]] || break
-    done
-    _vscode_label_from=" (kept from an earlier run: no logged-in user was found)"
+    echo "[endor] note: no package-manager script has recorded a user attribution yet, so VS Code's gallery URL carries none for now."
   fi
-  if [[ -z "$_vscode_label" ]]; then
-    echo "[endor] note: no logged-in user was found, so VS Code's gallery URL carries no user attribution until a run with one."
-  elif _vscode_gallery_url=$(_vscode_attributed_url "$_VSCODE_SERVICE_URL" "$_vscode_label"); then
-    echo "[endor] VS Code user attribution → $_vscode_label$_vscode_label_from"
-  else
-    _vscode_gallery_url="$_VSCODE_SERVICE_URL"
-    _vscode_label=""
-    _vscode_warn "could not put the user attribution into VS Code's gallery URL, so it carries none."
-  fi
+  _vscode_policy_url=$(_vscode_gallery_url "$_VSCODE_SERVICE_URL")
 fi
 
 # ── The product.json patch ────────────────────────────────────────────────────
@@ -2276,7 +2254,7 @@ fi
 
 if [[ "$_VSCODE_ENABLE_PATCH" != "1" || -z "$_VSCODE_STATE_DIR" ]]; then
   :
-elif ! _vscode_fill_worker "$_vscode_gallery_url"; then
+elif ! _vscode_fill_worker; then
   _vscode_warn "the VS Code worker has an unresolved {{...}} token, so the patch was not installed."
 elif [[ "${DRY_RUN:-0}" == "1" ]]; then
   _vscode_done=1
@@ -2299,8 +2277,6 @@ else
     printf '%s\n' "$_VSCODE_WORKER_CONTENT" > "$_vscode_tmp_worker"
     chmod 700 "$_vscode_tmp_worker"
     mv -f "$_vscode_tmp_worker" "$_VSCODE_WORKER_PATH"
-    # After the worker: removal deletes the state folder only when it finds one.
-    _vscode_keep_label "$_vscode_patch_label"
 
     # Stop a previous daemon first: older workers edited the app in place.
     if [[ "$_vscode_os" == "Darwin" && "${ENDOR_VSCODE_SKIP_WATCHER:-0}" != "1" ]]; then
@@ -2508,8 +2484,6 @@ elif [[ "$_VSCODE_ENABLE_POLICY" == "1" && "$_vscode_policy_kind" == "file" ]]; 
     [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" ]] || _vscode_strict=0
     _vscode_policy apply "$_VSCODE_POLICY_FILE" "$_VSCODE_POLICY_STATE_DIR" "$_VSCODE_POLICY_AUTH" \
       "${DRY_RUN:-0}" "$_vscode_strict" || _ENDOR_WARNED=1
-    # The policy's state folder exists once it has been set.
-    [[ "${DRY_RUN:-0}" == "1" ]] || _vscode_keep_label "$_vscode_policy_label"
     _vscode_version=$(_vscode_policy version "$(dirname "$_vscode_product")/package.json" 2>/dev/null || true)
   fi
   _vscode_minimum=1.106
@@ -2555,12 +2529,12 @@ fi
 
 [[ "$_vscode_done" != "1" ]] || echo "[endor] ✓ VS Code extension firewall done"
 unset -f _vscode_run_worker _vscode_xml _vscode_policy _vscode_warn _vscode_older _vscode_managed_policy
-unset -f _vscode_b64d _vscode_env_label _vscode_attributed_url _vscode_fill_worker _vscode_keep_label
+unset -f _vscode_b64d _vscode_attr_label _vscode_attributed_url _vscode_gallery_url _vscode_fill_worker
+unset _vscode_policy_url _vscode_label
 unset _vscode_os _VSCODE_STATE_DIR _VSCODE_WORKER_PATH _VSCODE_WORKER_CONTENT _VSCODE_LOG_DIR
 unset _vscode_tmp_worker _vscode_plist _vscode_service _vscode_path _vscode_timer _vscode_dpkg_hook
 unset _vscode_log _vscode_watch _vscode_caches _vscode_left _vscode_done _vscode_product
 unset _VSCODE_SERVICE_URL _VSCODE_ENABLE_PATCH _VSCODE_ENABLE_POLICY _VSCODE_POLICY_AUTH _VSCODE_MACOS_DAEMON
 unset _vscode_legacy _VSCODE_POLICY_FILE _VSCODE_POLICY_STATE_DIR _vscode_policy_kind _VSCODE_POLICY_PY
 unset _vscode_strict _vscode_version _vscode_item _vscode_found _vscode_others _vscode_url _vscode_auth
-unset _vscode_minimum _vscode_reader _vscode_gallery_url _vscode_label _vscode_label_user _vscode_label_file
-unset _vscode_patch_label _vscode_policy_label _vscode_label_from
+unset _vscode_minimum _vscode_reader

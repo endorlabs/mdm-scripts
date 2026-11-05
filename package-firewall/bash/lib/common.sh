@@ -86,6 +86,57 @@ endor_attr_username() {
   printf '%s:%s' "$inner" "$key_id" | endor_b64
 }
 
+# endor_attr_label_file
+# Where the package-manager scripts record the label for VS Code's gallery URL, which is
+# machine-wide, so can't be configured per user. templates/vscode.sh reads it from the same path.
+# Root's: fails for another user, unless ENDOR_ATTR_LABEL_FILE (tests) names a file.
+endor_attr_label_file() {
+  if [[ -n "${ENDOR_ATTR_LABEL_FILE:-}" ]]; then
+    printf '%s' "$ENDOR_ATTR_LABEL_FILE"
+  elif [[ "$EUID" -ne 0 ]]; then
+    return 1
+  elif [[ "$(uname -s)" == "Darwin" ]]; then
+    printf '%s' "/Library/Application Support/Endor Labs/attr-label"
+  else
+    printf '%s' "/var/lib/endor/attr-label"
+  fi
+}
+
+# endor_record_attr_label <label>
+# Records the label when it changed. endor-vscode.sh's worker reads it at every run, so it reaches
+# VS Code within a minute, whichever script ran first. Honours DRY_RUN=1.
+endor_record_attr_label() {
+  local file
+  [[ -n "$1" ]] || return 0
+  file=$(endor_attr_label_file) || return 0
+  [[ "$(cat "$file" 2>/dev/null)" != "$1" ]] || return 0
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "[dry-run] would record the user attribution for VS Code in $file"
+    return 0
+  fi
+  if ! mkdir -p "$(dirname "$file")" || ! rm -f "$file.tmp" \
+      || ! ( umask 077 && printf '%s\n' "$1" > "$file.tmp" ) || ! mv -f "$file.tmp" "$file"; then
+    echo "[endor] WARNING: could not record the user attribution in $file, so VS Code's gallery URL won't carry it." >&2
+    _ENDOR_WARNED=1
+  fi
+}
+
+# endor_forget_attr_label
+# Removes the recorded label (endor-remove.sh). Honours DRY_RUN=1.
+endor_forget_attr_label() {
+  local file
+  file=$(endor_attr_label_file) || return 0
+  [[ -e "$file" || -L "$file" ]] || return 0
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    echo "[dry-run] would remove the user attribution recorded for VS Code: $file"
+  elif rm -f "$file"; then
+    echo "[endor-remove] removed the user attribution recorded for VS Code: $file"
+  else
+    echo "[endor-remove] WARNING: could not remove $file" >&2
+    _ENDOR_WARNED=1
+  fi
+}
+
 # find_console_user
 # MDM tools (Kandji, Jamf) run scripts as root. $HOME resolves to /var/root, which
 # is not where developer config files live. Prints the name of the actual logged-in

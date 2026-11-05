@@ -241,9 +241,7 @@ fi
 
 # ─── Compute derived values ────────────────────────────────────────────────────
 # Only machine-independent values are derived here. Attribution values
-# (<console-user>@<machine>) are computed at install time — see credentials_block, and
-# templates/vscode.sh, which puts the label of the user's other ecosystems into
-# VSCODE_SERVICE_URL's token.
+# (<console-user>@<machine>) are computed at install time — see credentials_block.
 FQDN_HOST="${FQDN#https://}"
 TRUSTED_HOST="${FQDN_HOST%%:*}"
 
@@ -256,8 +254,8 @@ GEM_MIRROR_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/gem/"
 # Bundler keys credentials by host name: upper-case, '.' → '__', '-' → '___', no port.
 BUNDLE_HOST_KEY=$(printf '%s' "${TRUSTED_HOST}" | tr '[:lower:]' '[:upper:]' | sed -e 's/-/___/g' -e 's/\./__/g')
 API_SECRET_B64=$(printf '%s' "${ENDOR_API_SECRET}" | base64 | tr -d '\n')
-# Unattributed. endor-vscode.sh swaps the key ID for the attributed username on the device; the
-# macOS profile keeps this URL.
+# Unattributed. On the device, endor-vscode.sh puts the label the package-manager scripts recorded
+# into the token; the macOS profile keeps this URL.
 VSCODE_TOKEN=$(printf '%s:%s' "${ENDOR_API_KEY_ID}" "${ENDOR_API_SECRET}" \
   | base64 | tr -d '\n=' | tr '+/' '-_')
 VSCODE_SERVICE_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/vscode/_ak/${VSCODE_TOKEN}"
@@ -414,6 +412,8 @@ ENDOR_GEM_SOURCE_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):$(endor_url
 # No exports — every consumer is same-process template code inlined below.
 
 echo "[endor] user attribution → ${ENDOR_ATTR_LABEL}"
+# VS Code's gallery URL is machine-wide, so endor-vscode.sh takes the label from here.
+endor_record_attr_label "$ENDOR_ATTR_LABEL"
 CREDBLOCK
 }
 
@@ -440,13 +440,11 @@ script_header() {
   echo ""
 }
 
-# system_script_header <output> <description> [with_common]
-# Used by machine-level integrations that do not require an interactive user. With with_common,
-# it inlines lib/common.sh too, for endor-vscode.sh's user attribution.
+# system_script_header <output> <description>
+# Used by machine-level integrations that do not require an interactive user.
 system_script_header() {
   local output="$1"
   local description="$2"
-  local with_common="${3:-}"
   echo "#!/usr/bin/env bash"
   echo "# MDM-deployable: ${description}"
   echo "# Generated for namespace=${ENDOR_NAMESPACE} fqdn=${FQDN}."
@@ -455,12 +453,6 @@ system_script_header() {
   echo ""
   echo "set -euo pipefail"
   echo ""
-  if [[ -n "$with_common" ]]; then
-    echo "# ── Common functions (inlined from lib/common.sh) ────────────────────────────"
-    inline_common
-    echo "# ─────────────────────────────────────────────────────────────────────────────"
-    echo ""
-  fi
   arg_parsing_block
   echo ""
 }
@@ -496,7 +488,7 @@ build_system_script() {
   local description="$3"
 
   {
-    system_script_header "$output" "$description" with_common
+    system_script_header "$output" "$description"
     substitute < "$template"
     echo ""
     script_footer

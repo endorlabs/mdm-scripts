@@ -289,26 +289,27 @@ you can; the script also works from the default 32-bit host.
 
 #### User attribution
 
-The credential carries the same label as the logged-in user's other
-ecosystems, so the firewall's logs and notifications show who installed an
-extension. The label is the one in the user's `ENDOR_ATTR_USER` environment
-variable, which the package-manager scripts set, so a deployment that labels
-users by email carries that over to VS Code. Before those scripts have run, it
-is `<console-user>@<COMPUTERNAME>`, as they would set it. `product.json`, the
-worker and the policy all carry the label. Both methods are machine-wide, so the
-label is that of the user logged in at the latest run with someone logged in,
-User Installer copies in other profiles included:
+The credential carries the same label as the user's other ecosystems, so the
+firewall's logs and notifications show who installed an extension.
+`product.json` and the policy are machine-wide, so they carry the label of the
+user the package-manager scripts set up last, User Installer copies in other
+profiles included:
 
-- The script keeps the label in `attr-label`, in each method's folder under
-  `%ProgramData%\Endor Labs`, so a run with no one logged in changes nothing.
-  Removal deletes it.
-- Until a run with someone logged in, the URL carries no label. Machines set up
-  by an earlier version get one at the first such run, and a different user's
-  run rewrites the URL the same way.
-- Run from an elevated administrator's session rather than as SYSTEM, the label
-  is that administrator's.
+- Each package-manager script, `endor-all.ps1` included, records the label it
+  uses in `HKLM\SOFTWARE\Endor Labs\Package Firewall` (`AttrLabel`), which only
+  administrators can write. A deployment that labels users its own way, by
+  email for example, records that label. Run from a session that isn't
+  elevated, a script records nothing.
+- The scheduled task reads it at every pass, at least once a minute, so
+  `product.json` takes the label within a minute, whichever script ran first.
+- The policy takes the label at `endor-vscode.ps1`'s next run. With the policy,
+  run `endor-vscode.ps1` again after the package-manager scripts.
+- With no label recorded, as when VS Code is deployed alone or with
+  package-manager scripts from an earlier version, the URL carries none.
 - A policy you deliver yourself (Group Policy, ADMX or the Intune Settings
   Catalog) carries no label.
+- `endor-remove.ps1` deletes the recorded label; the VS Code disable scripts
+  leave it.
 
 #### The patch
 
@@ -320,8 +321,8 @@ https://factory.endorlabs.com/v1/namespaces/<namespace>/firewall/vscode/_ak/<bas
 ```
 
 The token is the unpadded Base64 URL encoding of `<username>:ENDOR_API_SECRET`,
-where the username is the attributed username the other scripts use, or
-`ENDOR_API_KEY_ID` until the script has one (see
+where the username is the attributed username the package-manager scripts use,
+or `ENDOR_API_KEY_ID` until they have recorded a label (see
 [User attribution](#user-attribution)). The structural JSON edit preserves
 unrelated product and gallery fields and removes
 `extensionsGallery.extensionUrlTemplate` entirely to disable VS Code's direct
@@ -522,8 +523,9 @@ To remove only one VS Code method, deploy `endor-vscode-disable-patch.ps1` or
 | `.bundle\config` | Mirror keys only — no credentials baked in (the credential is the `BUNDLE_<HOST>` registry var). ACL-restricted to owner. |
 | `.gemrc` | Contains credentials in the source URL (gem cannot use env var references). ACL-restricted to owner; `gem sources`, `gem env` and `gem install -V` print it. |
 | VS Code `product.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users because VS Code must consume it. |
-| `%ProgramData%\Endor Labs\vscode-firewall` | ACL-restricted to SYSTEM and Administrators; contains the remediation worker, and `attr-label`, the user attribution label. |
+| `%ProgramData%\Endor Labs\vscode-firewall` | ACL-restricted to SYSTEM and Administrators; contains the remediation worker. |
 | `HKLM\SOFTWARE\Policies\Microsoft\VSCode` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users, like every policy key. |
-| `%ProgramData%\Endor Labs\vscode-policy` | ACL-restricted to SYSTEM and Administrators. Records whether the script created the policy key and which sign-in provider it wrote, and keeps the user attribution label; never the URL. |
+| `%ProgramData%\Endor Labs\vscode-policy` | ACL-restricted to SYSTEM and Administrators. Records whether the script created the policy key and which sign-in provider it wrote; never the URL. |
+| `HKLM\SOFTWARE\Endor Labs\Package Firewall` | Only administrators can write it. `AttrLabel` is the label of the user the package-manager scripts set up last, for VS Code; no credential. |
 | API secret in MDM | Generated scripts contain the API key and secret in plaintext (used to write registry env vars). Restrict access to the Intune policy and the generated `out/` directory. |
 | `out/` directory | Add to `.gitignore`. Do not commit generated scripts to source control. |

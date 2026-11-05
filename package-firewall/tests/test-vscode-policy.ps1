@@ -27,30 +27,6 @@ function Get-ServiceUrl {
 }
 $ExpectedUrl = Get-ServiceUrl $Secret
 
-# Get-AttributedUrl <label>: the gallery URL attributed to label, built as the firewall decodes it:
-# base64url(base64(base64("userattr:" + label) + ":" + key ID) + ":" + secret).
-function Get-AttributedUrl {
-    param([string]$Label)
-    $utf8 = [Text.Encoding]::UTF8
-    $inner = [Convert]::ToBase64String($utf8.GetBytes("userattr:$Label"))
-    $user = [Convert]::ToBase64String($utf8.GetBytes("${inner}:$KeyId"))
-    $token = [Convert]::ToBase64String($utf8.GetBytes("${user}:$Secret")).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-    "https://factory.endorlabs.com/v1/namespaces/$Namespace/firewall/vscode/_ak/$token"
-}
-
-# Replaces Find-ConsoleUser in the generated endor-vscode.ps1, so no one is logged in unless
-# ENDOR_TEST_CONSOLE_USER names a user, and the user running the tests stays out of the URLs they
-# check. The fake goes at the end of the inlined lib/common.ps1, where it overrides the real one.
-function Set-FakeConsoleUser {
-    $path = Join-Path $Out 'endor-vscode.ps1'
-    $text = Get-Content -Raw $path
-    $common = [regex]::Match($text, '(?ms)^# -- Common functions \(inlined from lib/common\.ps1\) --\r?$.*?^# --\r?$')
-    if (-not $common.Success) { throw 'endor-vscode.ps1 does not inline lib/common.ps1' }
-    $fake = "function Find-ConsoleUser { if (`$env:ENDOR_TEST_CONSOLE_USER) { [PSCustomObject]@{ Username = `$env:ENDOR_TEST_CONSOLE_USER; SID = `$env:ENDOR_TEST_CONSOLE_SID } } }`n"
-    $text = $text.Insert($common.Index + $common.Value.LastIndexOf('# --'), $fake)
-    [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($true))
-}
-
 function Invoke-Generate {
     param([string]$ApiSecret = $Secret, [string]$Patch = '0', [string]$Policy = '1', [string]$Auth = '')
     $env:ENDOR_NAMESPACE = $Namespace
@@ -62,7 +38,6 @@ function Invoke-Generate {
     $global:LASTEXITCODE = 0
     & $Generator *> $null
     if ($LASTEXITCODE) { throw "generator failed with exit code $LASTEXITCODE" }
-    Set-FakeConsoleUser
 }
 
 # Each case gets a VS Code install, product.json state, policy key and record of its own.
@@ -83,6 +58,34 @@ function New-Case {
     $env:ENDOR_VSCODE_POLICY_KEY = $Case.Key
     $env:ENDOR_VSCODE_POLICY_STATE_DIR = $Case.Record
     $env:ENDOR_VSCODE_SKIP_WATCHER = '1'
+    # The label the package-manager scripts record for VS Code: none until a test records one.
+    $env:ENDOR_ATTR_LABEL_KEY = "$KeyRoot\$Name-label"
+}
+
+# Get-AttributedUrl <label>: the gallery URL attributed to label, built as the firewall decodes it:
+# base64url(base64(base64("userattr:" + label) + ":" + key ID) + ":" + secret).
+function Get-AttributedUrl {
+    param([string]$Label)
+    $utf8 = [Text.Encoding]::UTF8
+    $inner = [Convert]::ToBase64String($utf8.GetBytes("userattr:$Label"))
+    $user = [Convert]::ToBase64String($utf8.GetBytes("${inner}:$KeyId"))
+    $token = [Convert]::ToBase64String($utf8.GetBytes("${user}:$Secret")).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    "https://factory.endorlabs.com/v1/namespaces/$Namespace/firewall/vscode/_ak/$token"
+}
+
+# Invoke-Common <command>: runs a command with lib/common.ps1 loaded, as the generated scripts
+# have it, and returns its output.
+function Invoke-Common {
+    param([scriptblock]$Command)
+    & { . (Join-Path $RootDir 'package-firewall\powershell\lib\common.ps1'); & $Command } *>&1 | Out-String -Width 4096
+}
+
+# The recorded label, or <none>.
+function Get-Label {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($env:ENDOR_ATTR_LABEL_KEY)
+    $value = if ($key) { $key.GetValue('AttrLabel') }
+    if ($key) { $key.Dispose() }
+    if ($null -eq $value) { '<none>' } else { [string]$value }
 }
 
 # Runs a script and returns its output; the exit code is in $script:Rc.
@@ -141,8 +144,6 @@ function Assert-Output {
 }
 
 try {
-    Remove-Item Env:\ENDOR_TEST_CONSOLE_USER -ErrorAction SilentlyContinue
-
     Write-Host 'test: the policy goes into a new key, once'
     Invoke-Generate
     New-Case 'create'
@@ -305,42 +306,43 @@ try {
     if ((Get-PolicyValue 'ExtensionGalleryServiceUrl') -cne $ExpectedUrl) { throw 'disable-patch touched the policy' }
     Invoke-Generate
 
-    Write-Host 'test: the logged-in user''s label goes into the policy, is kept, and removal deletes it'
+    Write-Host 'test: the package-manager scripts record the label, and endor-remove.ps1 removes it'
+    New-Case 'attribution-record'
+    $output = Invoke-Common { Set-EndorAttrLabel -Label 'alice@example.com' }
+    if ((Get-Label) -cne 'alice@example.com') { throw "the label was not recorded`n$output" }
+    $output = Invoke-Common { Set-EndorAttrLabel -Label 'bob@example.com' -DryRun }
+    Assert-Output $output '[dry-run] would record the user attribution for VS Code'
+    $output = Invoke-Common { Remove-EndorAttrLabel -DryRun }
+    Assert-Output $output '[dry-run] would remove the user attribution recorded for VS Code'
+    if ((Get-Label) -cne 'alice@example.com') { throw 'a dry run changed the label' }
+    $output = Invoke-Common { Set-EndorAttrLabel -Label 'alice@example.com' -DryRun }
+    if ($output.Trim()) { throw "recording the same label did something`n$output" }
+    $output = Invoke-Common { Remove-EndorAttrLabel }
+    Assert-Output $output 'removed the user attribution recorded for VS Code'
+    if ((Get-Label) -ne '<none>') { throw 'the label was not removed' }
+    $output = Invoke-Common { Remove-EndorAttrLabel }
+    if ($output.Trim()) { throw "removing no label did something`n$output" }
+
+    Write-Host 'test: the policy takes the recorded label at the installer''s next run'
     New-Case 'attribution'
-    $env:ENDOR_TEST_CONSOLE_USER = 'alice'
     $output = Invoke-Install
     Assert-Rc 0 $output
-    $alice = & { . (Join-Path $RootDir 'package-firewall\powershell\lib\common.ps1'); "alice@$(Get-EndorHostLabel)" }
-    Assert-Output $output "VS Code user attribution -> $alice"
-    if ((Get-PolicyValue 'ExtensionGalleryServiceUrl') -cne (Get-AttributedUrl $alice)) { throw 'the policy does not have alice''s URL' }
-    if ((Get-Content -LiteralPath (Join-Path $Case.Record 'attr-label') -Raw) -cne "$alice`n") { throw 'alice''s label was not kept' }
+    Assert-Output $output 'no package-manager script has recorded a user attribution yet'
+    if ((Get-PolicyValue 'ExtensionGalleryServiceUrl') -cne $ExpectedUrl) { throw 'the policy is attributed with no label' }
+    $null = Invoke-Common { Set-EndorAttrLabel -Label 'alice@example.com' }
+    $output = Invoke-Install
+    Assert-Rc 0 $output
+    Assert-Output $output 'VS Code user attribution -> alice@example.com (recorded by the package-manager scripts)'
+    if ((Get-PolicyValue 'ExtensionGalleryServiceUrl') -cne (Get-AttributedUrl 'alice@example.com')) {
+        throw 'the policy does not have the recorded label'
+    }
     if ((Get-Content -Raw (Join-Path $Case.Record 'record.json')) -match '_ak/') { throw 'the record contains the URL' }
-    Remove-Item Env:\ENDOR_TEST_CONSOLE_USER -ErrorAction SilentlyContinue
     $output = Invoke-Install
     Assert-Rc 0 $output
     Assert-Output $output 'policy already set'
     $output = Invoke-Remove
     Assert-Rc 0 $output
-    if (Test-Path -LiteralPath $Case.Record) { throw 'removal left the kept label' }
-
-    Write-Host 'test: the label in the user''s ENDOR_ATTR_USER, which the other ecosystems'' scripts set, wins'
-    New-Case 'attribution-env'
-    # The script reads HKEY_USERS\<SID>\Environment. A key under this user's hive stands in for the
-    # console user's, with the label of a deployment that labels users by email, and a key of its own.
-    $userKey = "$KeyRoot\attribution-env-user"
-    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("$userKey\Environment")
-    $inner = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('userattr:alice@example.com'))
-    $key.SetValue('ENDOR_ATTR_USER', [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${inner}:other-key-id")), 'String')
-    $key.Dispose()
-    $env:ENDOR_TEST_CONSOLE_USER = 'alice'
-    $env:ENDOR_TEST_CONSOLE_SID = "$([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)\$userKey"
-    $output = Invoke-Install
-    Assert-Rc 0 $output
-    Assert-Output $output "VS Code user attribution -> alice@example.com (as in alice's ENDOR_ATTR_USER)"
-    if ((Get-PolicyValue 'ExtensionGalleryServiceUrl') -cne (Get-AttributedUrl 'alice@example.com')) {
-        throw 'the policy does not have the label from ENDOR_ATTR_USER'
-    }
-    Remove-Item Env:\ENDOR_TEST_CONSOLE_USER, Env:\ENDOR_TEST_CONSOLE_SID -ErrorAction SilentlyContinue
+    if ((Get-Label) -cne 'alice@example.com') { throw 'the VS Code section of endor-remove.ps1 removed the label' }
 
     $global:LASTEXITCODE = 0
     Write-Host 'VS Code policy PowerShell tests passed'
@@ -348,7 +350,7 @@ try {
     [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree('Software\Endor Labs Tests', $false)
     foreach ($name in 'ENDOR_VSCODE_PRODUCT_JSON', 'ENDOR_VSCODE_STATE_DIR', 'ENDOR_VSCODE_POLICY_KEY',
             'ENDOR_VSCODE_POLICY_STATE_DIR', 'ENDOR_VSCODE_SKIP_WATCHER', 'ENDOR_VSCODE_ENABLE_PATCH',
-            'ENDOR_VSCODE_ENABLE_POLICY', 'ENDOR_VSCODE_POLICY_AUTH', 'ENDOR_TEST_CONSOLE_USER', 'ENDOR_TEST_CONSOLE_SID') {
+            'ENDOR_VSCODE_ENABLE_POLICY', 'ENDOR_VSCODE_POLICY_AUTH', 'ENDOR_ATTR_LABEL_KEY') {
         Remove-Item "Env:\$name" -ErrorAction SilentlyContinue
     }
     Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue

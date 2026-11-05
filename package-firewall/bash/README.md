@@ -130,7 +130,7 @@ Each script in `out/<namespace>/` carries all Endor configuration it needs. The 
 
 Upload the script file. Ensure it runs as **root** — the script detects the logged-in console user internally and writes config files to the correct home directory.
 
-With no one logged in (at the login window, or in Setup Assistant during enrollment), the package-manager scripts, `endor-all.sh` included, exit 1 without changing anything, so run them while a user is logged in, for example at login or at a recurring check-in. `endor-vscode.sh` and the disable scripts are machine-wide and need no user; `endor-vscode.sh` attributes VS Code to the user logged in at its latest run with one ([user attribution](#user-attribution)). `endor-remove.sh` removes the machine-wide configuration (VS Code's, and root's `.gemrc`), leaves the user's files, and exits 1, so run it again once the user logs in.
+With no one logged in (at the login window, or in Setup Assistant during enrollment), the package-manager scripts, `endor-all.sh` included, exit 1 without changing anything, so run them while a user is logged in, for example at login or at a recurring check-in. `endor-vscode.sh` and the disable scripts are machine-wide and need no user; VS Code carries the label of the user the package-manager scripts set up last ([user attribution](#user-attribution)). `endor-remove.sh` removes the machine-wide configuration (VS Code's, and root's `.gemrc`), leaves the user's files, and exits 1, so run it again once the user logs in.
 
 The scripts take one optional argument, `--dry-run`. They ignore the target volume, computer name and user that Jamf Pro passes as `$1`–`$3`, and any script parameters left empty, so `--dry-run` also works as a Jamf parameter. Leave the other parameters empty: any other value makes the script exit 1.
 
@@ -357,8 +357,8 @@ https://factory.endorlabs.com/v1/namespaces/my-team/firewall/vscode/_ak/<base64u
 ```
 
 The token is the unpadded Base64 URL encoding of `<username>:ENDOR_API_SECRET`,
-where the username is the attributed username the other scripts use, or
-`ENDOR_API_KEY_ID` until the script has one (see
+where the username is the attributed username the package-manager scripts use,
+or `ENDOR_API_KEY_ID` until they have recorded a label (see
 [User attribution](#user-attribution)).
 
 Run as root. Restart VS Code after initial deployment if it is open.
@@ -372,30 +372,29 @@ excluded.
 
 #### User attribution
 
-The credential carries the same label as the logged-in user's other
-ecosystems, so the firewall's logs and notifications show who installed an
-extension. The label is the one in `ENDOR_ATTR_USER` in the user's
-`~/.config/endor/env.sh`, which the package-manager scripts write, so a
-deployment that labels users by email carries that over to VS Code. Before
-those scripts have run, it is `<console-user>@<computer name>`, as they would
-write it. The script reads `env.sh` and never runs it. `product.json`, the
-worker and the Linux policy all carry the label. Both methods are machine-wide,
-so the label is that of the user logged in at the latest run with someone
-logged in:
+The credential carries the same label as the user's other ecosystems, so the
+firewall's logs and notifications show who installed an extension.
+`product.json` and the Linux policy are machine-wide, so they carry the label of
+the user the package-manager scripts set up last:
 
-- The script keeps the label in `attr-label`, in each method's state folder, so
-  a run with no one logged in changes nothing. Removal deletes it.
-- Until a run with someone logged in, the URL carries no label. Machines set up
-  by an earlier version get one at the first such run; on a Mac, that run
-  re-signs VS Code once, which can bring the keychain prompt that an update
-  does ([macOS code signing](#macos-code-signing)). A different user's run
-  rewrites the URL the same way.
+- Each package-manager script, `endor-all.sh` included, records the label it
+  uses in a root-only file: `/Library/Application Support/Endor Labs/attr-label`
+  on macOS, `/var/lib/endor/attr-label` on Linux. A deployment that labels users
+  its own way, by email for example, records that label.
+- The worker reads the file at every run, about once a minute, so `product.json`
+  takes the label within a minute, whichever script ran first. A new label
+  re-patches VS Code; on a Mac that re-signs it once, which can bring the
+  keychain prompt that an update does ([macOS code signing](#macos-code-signing)).
+- The Linux policy has no worker, so it takes the label at `endor-vscode.sh`'s
+  next run. With the policy, run `endor-vscode.sh` again after the
+  package-manager scripts, for example at a recurring check-in.
+- With no label recorded, as when VS Code is deployed alone or with
+  package-manager scripts from an earlier version, the URL carries none.
 - The macOS profile carries no label, because one profile serves every Mac.
   With both methods on a Mac, the editor follows the profile, so only
   `code --install-extension` is attributed.
-- The script finds the user as the package-manager scripts do: from the login
-  session it runs in, or the owner of `/dev/console`. On Linux, an MDM agent
-  running as a system service has neither, so there it finds no one.
+- `endor-remove.sh` deletes the recorded label; the VS Code disable scripts
+  leave it.
 
 #### The patch
 
@@ -437,8 +436,8 @@ The script applies immediately and installs drift remediation:
   File-integrity tools (`debsums`, `rpm -V`, AIDE) report `product.json` as
   modified. That is expected.
 
-Re-running is idempotent. Credential rotation, a new user attribution and updater remediation modify
-only `serviceUrl` and `extensionUrlTemplate`; every other current
+Re-running is idempotent. Credential rotation, a new user attribution and
+updater remediation modify only `serviceUrl` and `extensionUrlTemplate`; every other current
 `product.json` value is preserved.
 
 #### The policy
@@ -717,9 +716,10 @@ remove_block() {
 | `~/.m2/settings.xml` | Contains `${env.*}` references only — no credentials baked in. File is `chmod 600`. |
 | `~/.nuget/NuGet/NuGet.Config` | Contains `%ENDOR_*%` references only — no credentials baked in (unless you opt into the `{{ATTR_USER}}` / `{{API_SECRET}}` fill). File is `chmod 600`. |
 | VS Code `product.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users because VS Code must consume it. |
-| VS Code worker state | Root-owned (`0700`) and contains the generated remediation worker, and `attr-label`, the user attribution label. |
+| VS Code worker state | Root-owned (`0700`) and contains the generated remediation worker. |
 | `/etc/vscode/policy.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users (`0644`) because VS Code must read it. |
-| `/var/lib/endor/vscode-policy` | Root-only (`0700`). Records whether the script created `policy.json` and which sign-in provider it wrote, and keeps the user attribution label; never the URL. |
+| `/var/lib/endor/vscode-policy` | Root-only (`0700`). Records whether the script created `policy.json` and which sign-in provider it wrote; never the URL. |
+| `attr-label` (`/Library/Application Support/Endor Labs/`, `/var/lib/endor/`) | Root-only (`0600`). The label of the user the package-manager scripts set up last, for VS Code; no credential. |
 | `endor-vscode.mobileconfig`, `endor-vscode-policy.plist` | Contain the authenticated `_ak/<token>` gallery URL. Generated `0600`; restrict who can read them in your MDM. On a Mac, managed preferences are readable by local users. |
 | Shell profiles | Contain a single `source ~/.config/endor/env.sh` line. No credentials. |
 | API secret in MDM | The generated scripts contain the API key and secret in plaintext (used to write `env.sh`). Restrict access to the MDM policy and the generated `out/` directory. |
