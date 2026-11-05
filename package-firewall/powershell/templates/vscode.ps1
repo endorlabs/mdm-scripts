@@ -12,7 +12,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$FirewallUrl = '{{VSCODE_SERVICE_URL}}'
+# Unattributed: Invoke-PatchAll puts the recorded user attribution into $FirewallUrl, at every pass.
+$ServiceUrl = '{{VSCODE_SERVICE_URL}}'
+$FirewallUrl = $ServiceUrl
 $DefaultServiceUrl = 'https://marketplace.visualstudio.com/_apis/public/gallery'
 $DefaultExtensionUrlTemplate = 'https://www.vscode-unpkg.net/_gallery/{publisher}/{name}/latest'
 # Watch mode logs what it changes, and what goes wrong, next to the worker.
@@ -190,7 +192,8 @@ function Invoke-PatchOne {
     if ($DryRun) {
         Write-Host '[dry-run]   action : PATCH extensionsGallery.serviceUrl and REMOVE extensionUrlTemplate'
         Write-Host "[dry-run]   file   : $FilePath"
-        Write-Host "[dry-run]   URL    : $FirewallUrl"
+        # The token carries the secret.
+        Write-Host "[dry-run]   URL    : $($FirewallUrl -replace '/_ak/[^/]*$', '/_ak/<redacted>')"
         return $true
     }
 
@@ -220,7 +223,15 @@ function Invoke-PatchOne {
     $true
 }
 
+# The user attribution functions. The installer copies its own in here.
+# {{ATTR_FUNCTIONS}}
+
 function Invoke-PatchAll {
+    # The label of the user the package-manager scripts set up last, read at every pass, so one
+    # recorded after this worker was installed arrives within a rescan.
+    if (Get-Command Get-VscodeGalleryUrl -ErrorAction SilentlyContinue) {
+        $script:FirewallUrl = Get-VscodeGalleryUrl $ServiceUrl
+    }
     $files = @(Get-ProductFiles)
     if ($files.Count -eq 0) {
         Write-Host '[endor-vscode] Microsoft VS Code Stable not found; remediation remains ready for a later install.'
@@ -518,6 +529,81 @@ if (-not $_vscodeSkip -and -not $_vscodeLegacy -and ($_vscodeEnablePolicy -eq '1
     }
 }
 
+# -- User attribution --
+# product.json and the policy are machine-wide, so their gallery URL carries the label of the user
+# the package-manager scripts (endor-all.ps1 and the others) set up last: they record it when they
+# configure that user (Set-EndorAttrLabel, in lib/common.ps1). The worker puts it into the URL at
+# every pass, so it arrives within a minute whichever script ran first; this script puts it into
+# the policy. With no label recorded, the URL is unattributed. These functions are copied into
+# the worker.
+
+# Get-VscodeAttrLabel: the recorded label, or nothing. Read as data from the key in
+# Get-EndorAttrLabelKey, in HKLM's 64-bit view; ENDOR_ATTR_LABEL_KEY (tests) names one under HKCU.
+function Get-VscodeAttrLabel {
+    $hive = 'LocalMachine'
+    $path = 'SOFTWARE\Endor Labs\Package Firewall'
+    if ($env:ENDOR_ATTR_LABEL_KEY) {
+        $hive = 'CurrentUser'
+        $path = $env:ENDOR_ATTR_LABEL_KEY
+    }
+    $base = $null
+    $key = $null
+    try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive, 'Registry64')
+        $key = $base.OpenSubKey($path)
+        $label = if ($key) { $key.GetValue('AttrLabel') }
+        if ($label -is [string] -and $label -cnotmatch '^$|[\x00-\x1f\x7f]') { $label }
+    } catch {
+    } finally {
+        if ($key) { $key.Dispose() }
+        if ($base) { $base.Dispose() }
+    }
+}
+
+# Get-VscodeAttributedUrl <url> <label>: the URL with the label in its token, or nothing. The token
+# is base64url(<key ID>:<secret>). The key ID becomes the attributed username, as in the other
+# ecosystems' credentials (Get-EndorAttrUsername, in lib/common.ps1), and the firewall decodes it.
+function Get-VscodeAttributedUrl {
+    param([string]$Url, [string]$Label)
+    $at = $Url.LastIndexOf('/_ak/')
+    if ($at -lt 0) { return }
+    $token = $Url.Substring($at + 5)
+    if (-not $token -or $token.Contains('/')) { return }
+    $token = $token.Replace('-', '+').Replace('_', '/')
+    $token += '=' * ((4 - $token.Length % 4) % 4)
+    try { $pair = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($token)) } catch { return }
+    $colon = $pair.IndexOf(':')
+    if ($colon -lt 1 -or $colon -eq $pair.Length - 1) { return }
+    $user = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("userattr:$Label"))
+    $user = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("${user}:$($pair.Substring(0, $colon))"))
+    $Url.Substring(0, $at + 5) + [Convert]::ToBase64String(
+        [Text.Encoding]::UTF8.GetBytes("${user}:$($pair.Substring($colon + 1))")
+    ).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+# Get-VscodeGalleryUrl <url>: the URL, attributed when a label is recorded.
+function Get-VscodeGalleryUrl {
+    param([string]$Url)
+    $label = Get-VscodeAttrLabel
+    $attributed = if ($label) { Get-VscodeAttributedUrl $Url $label }
+    if ($attributed) { $attributed } else { $Url }
+}
+
+$_vscodeWorkerContent = $_vscodeWorkerContent.Replace('# {{ATTR_FUNCTIONS}}', (@(
+    'Get-VscodeAttrLabel', 'Get-VscodeAttributedUrl', 'Get-VscodeGalleryUrl' | ForEach-Object {
+        "function $_ {$((Get-Item "function:$_").ScriptBlock)}"
+    }) -join "`n`n"))
+$_vscodeGalleryUrl = $_vscodeServiceUrl
+if (-not $_vscodeSkip -and ($_vscodeEnablePatch -eq '1' -or $_vscodeEnablePolicy -eq '1')) {
+    $_vscodeLabel = Get-VscodeAttrLabel
+    if ($_vscodeLabel) {
+        Write-Host "[endor] VS Code user attribution -> $_vscodeLabel (recorded by the package-manager scripts)"
+    } else {
+        Write-Host "[endor] note: no package-manager script has recorded a user attribution yet, so VS Code's gallery URL carries none for now."
+    }
+    $_vscodeGalleryUrl = Get-VscodeGalleryUrl $_vscodeServiceUrl
+}
+
 # -- The product.json patch --
 # A patch left by an earlier deployment keeps working when this script doesn't enable it, so the
 # admin decides: keep it, or remove it.
@@ -537,7 +623,10 @@ if (-not $_vscodeSkip -and $_vscodeEnablePatch -eq '0') {
     }
 }
 
-if (-not $_vscodeSkip -and $_vscodeEnablePatch -eq '1') {
+if (-not $_vscodeSkip -and $_vscodeEnablePatch -eq '1' -and $_vscodeWorkerContent.Contains('{{')) {
+    Write-Warning '[endor] the VS Code worker has an unresolved {{...}} token, so the patch was not installed.'
+    $EndorWarned = $true
+} elseif (-not $_vscodeSkip -and $_vscodeEnablePatch -eq '1') {
     $_vscodeDone = $true
     if ($DryRun) {
         $_vscodeTempWorker = Join-Path ([IO.Path]::GetTempPath()) "endor-vscode-$([Guid]::NewGuid().ToString('N')).ps1"
@@ -640,7 +729,7 @@ if (-not $_vscodeSkip -and $_vscodeEnablePolicy -eq '1') {
                 createdKey = [bool]$_vscodeRecord.createdKey -or -not $_vscodeKey
                 auth = $_vscodeOwned
             }
-            $_vscodeChange = [string]$_vscodeUrl -cne $_vscodeServiceUrl -or $_vscodeSetAuth -or $_vscodeDeleteAuth
+            $_vscodeChange = [string]$_vscodeUrl -cne $_vscodeGalleryUrl -or $_vscodeSetAuth -or $_vscodeDeleteAuth
             if (-not $_vscodeChange) {
                 Write-Host "[endor-vscode] policy already set: $_vscodePolicyName"
             } elseif ($DryRun) {
@@ -659,7 +748,7 @@ if (-not $_vscodeSkip -and $_vscodeEnablePolicy -eq '1') {
             }
             if ($_vscodeChange -and -not $DryRun) {
                 if (-not $_vscodeKey) { $_vscodeKey = $_vscodeBase.CreateSubKey($_vscodePolicyKey) }
-                $_vscodeKey.SetValue('ExtensionGalleryServiceUrl', $_vscodeServiceUrl, 'String')
+                $_vscodeKey.SetValue('ExtensionGalleryServiceUrl', $_vscodeGalleryUrl, 'String')
                 if ($_vscodeSetAuth) { $_vscodeKey.SetValue('ExtensionGalleryAuthProvider', $_vscodePolicyAuth, 'String') }
                 if ($_vscodeDeleteAuth) { $_vscodeKey.DeleteValue('ExtensionGalleryAuthProvider', $false) }
                 Write-Host "[endor-vscode] policy set: $_vscodePolicyName"
@@ -714,7 +803,8 @@ if (-not $_vscodeSkip -and $_vscodeEnablePolicy -eq '1') {
 }
 
 if ($_vscodeDone) { Write-Host '[endor] [done] VS Code extension firewall' }
-Remove-Variable _vscodeWorkerContent, _vscodeStateRoot, _vscodeWorkerPath, _vscodeTaskName, _vscodeOnWindows,
+Remove-Item function:Get-VscodeAttrLabel, function:Get-VscodeAttributedUrl, function:Get-VscodeGalleryUrl
+Remove-Variable _vscodeWorkerContent, _vscodeGalleryUrl, _vscodeLabel, _vscodeStateRoot, _vscodeWorkerPath, _vscodeTaskName, _vscodeOnWindows,
     _vscodeServiceUrl, _vscodeEnablePatch, _vscodeEnablePolicy, _vscodePolicyAuth, _vscodeLegacy,
     _vscodePolicyHive, _vscodePolicyKey, _vscodePolicyName, _vscodePolicyState, _vscodeDone, _vscodeSkip,
     _vscodeInstalls, _vscodeTempWorker, _vscodeLeft, _vscodeRecordPath, _vscodeRecord, _vscodeOurs,

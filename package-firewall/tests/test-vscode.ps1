@@ -13,6 +13,11 @@ $DefaultExtensionUrlTemplate = 'https://www.vscode-unpkg.net/_gallery/{publisher
 $TempDir = Join-Path ([IO.Path]::GetTempPath()) "endor-vscode-tests-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $TempDir | Out-Null
 
+# The label the package-manager scripts record for VS Code, in a key of the tests' own under HKCU
+# rather than this machine's. Off Windows, there is no label.
+$LabelKey = "Software\Endor Labs Tests\vscode-$([Guid]::NewGuid().ToString('N'))"
+$env:ENDOR_ATTR_LABEL_KEY = $LabelKey
+
 $SavedEnvironment = @{
     ProgramData = $env:ProgramData
     ProgramFiles = $env:ProgramFiles
@@ -130,6 +135,46 @@ function Wait-Until {
         Start-Sleep -Milliseconds 100
     }
     [bool](& $Condition)
+}
+
+# Get-AttributedUrl <label> [secret]: the gallery URL attributed to label, built as the firewall
+# decodes it: base64url(base64(base64("userattr:" + label) + ":" + key ID) + ":" + secret).
+function Get-AttributedUrl {
+    param([string]$Label, [string]$ApiSecret = $Secret)
+    $utf8 = [Text.Encoding]::UTF8
+    $inner = [Convert]::ToBase64String($utf8.GetBytes("userattr:$Label"))
+    $user = [Convert]::ToBase64String($utf8.GetBytes("${inner}:$KeyId"))
+    $token = [Convert]::ToBase64String($utf8.GetBytes("${user}:$ApiSecret")).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    "https://factory.endorlabs.com/v1/namespaces/$Namespace/firewall/vscode/_ak/$token"
+}
+
+# Set-Label <label>: records the label as the package-manager scripts do.
+function Set-Label {
+    param([string]$Label)
+    & { . (Join-Path $RootDir 'package-firewall\powershell\lib\common.ps1'); Set-EndorAttrLabel -Label $Label }
+}
+
+# Set-LabelValue <value> <kind>: puts any value where the label goes.
+function Set-LabelValue {
+    param([object]$Value, [Microsoft.Win32.RegistryValueKind]$Kind)
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($LabelKey)
+    try { $key.SetValue('AttrLabel', $Value, $Kind) } finally { $key.Dispose() }
+}
+
+# Invoke-Worker <product> <state>: one pass of the installed worker, as its task runs it.
+function Invoke-Worker {
+    param([string]$Product, [string]$State)
+    $env:ENDOR_VSCODE_PRODUCT_JSON = $Product
+    $env:ENDOR_VSCODE_STATE_DIR = $State
+    $global:LASTEXITCODE = 0
+    & (Join-Path $State 'worker.ps1') -Mode Once *> $null
+    if ($LASTEXITCODE) { throw "the worker failed with exit code $LASTEXITCODE" }
+}
+
+# What a run can change: product.json and the worker.
+function Get-StateHash {
+    param([string]$Product, [string]$State)
+    (@($Product, (Join-Path $State 'worker.ps1')) | ForEach-Object { (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash }) -join ' '
 }
 
 function Assert-FilesEqual {
@@ -477,13 +522,106 @@ try {
     Invoke-Generate
     $global:LASTEXITCODE = 0
 
+    Write-Host 'test: the package-manager scripts record the label, and only endor-remove.ps1 removes it'
+    foreach ($file in Get-ChildItem (Join-Path $RootDir "package-firewall\powershell\out\$Namespace") -Filter 'endor-*.ps1') {
+        $code = @((Get-Content -Raw $file.FullName) -split '\r?\n' | Where-Object { $_ -notmatch '^\s*#' })
+        $records = @($code | Where-Object { $_ -match '^\s*Set-EndorAttrLabel ' }).Count
+        $removes = @($code | Where-Object { $_ -match '^\s*Remove-EndorAttrLabel ' }).Count
+        $expected = switch -Wildcard ($file.Name) {
+            'endor-vscode*' { '0 0' }
+            'endor-remove.ps1' { '0 1' }
+            default { '1 0' }
+        }
+        if ("$records $removes" -ne $expected) { throw "$($file.Name) records the label $records times and removes it $removes times" }
+    }
+
+    if ($env:OS -eq 'Windows_NT') {
+        Write-Host 'test: with no label recorded, the URL is unattributed; one recorded later reaches product.json at the worker''s next pass'
+        $product = Join-Path $TempDir 'attribution-product.json'
+        $state = Join-Path $TempDir 'attribution-state'
+        Copy-Item $Fixture $product
+        $output = Invoke-InstallerOutput $product $state
+        if ($LASTEXITCODE -or -not $output.Contains('no package-manager script has recorded a user attribution yet')) {
+            throw "a missing label was not reported`n$output"
+        }
+        Assert-Patched $product
+        $worker = (Get-FileHash -LiteralPath (Join-Path $state 'worker.ps1') -Algorithm SHA256).Hash
+        Set-Label 'alice@example.com'
+        Invoke-Worker $product $state
+        Assert-Patched $product (Get-AttributedUrl 'alice@example.com')
+        if ((Get-FileHash -LiteralPath (Join-Path $state 'worker.ps1') -Algorithm SHA256).Hash -ne $worker) { throw 'the worker changed' }
+        $output = Invoke-InstallerOutput $product $state
+        if ($LASTEXITCODE -or -not $output.Contains('VS Code user attribution -> alice@example.com (recorded by the package-manager scripts)')) {
+            throw "the label was not reported`n$output"
+        }
+
+        Write-Host 'test: the same label changes nothing; another label replaces it'
+        $before = Get-StateHash $product $state
+        Invoke-Worker $product $state
+        Invoke-Installer $product $state
+        if ((Get-StateHash $product $state) -ne $before) { throw 'the same label changed something' }
+        # Not ASCII, written as code points so Windows PowerShell 5.1 reads this file the same way.
+        $bob = "bob@$([char]0x4F8B)$([char]0x3048).jp"
+        Set-Label $bob
+        Invoke-Worker $product $state
+        Assert-Patched $product (Get-AttributedUrl $bob)
+
+        Write-Host 'test: a recorded label that isn''t one leaves the URL unattributed'
+        foreach ($broken in @(@('', 'String'), @("alice$([char]27)[2J@example.com", 'String'), @(1, 'DWord'))) {
+            Set-LabelValue $broken[0] $broken[1]
+            Invoke-Worker $product $state
+            Assert-Patched $product
+        }
+
+        Write-Host 'test: a dry run prints no credential'
+        Set-Label 'alice@example.com'
+        $product = Join-Path $TempDir 'attribution-dry-product.json'
+        $state = Join-Path $TempDir 'attribution-dry-state'
+        Copy-Item $Fixture $product
+        $global:LASTEXITCODE = 0
+        $env:ENDOR_VSCODE_PRODUCT_JSON = $product
+        $env:ENDOR_VSCODE_STATE_DIR = $state
+        $output = & (Join-Path $RootDir "package-firewall\powershell\out\$Namespace\endor-vscode.ps1") -DryRun *>&1 | Out-String -Width 4096
+        if ($LASTEXITCODE -or -not $output.Contains('/_ak/<redacted>')) { throw "the dry run did not redact the URL`n$output" }
+        foreach ($url in $ExpectedUrl, (Get-AttributedUrl 'alice@example.com')) {
+            if ($output.Contains($url.Substring($url.LastIndexOf('/_ak/') + 5))) { throw "a dry run printed a token`n$output" }
+        }
+        if (Test-Path -LiteralPath $state) { throw 'a dry run created managed state' }
+
+        Write-Host 'test: the watcher takes a label recorded while it runs'
+        [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($LabelKey, $false)
+        $product = Join-Path $TempDir 'attribution-watch-product.json'
+        $state = Join-Path $TempDir 'attribution-watch-state'
+        Copy-Item $Fixture $product
+        Invoke-Installer $product $state
+        $env:ENDOR_VSCODE_RESCAN_SECONDS = '1'
+        $watcherProcess = Start-Process -FilePath (Get-Process -Id $PID).Path -PassThru -NoNewWindow `
+            -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                ('"{0}"' -f (Join-Path $state 'worker.ps1')), '-Mode', 'Watch' `
+            -RedirectStandardOutput (Join-Path $TempDir 'attribution-watch.out') `
+            -RedirectStandardError (Join-Path $TempDir 'attribution-watch.err')
+        Start-Sleep -Seconds 2
+        Set-Label 'alice@example.com'
+        $attributed = Get-AttributedUrl 'alice@example.com'
+        $taken = {
+            try { (Get-Content -LiteralPath $product -Raw | ConvertFrom-Json).extensionsGallery.serviceUrl -ceq $attributed } catch { $false }
+        }
+        if (-not (Wait-Until $taken 10)) {
+            throw "the watcher did not take the label within 10s: $(Get-Content -Raw (Join-Path $TempDir 'attribution-watch.err'))"
+        }
+        Stop-Process -Id $watcherProcess.Id -Force
+        $watcherProcess.WaitForExit()
+        Remove-Item Env:\ENDOR_VSCODE_RESCAN_SECONDS
+    }
+
     Write-Host 'VS Code PowerShell tests passed'
 } finally {
     if ($watcherProcess -and -not $watcherProcess.HasExited) {
         Stop-Process -Id $watcherProcess.Id -Force -ErrorAction SilentlyContinue
         $watcherProcess.WaitForExit()
     }
-    Remove-Item Env:\ENDOR_VSCODE_RESCAN_SECONDS -ErrorAction SilentlyContinue
+    Remove-Item Env:\ENDOR_VSCODE_RESCAN_SECONDS, Env:\ENDOR_ATTR_LABEL_KEY -ErrorAction SilentlyContinue
+    if ($env:OS -eq 'Windows_NT') { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($LabelKey, $false) }
     $env:ProgramData = $SavedEnvironment.ProgramData
     $env:ProgramFiles = $SavedEnvironment.ProgramFiles
     $env:ProgramW6432 = $SavedEnvironment.ProgramW6432

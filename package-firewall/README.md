@@ -126,6 +126,7 @@ patch off everywhere; `generate.sh` warns about it.
 | macOS | The daemon re-signs VS Code with a certificate unique to each Mac. Users see a keychain prompt after each update, and the app no longer carries Microsoft's Team ID ([details](bash/README.md#macos-code-signing)) | VS Code is left as Microsoft shipped it. Deliver the policy with an MDM profile: users can't override managed preferences, but can override any other kind |
 | VS Code versions | All | 1.99 or later; 1.106 or later on Linux; 1.137 or later for `ENDOR_VSCODE_POLICY_AUTH` |
 | Credential | Readable by local users in `product.json` | Readable by local users in `policy.json`, the registry or managed preferences |
+| User attribution | The label of the user the package-manager scripts set up last, within a minute ([details](bash/README.md#user-attribution)) | Linux and Windows: the same, at `endor-vscode`'s next run. macOS: none, because one profile serves every Mac |
 
 Both at once isn't a fallback: the editor follows the policy, and the command
 line follows `product.json`. For users without an eligible account, adding the

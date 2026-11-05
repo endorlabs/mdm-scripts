@@ -287,6 +287,30 @@ needs SYSTEM or an elevated administrator; otherwise the script warns and skips
 VS Code. In Intune, set **Run script in 64-bit PowerShell host** to **Yes** if
 you can; the script also works from the default 32-bit host.
 
+#### User attribution
+
+The credential carries the same label as the user's other ecosystems, so the
+firewall's logs and notifications show who installed an extension.
+`product.json` and the policy are machine-wide, so they carry the label of the
+user the package-manager scripts set up last, User Installer copies in other
+profiles included:
+
+- Each package-manager script, `endor-all.ps1` included, records the label it
+  uses in `HKLM\SOFTWARE\Endor Labs\Package Firewall` (`AttrLabel`), which only
+  administrators can write. A deployment that labels users its own way, by
+  email for example, records that label. Run from a session that isn't
+  elevated, a script records nothing.
+- The scheduled task reads it at every pass, at least once a minute, so
+  `product.json` takes the label within a minute, whichever script ran first.
+- The policy takes the label at `endor-vscode.ps1`'s next run. With the policy,
+  run `endor-vscode.ps1` again after the package-manager scripts.
+- With no label recorded, as when VS Code is deployed alone or with
+  package-manager scripts from an earlier version, the URL carries none.
+- A policy you deliver yourself (Group Policy, ADMX or the Intune Settings
+  Catalog) carries no label.
+- `endor-remove.ps1` deletes the recorded label; the VS Code disable scripts
+  leave it.
+
 #### The patch
 
 Patches Microsoft VS Code Stable's installation-level `product.json`. It sets
@@ -296,8 +320,10 @@ Patches Microsoft VS Code Stable's installation-level `product.json`. It sets
 https://factory.endorlabs.com/v1/namespaces/<namespace>/firewall/vscode/_ak/<base64url-token>
 ```
 
-The token is the unpadded Base64 URL encoding of
-`ENDOR_API_KEY_ID:ENDOR_API_SECRET`. The structural JSON edit preserves
+The token is the unpadded Base64 URL encoding of `<username>:ENDOR_API_SECRET`,
+where the username is the attributed username the package-manager scripts use,
+or `ENDOR_API_KEY_ID` until they have recorded a label (see
+[User attribution](#user-attribution)). The structural JSON edit preserves
 unrelated product and gallery fields and removes
 `extensionsGallery.extensionUrlTemplate` entirely to disable VS Code's direct
 upstream fallback.
@@ -315,7 +341,8 @@ The script:
   every minute, as a backstop. It logs what it changes to
   `%ProgramData%\Endor Labs\vscode-firewall\worker.log` (rotated at 1 MiB).
 - Modifies only `serviceUrl` and `extensionUrlTemplate`, preserving all other
-  current `product.json` values during updates and credential rotation. VS
+  current `product.json` values during updates, credential rotation and a new
+  user attribution. VS
   Code reads some of them, such as `target` and `win32VersionedUpdate`, to
   decide how to update itself.
 
@@ -499,5 +526,6 @@ To remove only one VS Code method, deploy `endor-vscode-disable-patch.ps1` or
 | `%ProgramData%\Endor Labs\vscode-firewall` | ACL-restricted to SYSTEM and Administrators; contains the remediation worker. |
 | `HKLM\SOFTWARE\Policies\Microsoft\VSCode` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users, like every policy key. |
 | `%ProgramData%\Endor Labs\vscode-policy` | ACL-restricted to SYSTEM and Administrators. Records whether the script created the policy key and which sign-in provider it wrote; never the URL. |
+| `HKLM\SOFTWARE\Endor Labs\Package Firewall` | Only administrators can write it. `AttrLabel` is the label of the user the package-manager scripts set up last, for VS Code; no credential. |
 | API secret in MDM | Generated scripts contain the API key and secret in plaintext (used to write registry env vars). Restrict access to the Intune policy and the generated `out/` directory. |
 | `out/` directory | Add to `.gitignore`. Do not commit generated scripts to source control. |

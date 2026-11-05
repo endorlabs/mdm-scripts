@@ -76,6 +76,79 @@ function Get-EndorHostLabel {
     if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { [System.Net.Dns]::GetHostName() }
 }
 
+# Get-EndorAttrLabelKey
+# Where the package-manager scripts record the label for VS Code's gallery URL, which is
+# machine-wide, so can't be configured per user. templates/vscode.ps1 reads it from the same key.
+# Only administrators write HKLM; its 64-bit view, which 32-bit PowerShell (Intune's default)
+# reaches only through OpenBaseKey. $null for a user who isn't an administrator, unless
+# ENDOR_ATTR_LABEL_KEY (tests) names a key under HKCU to use instead.
+function Get-EndorAttrLabelKey {
+    if ($env:ENDOR_ATTR_LABEL_KEY) {
+        return [PSCustomObject]@{ Hive = 'CurrentUser'; Path = $env:ENDOR_ATTR_LABEL_KEY; Name = "HKCU\$env:ENDOR_ATTR_LABEL_KEY" }
+    }
+    if ($env:OS -ne 'Windows_NT' -or -not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        return $null
+    }
+    [PSCustomObject]@{ Hive = 'LocalMachine'; Path = 'SOFTWARE\Endor Labs\Package Firewall'; Name = 'HKLM\SOFTWARE\Endor Labs\Package Firewall' }
+}
+
+# Set-EndorAttrLabel <label> [-DryRun]
+# Records the label when it changed. endor-vscode.ps1's worker reads it at every pass, so it reaches
+# VS Code within a minute, whichever script ran first.
+function Set-EndorAttrLabel {
+    param([string]$Label, [switch]$DryRun)
+    $location = Get-EndorAttrLabelKey
+    if (-not $Label -or -not $location) { return }
+    $base = $null
+    $key = $null
+    try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey($location.Hive, 'Registry64')
+        $key = $base.OpenSubKey($location.Path)
+        if ($key -and [string]$key.GetValue('AttrLabel') -ceq $Label) { return }
+        if ($DryRun) {
+            Write-Host "[dry-run] would record the user attribution for VS Code in $($location.Name)"
+            return
+        }
+        if ($key) { $key.Dispose() }
+        $key = $base.CreateSubKey($location.Path)
+        $key.SetValue('AttrLabel', $Label, 'String')
+    } catch {
+        Write-Warning "[endor] could not record the user attribution in $($location.Name), so VS Code's gallery URL won't carry it: $_"
+        $script:EndorWarned = $true
+    } finally {
+        if ($key) { $key.Dispose() }
+        if ($base) { $base.Dispose() }
+    }
+}
+
+# Remove-EndorAttrLabel [-DryRun]
+# Removes the recorded label (endor-remove.ps1).
+function Remove-EndorAttrLabel {
+    param([switch]$DryRun)
+    $location = Get-EndorAttrLabelKey
+    if (-not $location) { return }
+    $base = $null
+    $key = $null
+    try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey($location.Hive, 'Registry64')
+        $key = $base.OpenSubKey($location.Path, $true)
+        if (-not $key -or $null -eq $key.GetValue('AttrLabel')) { return }
+        if ($DryRun) {
+            Write-Host "[dry-run] would remove the user attribution recorded for VS Code: $($location.Name)"
+            return
+        }
+        $key.DeleteValue('AttrLabel')
+        Write-Host "[endor-remove] removed the user attribution recorded for VS Code: $($location.Name)"
+    } catch {
+        Write-Warning "[endor-remove] could not remove the user attribution recorded in $($location.Name): $_"
+        $script:EndorWarned = $true
+    } finally {
+        if ($key) { $key.Dispose() }
+        if ($base) { $base.Dispose() }
+    }
+}
+
 # Write-EndorFile <path> <lines>
 # UTF-8 WITHOUT BOM. Windows PowerShell 5.1's `-Encoding UTF8` writes a BOM,
 # which pip's configparser rejects — pip.ini would be silently ignored.

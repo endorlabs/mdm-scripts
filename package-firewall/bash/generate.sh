@@ -254,6 +254,8 @@ GEM_MIRROR_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/gem/"
 # Bundler keys credentials by host name: upper-case, '.' → '__', '-' → '___', no port.
 BUNDLE_HOST_KEY=$(printf '%s' "${TRUSTED_HOST}" | tr '[:lower:]' '[:upper:]' | sed -e 's/-/___/g' -e 's/\./__/g')
 API_SECRET_B64=$(printf '%s' "${ENDOR_API_SECRET}" | base64 | tr -d '\n')
+# Unattributed. On the device, endor-vscode.sh puts the label the package-manager scripts recorded
+# into the token; the macOS profile keeps this URL.
 VSCODE_TOKEN=$(printf '%s:%s' "${ENDOR_API_KEY_ID}" "${ENDOR_API_SECRET}" \
   | base64 | tr -d '\n=' | tr '+/' '-_')
 VSCODE_SERVICE_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/vscode/_ak/${VSCODE_TOKEN}"
@@ -410,6 +412,8 @@ ENDOR_GEM_SOURCE_URL="https://$(endor_urlenc_b64 "$ENDOR_ATTR_USER"):$(endor_url
 # No exports — every consumer is same-process template code inlined below.
 
 echo "[endor] user attribution → ${ENDOR_ATTR_LABEL}"
+# VS Code's gallery URL is machine-wide, so endor-vscode.sh takes the label from here.
+endor_record_attr_label "$ENDOR_ATTR_LABEL"
 CREDBLOCK
 }
 

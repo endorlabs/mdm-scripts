@@ -33,6 +33,9 @@
 #     Restores default gallery properties, removes update remediation, and removes
 #     Endor's ExtensionGalleryServiceUrl policy from HKLM\SOFTWARE\Policies\Microsoft\VSCode
 #
+#   User attribution:
+#     The label the package-manager scripts record for VS Code (Get-EndorAttrLabelKey)
+#
 # Registry env vars removed:
 #   ENDOR_API_KEY_ID, ENDOR_API_SECRET, ENDOR_AUTH_B64
 #   ENDOR_NPM_REGISTRY_URL, ENDOR_PYPI_URL, ENDOR_GO_PROXY_URL
@@ -181,6 +184,8 @@ Write-Host '[endor-remove] -- Ruby / gem ---------------------------------------
 
 Remove-Gemrc -FilePath (Join-Path $UserHome '.gemrc') -MirrorUrl '{{GEM_MIRROR_URL}}' -DryRun:$DryRun
 Write-Host ''
+
+Remove-EndorAttrLabel -DryRun:$DryRun
 
 # >>> endor-vscode-remove
 # -- VS Code extension firewall --

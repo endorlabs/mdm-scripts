@@ -14,6 +14,9 @@ DEFAULT_EXTENSION_URL_TEMPLATE="https://www.vscode-unpkg.net/_gallery/{publisher
 
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
+# The label the package-manager scripts record for VS Code: none here, whatever this machine has.
+# tests/test-vscode-policy.sh covers it.
+export ENDOR_ATTR_LABEL_FILE="$TMP_DIR/attr-label"
 
 OUT="$ROOT_DIR/package-firewall/bash/out/$NAMESPACE"
 

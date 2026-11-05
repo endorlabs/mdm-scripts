@@ -15,6 +15,9 @@ OUT="$ROOT_DIR/package-firewall/bash/out/$NAMESPACE"
 
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
+# The label the package-manager scripts record for VS Code. Each case gets its own; none is this
+# machine's.
+export ENDOR_ATTR_LABEL_FILE="$TMP_DIR/attr-label"
 
 service_url() {
   printf 'https://factory.endorlabs.com/v1/namespaces/%s/firewall/vscode/_ak/%s' "$NAMESPACE" \
@@ -47,6 +50,7 @@ new_case() {
   printf '{"name": "code", "version": "%s"}\n' "${2:-1.141.2}" > "$CASE/app/package.json"
   POLICY_FILE="$CASE/etc/vscode/policy.json"
   POLICY_STATE="$CASE/policy-state"
+  export ENDOR_ATTR_LABEL_FILE="$CASE/attr-label"
 }
 
 # install: runs endor-vscode.sh for the current case. Sets RC and OUTPUT.
@@ -126,6 +130,45 @@ with open(path, "wb") as handle:
 PY
 }
 digest() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}' || sha256sum "$1" | awk '{print $1}'; }
+
+# product_url: the serviceUrl in the case's product.json.
+product_url() {
+  python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["extensionsGallery"]["serviceUrl"])' \
+    "$CASE/app/product.json"
+}
+
+# attributed_url <label> [secret]: the gallery URL attributed to label, built as the firewall
+# decodes it: base64url(base64(base64("userattr:" + label) + ":" + key ID) + ":" + secret).
+attributed_url() {
+  python3 -I - "$NAMESPACE" "$KEY_ID" "${2:-$SECRET}" "$1" <<'PY'
+import base64
+import os
+import sys
+namespace, key_id, secret, label = sys.argv[1:5]
+inner = base64.b64encode(b"userattr:" + os.fsencode(label))
+user = base64.b64encode(inner + b":" + key_id.encode())
+token = base64.urlsafe_b64encode(user + b":" + secret.encode()).decode().rstrip("=")
+print("https://factory.endorlabs.com/v1/namespaces/%s/firewall/vscode/_ak/%s" % (namespace, token))
+PY
+}
+
+# record <label>: records the label as the package-manager scripts do, in ENDOR_ATTR_LABEL_FILE.
+# ENDOR_TEST_DRY_RUN=1 makes it a dry run.
+record() {
+  bash -c 'source "$1"; DRY_RUN="${ENDOR_TEST_DRY_RUN:-0}"; _ENDOR_WARNED=0
+    endor_record_attr_label "$2"; exit "$_ENDOR_WARNED"' _ \
+    "$ROOT_DIR/package-firewall/bash/lib/common.sh" "$1"
+}
+
+# run_worker: one run of the case's installed worker, as its daemon starts it. Sets RC and OUTPUT.
+run_worker() {
+  RC=0
+  OUTPUT=$(ENDOR_VSCODE_PRODUCT_JSON="$CASE/app/product.json" \
+    ENDOR_VSCODE_STATE_DIR="$CASE/state" \
+    bash "$CASE/state/worker.sh" --once 2>&1) || RC=$?
+}
+
+inode() { ls -i "$1" | awk '{print $1}'; }
 
 expect_rc() {
   if [[ "$RC" -ne "$1" ]]; then
@@ -420,6 +463,14 @@ PY
   install_mac
   expect_rc 0
   expect_output "VS Code's policy is set by a configuration profile."
+  # The profile is the same for every Mac, so it has no user attribution, and still matches when
+  # the patch's URL has one.
+  record alice@example.com
+  install_mac
+  expect_rc 0
+  expect_output "VS Code user attribution → alice@example.com"
+  expect_output "VS Code's policy is set by a configuration profile."
+  [[ "$(product_url)" == "$(attributed_url alice@example.com)" ]] || fail "the patch's URL is not attributed"
   new_mac_case mac-user
   managed_prefs "$CASE/managed/alice/com.microsoft.VSCode.plist" "$EXPECTED_URL"
   install_mac
@@ -495,12 +546,6 @@ PY
   expect_output "skip (no VS Code configuration profile)"
   generate
 fi
-
-# product_url: the serviceUrl in the case's product.json.
-product_url() {
-  python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["extensionsGallery"]["serviceUrl"])' \
-    "$CASE/app/product.json"
-}
 
 # disable <patch|policy> [--dry-run]: runs endor-vscode-disable-<method>.sh for the current case.
 # Sets RC and OUTPUT.
@@ -598,6 +643,7 @@ for owner in root _mbsetupuser; do
   new_case "no-user-$owner"
   install
   expect_rc 0
+  record alice@example.com
   RC=0
   OUTPUT=$(PATH="$NO_USER_BIN:$PATH" ENDOR_TEST_CONSOLE_OWNER="$owner" \
     ENDOR_VSCODE_PRODUCT_JSON="$CASE/app/product.json" \
@@ -616,7 +662,150 @@ for owner in root _mbsetupuser; do
     || fail "endor-remove.sh did not restore product.json with no one logged in"
   [[ ! -e "$CASE/state" ]] || fail "endor-remove.sh left the patch's state with no one logged in"
   [[ ! -e "$POLICY_FILE" ]] || fail "endor-remove.sh left the policy file with no one logged in"
+  [[ ! -e "$ENDOR_ATTR_LABEL_FILE" ]] || fail "endor-remove.sh left the recorded label"
+  expect_output "removed the user attribution recorded for VS Code"
 done
+generate
+
+# expect_urls <product.json's URL> <the policy's URL>
+expect_urls() {
+  [[ "$(product_url)" == "$1" ]] || fail "product.json has $(product_url), not $1"
+  [[ "$(policy_value ExtensionGalleryServiceUrl)" == "$2" ]] \
+    || fail "the policy has $(policy_value ExtensionGalleryServiceUrl), not $2"
+}
+# case_digest: everything a run can change.
+case_digest() {
+  local file
+  for file in "$CASE/app/product.json" "$POLICY_FILE" "$CASE/state/worker.sh" "$POLICY_STATE/record.json" \
+      "$ENDOR_ATTR_LABEL_FILE"; do
+    printf '%s %s\n' "$file" "$(digest "$file")"
+  done
+}
+
+echo "test: the package-manager scripts record the label, root-only, and only when it changes"
+for script in "$OUT"/endor-*.sh; do
+  case "$script" in
+    */endor-vscode*.sh)
+      if grep -v '^[[:space:]]*#' "$script" | grep -q 'endor_record_attr_label\|endor_forget_attr_label'; then
+        fail "$script records or removes the label"
+      fi ;;
+    */endor-remove.sh) grep -qxF 'endor_forget_attr_label' "$script" || fail "$script doesn't remove the label" ;;
+    *)
+      grep -qxF 'endor_record_attr_label "$ENDOR_ATTR_LABEL"' "$script" || fail "$script doesn't record the label" ;;
+  esac
+done
+new_case attribution-record
+record alice@example.com || fail "recording the label failed"
+[[ "$(cat "$ENDOR_ATTR_LABEL_FILE")" == "alice@example.com" ]] || fail "the label was not recorded"
+[[ "$(file_mode "$ENDOR_ATTR_LABEL_FILE")" == "600" ]] || fail "the recorded label is not mode 600"
+before=$(inode "$ENDOR_ATTR_LABEL_FILE")
+record alice@example.com
+[[ "$(inode "$ENDOR_ATTR_LABEL_FILE")" == "$before" ]] || fail "recording the same label rewrote the file"
+ENDOR_TEST_DRY_RUN=1 record bob@example.com >/dev/null
+[[ "$(cat "$ENDOR_ATTR_LABEL_FILE")" == "alice@example.com" ]] || fail "a dry run recorded a label"
+[[ ! -e "$ENDOR_ATTR_LABEL_FILE.tmp" ]] || fail "recording left a temporary file"
+if [[ "$EUID" -ne 0 ]]; then
+  # Root's file, so another user's run records nothing.
+  if env -u ENDOR_ATTR_LABEL_FILE bash -c 'source "$1"; endor_attr_label_file' _ \
+      "$ROOT_DIR/package-firewall/bash/lib/common.sh" >/dev/null; then
+    fail "a run as $(id -un) has a label file"
+  fi
+fi
+
+echo "test: with no label recorded, the URL is unattributed; one recorded later reaches product.json at the worker's next run"
+PATCH=1 generate
+new_case attribution
+install
+expect_rc 0
+expect_output "no package-manager script has recorded a user attribution yet"
+expect_urls "$EXPECTED_URL" "$EXPECTED_URL"
+worker=$(digest "$CASE/state/worker.sh")
+record alice@example.com
+run_worker
+expect_rc 0
+alice=$(attributed_url alice@example.com)
+expect_urls "$alice" "$EXPECTED_URL"
+[[ "$(digest "$CASE/state/worker.sh")" == "$worker" ]] || fail "the worker changed"
+python3 -I - "$(product_url)" "$KEY_ID" "$SECRET" alice@example.com <<'PY' || fail "the token is not the label, the key ID and the secret"
+import base64
+import os
+import sys
+url, key_id, secret, label = sys.argv[1:5]
+token = url.rsplit("/_ak/", 1)[1]
+user, _, password = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).partition(b":")
+inner, _, key = base64.b64decode(user).partition(b":")
+assert password == secret.encode(), password
+assert key == key_id.encode(), key
+assert base64.b64decode(inner) == b"userattr:" + os.fsencode(label), inner
+PY
+# The policy has no worker: it takes the label at the installer's next run.
+install
+expect_rc 0
+expect_output "VS Code user attribution → alice@example.com (recorded by the package-manager scripts)"
+expect_urls "$alice" "$alice"
+if grep -qF "/_ak/" "$POLICY_STATE/record.json"; then fail "the record contains the URL"; fi
+
+echo "test: the same label changes nothing; another label, or a rotated credential, replaces it"
+before=$(case_digest)
+run_worker
+expect_rc 0
+install
+expect_rc 0
+[[ "$(case_digest)" == "$before" ]] || fail "the same label changed something"
+record "bob@例え.jp"
+run_worker
+expect_rc 0
+install
+expect_rc 0
+bob=$(attributed_url "bob@例え.jp")
+expect_urls "$bob" "$bob"
+PATCH=1 generate "ci-smoke-rotated-secret"
+install
+expect_rc 0
+bob=$(attributed_url "bob@例え.jp" ci-smoke-rotated-secret)
+expect_urls "$bob" "$bob"
+PATCH=1 generate
+install
+expect_rc 0
+
+echo "test: the disable scripts leave the recorded label"
+disable policy
+expect_rc 0
+disable patch
+expect_rc 0
+[[ "$(cat "$ENDOR_ATTR_LABEL_FILE")" == "bob@例え.jp" ]] || fail "a disable script removed the label"
+
+echo "test: a recorded label that isn't one leaves the URL unattributed"
+new_case attribution-broken
+install
+expect_rc 0
+for broken in empty control link; do
+  rm -f "$ENDOR_ATTR_LABEL_FILE"
+  case "$broken" in
+    empty) : > "$ENDOR_ATTR_LABEL_FILE" ;;
+    control) printf 'alice\033[2J@example.com\n' > "$ENDOR_ATTR_LABEL_FILE" ;;
+    link)
+      printf 'mallory@example.com\n' > "$CASE/elsewhere"
+      ln -s "$CASE/elsewhere" "$ENDOR_ATTR_LABEL_FILE" ;;
+  esac
+  run_worker
+  expect_rc 0
+  install
+  expect_rc 0
+  expect_output "no package-manager script has recorded a user attribution yet"
+  expect_urls "$EXPECTED_URL" "$EXPECTED_URL"
+done
+
+echo "test: a dry run prints no credential and writes nothing"
+new_case attribution-dry-run
+record alice@example.com
+install --dry-run
+expect_rc 0
+expect_output "/_ak/<redacted>"
+for url in "$EXPECTED_URL" "$(attributed_url alice@example.com)"; do
+  if grep -qF "${url##*/_ak/}" <<<"$OUTPUT"; then fail "a dry run printed a token"; fi
+done
+[[ ! -e "$CASE/state" && ! -e "$POLICY_STATE" && ! -e "$POLICY_FILE" ]] || fail "a dry run wrote something"
 generate
 
 echo "test: the generator refuses a remove template without exactly one marked VS Code section"

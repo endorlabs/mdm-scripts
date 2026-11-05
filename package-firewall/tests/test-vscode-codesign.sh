@@ -41,6 +41,8 @@ cleanup() {
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
+# The label the package-manager scripts record for VS Code: none until a test records one.
+export ENDOR_ATTR_LABEL_FILE="$TMP_DIR/attr-label"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -456,5 +458,37 @@ run_worker "$state" --once || true
 [[ "$(tree_digest "$STAGED")" == "$digest" ]] || fail "an update for an app that isn't ours was modified"
 stop_fakes
 run_worker "$state" --purge || fail "purge failed"
+
+echo "test: a label recorded later re-patches and re-signs once, with the same identity"
+state="$TMP_DIR/state-attribution"
+build_app "$APP" 1.0.0
+install "$state" || fail "installer failed"
+assert_firewalled "$APP" "$state"
+cert=$(cert_of "$state")
+before=$(inode "$APP")
+printf 'alice@example.com\n' > "$ENDOR_ATTR_LABEL_FILE"
+run_worker "$state" --once || fail "the worker failed with a label recorded"
+# base64url(base64(base64("userattr:" + label) + ":" + key ID) + ":" + secret), as the firewall decodes it.
+EXPECTED_URL=$(python3 -I - "$NAMESPACE" "$KEY_ID" "$SECRET" alice@example.com <<'PY'
+import base64
+import sys
+namespace, key_id, secret, label = sys.argv[1:5]
+user = base64.b64encode(base64.b64encode(b"userattr:" + label.encode()) + b":" + key_id.encode())
+token = base64.urlsafe_b64encode(user + b":" + secret.encode()).decode().rstrip("=")
+print("https://factory.endorlabs.com/v1/namespaces/%s/firewall/vscode/_ak/%s" % (namespace, token))
+PY
+)
+[[ "$(inode "$APP")" != "$before" ]] || fail "the attributed app was not swapped in"
+assert_firewalled "$APP" "$state"
+[[ "$(cert_of "$state")" == "$cert" ]] || fail "the label replaced the signing identity"
+before=$(inode "$APP")
+digest=$(tree_digest "$APP")
+run_worker "$state" --once || fail "a second run with the label failed"
+[[ "$(inode "$APP")" == "$before" && "$(tree_digest "$APP")" == "$digest" ]] \
+  || fail "a second run with the same label changed the app"
+run_worker "$state" --restore || fail "restore failed"
+run_worker "$state" --purge || fail "purge failed"
+rm -f "$ENDOR_ATTR_LABEL_FILE"
+generate
 
 echo "VS Code code-signing tests passed"
