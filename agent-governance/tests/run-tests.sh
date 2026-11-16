@@ -773,11 +773,12 @@ sec "cortexcode install: the file lands as the user, mode 600, merged"
 ME=$(id -un)
 U1="$WORK/u1"; mkdir -p "$U1"; D1="$U1/.snowflake/cortex/hooks.json"
 ins() { sh "$INSTALL" --users "$ME" --dest "$1" "$2" 2>"$CC/install.err"; echo $?; }
-modeof() { ls -ld "$1" | awk '{print $1}'; }
+# Permission bits only: macOS ls -l appends @ (xattrs) or + (ACL) to the mode.
+modeof() { if [ "$(uname -s)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi; }
 chk "absent: installed" "$(ins "$D1" "$CC/r.json")" "0"
 chk "content is the rendered file" "$(cmp -s "$D1" "$CC/r.json" && echo same || echo differ)" "same"
-chk "file mode 600" "$(modeof "$D1")" "-rw-------"
-chk "created directories are private" "$(modeof "$U1/.snowflake"):$(modeof "$U1/.snowflake/cortex")" "drwx------:drwx------"
+chk "file mode 600" "$(modeof "$D1")" "600"
+chk "created directories are private" "$(modeof "$U1/.snowflake"):$(modeof "$U1/.snowflake/cortex")" "700:700"
 chk "owned by the target user" "$(ls -ln "$D1" | awk '{print $3}')" "$(id -u)"
 ino=$(ls -i "$D1" | awk '{print $1}')
 chk "unchanged: second run exits 0" "$(ins "$D1" "$CC/r.json")" "0"
@@ -922,7 +923,7 @@ if [ "$(id -u)" = 0 ] && id -u nobody >/dev/null 2>&1 && \
   chk "written as nobody" "$(sh "$INSTALL" --users nobody --dest "$NBH/.snowflake/cortex/hooks.json" "$CC/r.json" 2>/dev/null; echo $?)" "0"
   chk "owner nobody, mode 600" \
     "$(ls -ln "$NBH/.snowflake/cortex/hooks.json" | awk '{print $3}'):$(modeof "$NBH/.snowflake/cortex/hooks.json")" \
-    "$(id -u nobody):-rw-------"
+    "$(id -u nobody):600"
   chk "directories owned by nobody" \
     "$(ls -lnd "$NBH/.snowflake" "$NBH/.snowflake/cortex" | awk '{print $3}' | sort -u)" "$(id -u nobody)"
   # nobody points its .snowflake at a directory only root can write.
