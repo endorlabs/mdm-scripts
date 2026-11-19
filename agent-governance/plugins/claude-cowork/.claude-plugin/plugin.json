@@ -1,0 +1,8 @@
+{
+  "name": "endor-cowork-governance",
+  "version": "0.2.0",
+  "description": "Endor Labs AI governance hooks for Claude Cowork. Built for one tenant by render.sh --agent claude-cowork (endorlabs/mdm-scripts).",
+  "author": {
+    "name": "Endor Labs"
+  }
+}

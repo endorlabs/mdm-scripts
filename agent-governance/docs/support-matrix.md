@@ -19,6 +19,7 @@ Every combination of agent × installation mechanism × OS this repo covers, and
 | 13 | Copilot CLI | MDM | Linux | JumpCloud · config mgmt | `runner.sh (AGENT=copilot)` → `/etc/github-copilot/policy.d/endor.json` (policy level, non-bypassable) | [copilot policy](deploy-copilot-policy.md), [jumpcloud](deploy-jumpcloud.md) |
 | 14 | Copilot CLI | MDM | Windows | Intune, JumpCloud | `--target-os windows` → push to `C:\ProgramData\GitHub\Copilot\policy.d\endor.json` | [intune](deploy-windows-intune.md), [jumpcloud](deploy-jumpcloud.md) |
 | 15 | Copilot in VS Code | Manual (per-user) | any | — | developer copies the same generated file to `~/.copilot/hooks/endor.json`; **not** tamper-resistant | [copilot policy](deploy-copilot-policy.md#scope-the-cli-is-covered-vs-code-agent-mode-is-not) |
+| 16 | Claude Cowork | Organization plugin | any (hooks run in Anthropic's cloud workspace) | Claude organization settings | `render.sh --agent claude-cowork` → ZIP upload or private-repository sync, set to Required; **in validation** | [cowork plugin](deploy-claude-cowork.md) |
 
 ## How delivery differs by OS
 
@@ -36,4 +37,5 @@ Every combination of agent × installation mechanism × OS this repo covers, and
 - **Generation is POSIX-only** — `render.sh` needs `sh` + `awk` + `sed` (and `iconv` + `base64` for Windows targets; `base64` also for the Codex `--style mcx` profile). A Windows-only admin generates under WSL or Git Bash.
 - **Cursor Team hooks** take a manual paste of the generated `hooks.json` — supported, not automated.
 - **Copilot's two surfaces are not equally governable.** `endorctl ai-audit copilot` handles both the Copilot CLI and VS Code agent mode, but only the CLI reads the policy level, so only rows 12–14 are centrally enforced. VS Code reads hooks from the workspace, `~/.copilot/hooks`, `chat.hookFilesLocations`, and plugins — no administrator-owned path — and its enterprise `ChatHooks` policy can only turn hooks on or off, not deliver them. Row 15 is the per-user workaround and is user-writable. Re-check this if GitHub ships a managed hook path for VS Code.
+- **Claude Cowork is governed by a plugin, not by anything on the device.** Rows 5–8 cover Claude Code on the laptop; none of them reaches a Cowork task, which runs its hooks in a cloud workspace. Row 16 is the only path there, it carries a key every member can read, and Claude Chat ignores plugin hooks altogether.
 - **JumpCloud** delivers files via a Command (no native file-push) and recurs via *Run as Repeating* (which can miss a window during device sleep); macOS profiles go through its MDM Custom Configuration Profile policy, which rewrites the outer profile UUID/identifier.

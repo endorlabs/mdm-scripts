@@ -47,6 +47,8 @@ Each tool is delivered the way it best supports it. On macOS, Claude Code and Co
 
 **Windows** has no `.mobileconfig`. You pre-generate the config (`--target-os windows`) and push the file with **Intune** — Cursor/Claude as JSON, Codex as `%ProgramData%\OpenAI\Codex\requirements.toml`, Copilot as `%ProgramData%\GitHub\Copilot\policy.d\endor.json`; the hook is a self-contained `powershell` command that runs regardless of how the agent launches it. See [Deploy on Windows via Intune](docs/deploy-windows-intune.md).
 
+**Claude Cowork** is not reached by any of the above: its tasks run their hooks in Anthropic's cloud workspace, not on the laptop. It takes the Claude hooks as a **plugin** that an organization Owner installs for every member. See [Deploy Claude Cowork via an organization plugin](docs/deploy-claude-cowork.md).
+
 Other paths: [JumpCloud](docs/deploy-jumpcloud.md) (any OS), and [manual / enterprise-platform install](docs/deploy-manual-enterprise.md) for trials or orgs governing through Cursor Team hooks / Claude's admin console. The full agent × OS × MDM grid is the [support matrix](docs/support-matrix.md).
 
 ## The generator
@@ -85,7 +87,13 @@ scripts/render.sh --agent copilot \
 # Windows config (push via Intune)
 scripts/render.sh --agent cursor --target-os windows \
   --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o cursor-hooks.json
+
+# Claude Cowork plugin (ZIP for an organization Owner to upload; needs zip)
+scripts/render.sh --agent claude-cowork \
+  --api-key "$KEY" --api-secret "$SECRET" --namespace "$NS" -o endor-cowork-governance.zip
 ```
+
+**`--agent claude-cowork`** is the one target that writes a plugin, not a single config file: `-o` ending in `.zip` writes a ZIP, any other `-o` path writes the plugin as a directory (for a private repository the organization syncs). Its hooks are one line each and call a script inside the plugin; the credentials go into the plugin's `endor.env`, not into `hooks.json`. `--target-os` does not apply.
 
 **Credentials** resolve flag → environment variable → prompt (the prompt only appears on a TTY, so unattended runs never hang):
 
@@ -132,6 +140,7 @@ Downloads resume across sessions rather than restarting, and a lock keeps concur
 | Claude / Codex profile config (macOS) | Regenerate the `.mobileconfig`, re-upload to the MDM | Re-upload |
 | Cursor / Codex / Copilot runner config (macOS/Linux) | Runner re-fetches `REF` and re-renders on each scheduled run | None after setup |
 | Windows config | Regenerate (`--target-os windows`), re-push via Intune | Re-push |
+| Claude Cowork plugin | Rebuild (`--agent claude-cowork`), re-upload the ZIP or push to the synced repository with a higher plugin `version` | Re-upload |
 
 **Security properties:**
 
@@ -139,6 +148,7 @@ Downloads resume across sessions rather than restarting, and a lock keeps concur
 - **Copilot is enforced by the app, not the OS.** Copilot has no profile payload, but `/etc/github-copilot/policy.d/` is its own administrator level: hooks there outrank user and project config, ignore a user's `disableAllHooks`, and run regardless of folder trust. Root ownership plus Copilot's own precedence rules do the work a profile does elsewhere. The limit is reach, not strength — **only the Copilot CLI reads that path**. VS Code's Copilot agent mode has no managed hook location (its enterprise `ChatHooks` policy only turns hooks on or off), so covering VS Code means a user-writable `~/.copilot/hooks/endor.json`, which is not tamper-resistant. See [the Copilot runbook](docs/deploy-copilot-policy.md#scope-the-cli-is-covered-vs-code-agent-mode-is-not).
 - **One unaudited session per machine (POSIX).** Because the first install runs in the background rather than blocking startup, the session that triggers it isn't audited — nor is any other session started before the download lands. Coverage is complete from then on. To close that window, pre-provision `endorctl` (an MDM package, or your config management) so the binary is already present the first time an agent runs.
 - **Least-privilege credentials.** A generated profile (or a Codex `requirements.toml` / Copilot policy file) carries the API key and secret to every laptop — scope it to an **audit-only** credential.
+- **A shared key in Cowork.** The Cowork plugin carries the key in `endor.env`, and every member, Claude itself, and other plugins' hooks can read that file inside a task's workspace. There is no per-user credential yet, so the audit-only scope is the only limit on what that key can do. See [the Cowork runbook](docs/deploy-claude-cowork.md#what-this-does-not-cover) for the other gaps.
 - **Pin the revision.** The runner executes this repo's code as root, so it fetches a specific revision: set `REF` (at the top of `runner.sh`) to a reviewed tag, branch, or commit and each device runs only that, not the moving branch tip. Bump `REF` to roll out a change; the default (`main`) tracks the latest.
 - **Credential isolation (Claude).** The `env` block exports into every subprocess Claude spawns, including any `endorctl` the agent itself runs. To keep audit credentials out of the agent's process tree, hook-scoped variables use an `AGENT_HOOK_ENDOR_*` prefix that `endorctl` doesn't read natively, and the hook passes them through as `--api-key …` flags. Cursor, Codex, and Copilot have no managed env block, so their credentials are passed as `--api-key …` flags directly on each hook command (never exported), which keeps them out of the agent's environment the same way.
 - **Self-contained hooks (Cursor).** Every Cursor hook carries its own credentials and `--env` settings; none depends on state from an earlier hook. Cursor can inject env from a `sessionStart` hook's output, but that env is lost when a conversation is resumed after a restart and never reaches hooks fired inside subagents — so relying on it would leave those sessions unaudited and unenforced.
@@ -152,7 +162,8 @@ Each script needs only what's standard to where it runs; the laptop paths stay l
 | --- | --- | --- |
 | [`download_endorctl.sh`](scripts/download_endorctl.sh) | developer laptop (inlined into the session hook) | POSIX `sh` + `curl` (plus `awk`/`sed`/`find`/`wc`/`uname`/`tr` and `sha256sum` or `shasum` — all standard on macOS & Linux) |
 | [`download_endorctl.ps1`](scripts/download_endorctl.ps1) | Windows laptop (encoded into the session hook) | Windows PowerShell 5.1 (built in) |
-| [`scripts/render.sh`](scripts/render.sh) | admin machine (macOS/Linux, or Windows via Git Bash/WSL), or laptop via the runner | POSIX `sh` + `awk` + `sed`; for `--target-os windows` also `iconv` + `base64` |
+| [`scripts/render.sh`](scripts/render.sh) | admin machine (macOS/Linux, or Windows via Git Bash/WSL), or laptop via the runner | POSIX `sh` + `awk` + `sed`; for `--target-os windows` also `iconv` + `base64`; for a `--agent claude-cowork` ZIP also `zip` |
+| [`plugins/claude-cowork/scripts/endor-hook.sh`](plugins/claude-cowork/scripts/endor-hook.sh) | Cowork's cloud workspace (called by every plugin hook) | POSIX `sh` |
 | [`scripts/render-plist.sh`](scripts/render-plist.sh) | admin machine (macOS) | `plutil` (native to macOS); `base64` for `--style mcx` |
 | [`scripts/runner.sh`](scripts/runner.sh) | developer laptop (run by the MDM) | `curl` + `tar` + POSIX `sh` |
 
@@ -165,6 +176,7 @@ scripts/
   render.sh               generate a tool's config (JSON, or Codex TOML)
   render-plist.sh         wrap a config (stdin) into a .mobileconfig profile
   runner.sh               MDM runner: clone → render → swap-if-changed
+plugins/claude-cowork/    static source of the Cowork plugin (plugin.json, endor-hook.sh)
 examples/                 checked-in samples (demo creds, placeholder UUIDs)
 tests/run-tests.sh        test suite (offline by default)
 docs/                     deployment runbooks + the support matrix
@@ -178,7 +190,7 @@ tests/run-tests.sh --network       # + assert the download endpoint's contract
 tests/run-tests.sh --network-full  # + a real resume and install (~300 MB)
 ```
 
-The offline suite drives `download_endorctl.sh` under a throwaway `HOME` with a stubbed `curl`, so branches that only occur on a bad network — a dead endpoint, a half-finished download, a corrupt one, two agents racing, a signal mid-transfer — are all reachable without waiting on a transfer. It also **regenerates every `examples/` artifact and fails if the checked-in copy differs**, which is the check that keeps the samples honest after a script change, and syntax-checks all 43 hook commands embedded across those artifacts to confirm they survived JSON/TOML escaping.
+The offline suite drives `download_endorctl.sh` under a throwaway `HOME` with a stubbed `curl`, so branches that only occur on a bad network — a dead endpoint, a half-finished download, a corrupt one, two agents racing, a signal mid-transfer — are all reachable without waiting on a transfer. It also **regenerates every `examples/` artifact and fails if the checked-in copy differs**, which is the check that keeps the samples honest after a script change, and syntax-checks all 52 hook commands embedded across those artifacts to confirm they survived JSON/TOML escaping.
 
 `--network` is worth running when the download endpoint might have changed: it pins the behavior resume depends on — a closed `bytes=A-B` range returns `206`, while an open-ended `bytes=A-` returns the whole body. That second one is why the bootstrap builds an explicit closed range instead of using `curl -C -`; if it ever starts returning `206`, the code can be simplified.
 
@@ -200,9 +212,10 @@ Everything needs only what ships with macOS/Linux; `plutil` (for the profile com
 | TOML (encoded PowerShell hook) | Codex | `examples/codex/requirements.windows.toml` |
 | JSON (POSIX hooks) | Copilot | `examples/copilot/policy.json` |
 | JSON (encoded PowerShell hook) | Copilot | `examples/copilot/policy.windows.json` |
+| Plugin (directory form) | Claude Cowork | `examples/claude-cowork/` |
 
 There's no separate Linux example: `settings.json` is exactly what Claude reads as the Linux `/etc/claude-code/managed-settings.json` and as the inner payload of the macOS profile, `requirements.toml` is what Codex reads at `/etc/codex/`, `policy.json` is what Copilot reads at `/etc/github-copilot/policy.d/`, and JumpCloud reuses these same files. Only the Windows samples differ (the encoded `powershell` hook). After changing a script, regenerate the affected examples with the commands above so they stay in sync — `tests/run-tests.sh` fails if you forget.
 
 ## Extending
 
-To add another agent: add a `build_<agent>` printf builder, a subcommand + compose arm, and a `case` arm in [`scripts/render.sh`](scripts/render.sh); a default-`DEST` `case` arm in [`scripts/runner.sh`](scripts/runner.sh) if it's file-delivered; and, if its macOS profile isn't a custom-settings payload (as with Codex's Forced preference), a `--style` in [`scripts/render-plist.sh`](scripts/render-plist.sh).
+To add another agent: add a `build_<agent>` printf builder, a subcommand + compose arm, and a `case` arm in [`scripts/render.sh`](scripts/render.sh) (an agent delivered as a plugin follows `claude-cowork`: static files under `plugins/<agent>/` and an `emit_<agent>` that assembles them); a default-`DEST` `case` arm in [`scripts/runner.sh`](scripts/runner.sh) if it's file-delivered; and, if its macOS profile isn't a custom-settings payload (as with Codex's Forced preference), a `--style` in [`scripts/render-plist.sh`](scripts/render-plist.sh).
