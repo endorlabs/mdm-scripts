@@ -96,6 +96,8 @@ scripts/render.sh --agent cursor --target-os windows \
 | `--namespace` | `ENDOR_NAMESPACE` | — (required) |
 | `--api-url` | `ENDOR_API` | `https://api.endorlabs.com` |
 
+`--api-url` is also the host the session hook downloads `endorctl` from, so a tenant on another host (`https://api.eu.endorlabs.com`, for example) gets that environment's build and its machines need to reach only that host.
+
 **`--target-os {macos,linux,windows}`** (default `macos`; macOS and Linux are identical POSIX) chooses the hook form. `windows` inlines the PowerShell bootstrap as a base64 `powershell -NoProfile -EncodedCommand …` so it runs under Git Bash, PowerShell, or cmd alike.
 
 **Behavior settings** go through `--env KEY=VALUE` (repeatable) and land in the right place per tool — Claude's `env` block, and inlined into every Cursor, Codex, and Copilot hook command (none of which has a managed env block). Response caching is on by default; monitor-only mode is just `--env ENDOR_AI_AUDIT_NO_BLOCKING=true`.

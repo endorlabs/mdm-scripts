@@ -266,6 +266,46 @@ run >/dev/null; settle
 chk "next session completes the install" "$(ver)" "endorctl version v1.7.1085"
 chk "without re-downloading" "$(gets)" "0"
 
+# --- download host ----------------------------------------------------------
+# The stub curl answers any host; its log shows which one was asked.
+installed() { for _ in $(seq 1 50); do [ -x "$H/.endorctl/endorctl" ] && break; sleep 0.2; done; settle; }
+hosts() { sed -n 's|.*https://\([^/ ]*\)/.*|\1|p' "$H/curl.log" | sort -u | tr '\n' ' '; }
+sec "endorctl is downloaded from the tenant's API host"
+newhome; run >/dev/null; installed
+chk "no API URL in the environment: production" "$(hosts)" "api.endorlabs.com "
+newhome; ( export AGENT_HOOK_ENDOR_API=https://api.eu.endorlabs.com; run >/dev/null ); installed
+chk "Claude's AGENT_HOOK_ENDOR_API is used for the digest and the binary" "$(hosts)" "api.eu.endorlabs.com "
+chk "and the install completes from that host" "$(ver)" "endorctl version v1.7.1085"
+newhome; ( export AGENT_HOOK_ENDOR_API=https://api.eu.endorlabs.com/; run >/dev/null ); installed
+chk "a trailing slash on the URL is tolerated" \
+  "$(grep -c 'https://api.eu.endorlabs.com/meta/version' "$H/curl.log")" "1"
+newhome; ( export ENDORCTL_DOWNLOAD_API=https://api.example.test AGENT_HOOK_ENDOR_API=https://api.eu.endorlabs.com; run >/dev/null ); installed
+chk "ENDORCTL_DOWNLOAD_API (what render.sh inlines) wins" "$(hosts)" "api.example.test "
+newhome; ( export AGENT_HOOK_ENDOR_API=http://api.example.test; run >/dev/null ); installed
+chk "a URL that is not https falls back to production" "$(hosts)" "api.endorlabs.com "
+
+sec "render.sh hands a non-default API URL to the bootstrap"
+rr() { "$AG/scripts/render.sh" --api-key k --api-secret s --namespace ns -o - "$@" 2>/dev/null; }
+EU="https://api.eu.endorlabs.com"
+for a in cursor codex copilot; do
+  chk "$a: --api-url is written in front of the bootstrap" \
+    "$(rr --agent $a --api-url $EU | grep -c "ENDORCTL_DOWNLOAD_API='$EU'")" "1"
+  # The bootstrap itself reads ${ENDORCTL_DOWNLOAD_API:-...}; only an assignment counts.
+  chk "$a: the default URL adds nothing" "$(rr --agent $a | grep -c 'ENDORCTL_DOWNLOAD_API=')" "0"
+done
+chk "claude: nothing is inlined, the env block already carries the URL" \
+  "$(rr --agent claude --api-url $EU | grep -c 'ENDORCTL_DOWNLOAD_API=')" "0"
+chk "claude: the env block carries it" \
+  "$(rr --agent claude --api-url $EU | grep -c "\"AGENT_HOOK_ENDOR_API\": \"$EU\"")" "1"
+# End to end: the URL survives the JSON escaping and reaches curl.
+if command -v python3 >/dev/null 2>&1; then
+  newhome
+  rr --agent copilot --api-url $EU | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["hooks"]["SessionStart"][0]["command"])' > "$H/session.cmd"
+  ( export HOME="$H" PATH="$STUB:$PATH" CURL_LOG="$H/curl.log"; : > "$CURL_LOG"; /bin/sh -c "$(cat "$H/session.cmd")" </dev/null >/dev/null 2>&1 )
+  installed
+  chk "a rendered Copilot session hook downloads from --api-url" "$(hosts)" "api.eu.endorlabs.com "
+fi
+
 # --- examples ---------------------------------------------------------------
 # The checked-in examples/ are generated output. Any change to a script must be
 # reflected there, or the samples in the README silently drift from reality.

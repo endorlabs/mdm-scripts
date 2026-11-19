@@ -27,6 +27,7 @@
 #   --api-secret  ENDOR_API_CREDENTIALS_SECRET
 #   --namespace   ENDOR_NAMESPACE
 #   --api-url     ENDOR_API                  (default: https://api.endorlabs.com)
+# The session hook also downloads endorctl from --api-url.
 #
 # Behavior settings go through --env KEY=VALUE (repeatable), routed to Claude's
 # env block / inlined into every Cursor, Codex, and Copilot hook command (none of
@@ -175,6 +176,17 @@ if [ -n "$skip_update" ]; then
   else
     boot=$(printf 'ENDORCTL_SKIP_UPDATE=1\n%s' "$boot")
   fi
+fi
+
+# The bootstrap downloads endorctl from --api-url. Claude passes it in the env
+# block; the other agents have none, so a non-default URL is inlined here.
+if [ "$api_url" != "$DEFAULT_API_URL" ]; then
+  case "$agent:$target_os" in
+    cursor:windows|codex:windows|copilot:windows)
+      boot=$(printf '$env:ENDORCTL_DOWNLOAD_API = %s\n%s' "$(psq "$api_url")" "$boot") ;;
+    cursor:*|codex:*|copilot:*)
+      boot=$(printf 'ENDORCTL_DOWNLOAD_API=%s\n%s' "$(sq "$api_url")" "$boot") ;;
+  esac
 fi
 
 # Encode PowerShell source into a shell-agnostic invocation (base64 is plain

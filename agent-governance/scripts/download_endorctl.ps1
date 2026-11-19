@@ -10,7 +10,12 @@ if (-not $skip) {
     'ARM64' { $arch = 'arm64' }
     default { exit 1 }
   }
-  $url = "https://api.endorlabs.com/download/latest/endorctl_windows_$arch.exe"
+  # Download from the tenant's API host; anything not https falls back to the default.
+  $api = $env:ENDORCTL_DOWNLOAD_API
+  if (-not $api) { $api = $env:AGENT_HOOK_ENDOR_API }
+  if ($api -notmatch '^https://.') { $api = 'https://api.endorlabs.com' }
+  $api = $api.TrimEnd('/')
+  $url = "$api/download/latest/endorctl_windows_$arch.exe"
   $archKey = 'ARCH_TYPE_WINDOWS_' + $arch.ToUpper()
   $current = ''
   if (Test-Path $Bin) {
@@ -21,7 +26,7 @@ if (-not $skip) {
   }
   $latest = ''; $expectedSha = ''
   try {
-    $meta = Invoke-RestMethod -Uri 'https://api.endorlabs.com/meta/version' -TimeoutSec 30
+    $meta = Invoke-RestMethod -Uri "$api/meta/version" -TimeoutSec 30
     $latest = [string]$meta.ClientVersion
     $expectedSha = [string]$meta.ClientChecksums.$archKey
   } catch {}

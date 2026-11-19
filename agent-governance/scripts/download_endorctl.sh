@@ -53,10 +53,14 @@ if [ -n "$need" ]; then
 
     case "$(uname -s)" in Darwin) os=macos ;; Linux) os=linux ;; *) exit 0 ;; esac
     case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) exit 0 ;; esac
-    URL="https://api.endorlabs.com/download/latest/endorctl_${os}_${arch}"
+    # Download from the tenant's API host; anything not https falls back to the default.
+    API="${ENDORCTL_DOWNLOAD_API:-${AGENT_HOOK_ENDOR_API:-}}"
+    case "$API" in https://?*) ;; *) API="https://api.endorlabs.com" ;; esac
+    API="${API%/}"
+    URL="$API/download/latest/endorctl_${os}_${arch}"
     ARCH_KEY="ARCH_TYPE_$(echo "${os}_${arch}" | tr '[:lower:]' '[:upper:]')"
     current=$([ -x "$BIN" ] && "$BIN" --version 2>/dev/null | awk '/version/ {print $NF; exit}')
-    meta=$(curl -fsSL --connect-timeout 5 --max-time 30 https://api.endorlabs.com/meta/version) || exit 0
+    meta=$(curl -fsSL --connect-timeout 5 --max-time 30 "$API/meta/version") || exit 0
     latest=$(echo "$meta" | sed -n 's/.*"ClientVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     expected_sha=$(echo "$meta" | sed -n "s/.*\"${ARCH_KEY}\"[[:space:]]*:[[:space:]]*\"\([a-f0-9]*\)\".*/\1/p")
     [ -n "$latest" ] || exit 0
