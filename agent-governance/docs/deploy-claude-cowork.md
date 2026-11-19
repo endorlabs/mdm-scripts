@@ -71,6 +71,16 @@ Organization plugins need a Team or Enterprise plan, an organization **Owner**, 
 
 Keep exactly one copy installed. A member who also uploaded the plugin personally gets every event twice.
 
+### Allow the Endor API host
+
+The workspace reaches the internet through a proxy that enforces your organization's allowed domains. The plugin needs your Endor API host for both the `endorctl` download and the audit events. An Enterprise organization that restricts network access blocks it by default.
+
+1. Open **Organization settings > Capabilities** and find the allowed domains for network access.
+2. Add `api.endorlabs.com`, plus the host of your `--api-url` if it differs. `*.endorlabs.com` covers both.
+3. Start a new task. A running task keeps the list it started with.
+
+When the host is blocked, nothing is audited and no error is shown: `~/.endorctl` in the workspace stays empty. To confirm, ask Claude to run `curl -sv -o /dev/null https://api.endorlabs.com/meta/version` in the cloud workspace. A blocked host answers `403 Forbidden (agent proxy: no rule or network setting allows this host)`.
+
 ## 3. Verify
 
 Check Endor's records, not Claude's answer: an allowed action is silent, and Claude's own summary of what a hook did is not reliable.
@@ -87,7 +97,7 @@ Check Endor's records, not Claude's answer: an allowed action is silent, and Cla
 
    Each event should carry the member's email as the user, not `root`.
 
-If nothing arrives, look at `~/.endorctl/aigovernance/localdb/` in the workspace. Queued rows there mean the sends are failing: check the namespace and the key's role.
+If `~/.endorctl` is empty, the workspace cannot reach the Endor API: see [Allow the Endor API host](#allow-the-endor-api-host). If the binary is there and nothing arrives, look at `~/.endorctl/aigovernance/localdb/` in the workspace. Queued rows there mean the sends are failing: check the namespace and the key's role.
 
 ## Updating
 
