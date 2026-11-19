@@ -293,11 +293,15 @@ build_claude() {
   printf '    "AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET": "%s",\n' "$_secret"
   printf '    "AGENT_HOOK_ENDOR_NAMESPACE": "%s"%s\n' "$_ns" "$env_json"
   printf '  },\n  "hooks": {\n'
+  # ConfigChange fires when a settings file or skill changes mid-session. It has no
+  # matcher, so a change from every source (user, project, local, policy, skills)
+  # is audited.
   claude_hook  SessionStart       "$_s" ,
   claude_hook  UserPromptSubmit   "$_a" ,
   claude_mhook PreToolUse         "$_a" ,
   claude_mhook PostToolUse        "$_a" ,
   claude_mhook PostToolUseFailure "$_a" ,
+  claude_hook  ConfigChange       "$_a" ,
   claude_hook  Stop               "$_a" ""
   printf '  }\n}\n'
 }

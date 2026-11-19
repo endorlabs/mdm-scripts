@@ -34,6 +34,20 @@
 			</dict>
 			<key>hooks</key>
 			<dict>
+				<key>ConfigChange</key>
+				<array>
+					<dict>
+						<key>hooks</key>
+						<array>
+							<dict>
+								<key>command</key>
+								<string>"$HOME/.endorctl/endorctl" --api "$AGENT_HOOK_ENDOR_API" --namespace "$AGENT_HOOK_ENDOR_NAMESPACE" --api-key "$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY" --api-secret "$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET" ai-audit claudecode</string>
+								<key>type</key>
+								<string>command</string>
+							</dict>
+						</array>
+					</dict>
+				</array>
 				<key>PostToolUse</key>
 				<array>
 					<dict>
