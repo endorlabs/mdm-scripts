@@ -53,9 +53,9 @@ A value given as a flag wins over the environment variable; with neither, `rende
 
 ### Or build it from your MDM
 
-[`scripts/runner-cowork.sh`](../scripts/runner-cowork.sh) is the Cowork counterpart of [`runner.sh`](../scripts/runner.sh). Paste it into your MDM as a script, supply the credentials the same way (see [the runner runbook](deploy-cursor-runner.md)), and scope it to the **one machine** of the Owner who uploads the plugin, never the fleet: the ZIP holds the key.
+[`scripts/runner.sh`](../scripts/runner.sh) builds the plugin too. Set `AGENT=claude-cowork`, paste it into your MDM as a script, supply the credentials as for the other agents (see [the runner runbook](deploy-cursor-runner.md)), and scope it to the **one machine** of the Owner who uploads the plugin, never the fleet: the ZIP holds the key.
 
-Each run fetches this repository at the pinned `REF` and rebuilds the plugin. The ZIP is replaced only when the plugin's files changed, and the script's output says so: `plugin changed - upload ...` means a re-upload is due, `plugin unchanged` means nothing to do. By default the ZIP is written root-only to `/Library/Application Support/EndorAIGovernance/endor-cowork-governance.zip` (macOS) or `/var/lib/endor-ai-governance/` (Linux); set `ZIP_OWNER` to the uploading user to hand it over, or `DEST` to move it.
+Each run fetches this repository at the pinned `REF` and rebuilds the plugin. The ZIP is replaced only when the plugin's files changed, and the script's output says so: `plugin changed - upload ...` means a re-upload is due, `plugin unchanged` means nothing to do. By default the ZIP is written root-only to `/Library/Application Support/EndorAIGovernance/endor-cowork-governance.zip` (macOS) or `/var/lib/endor-ai-governance/` (Linux); set `DEST` to write it elsewhere. An administrator hands the file to the user who uploads it.
 
 `--env KEY=VALUE` and `--skip-endorctl-update` work as for the other agents and are written into `endor.env`. For a monitor-only start, add `--env ENDOR_AI_AUDIT_NO_BLOCKING=true`. A sample built with demo credentials is at `examples/claude-cowork/`.
 

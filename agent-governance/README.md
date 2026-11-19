@@ -165,8 +165,7 @@ Each script needs only what's standard to where it runs; the laptop paths stay l
 | [`scripts/render.sh`](scripts/render.sh) | admin machine (macOS/Linux, or Windows via Git Bash/WSL), or laptop via the runner | POSIX `sh` + `awk` + `sed`; for `--target-os windows` also `iconv` + `base64`; for a `--agent claude-cowork` ZIP also `zip` |
 | [`plugins/claude-cowork/scripts/endor-hook.sh`](plugins/claude-cowork/scripts/endor-hook.sh) | Cowork's cloud workspace (called by every plugin hook) | POSIX `sh` |
 | [`scripts/render-plist.sh`](scripts/render-plist.sh) | admin machine (macOS) | `plutil` (native to macOS); `base64` for `--style mcx` |
-| [`scripts/runner.sh`](scripts/runner.sh) | developer laptop (run by the MDM) | `curl` + `tar` + POSIX `sh` |
-| [`scripts/runner-cowork.sh`](scripts/runner-cowork.sh) | the Claude organization Owner's machine (run by the MDM) | `curl` + `tar` + `zip` + POSIX `sh` |
+| [`scripts/runner.sh`](scripts/runner.sh) | developer laptop (run by the MDM) | `curl` + `tar` + POSIX `sh`; for `AGENT=claude-cowork` also `zip` |
 
 ## Repository layout
 
@@ -177,7 +176,6 @@ scripts/
   render.sh               generate a tool's config (JSON, or Codex TOML)
   render-plist.sh         wrap a config (stdin) into a .mobileconfig profile
   runner.sh               MDM runner: clone → render → swap-if-changed
-  runner-cowork.sh        MDM runner for the Cowork plugin ZIP (one admin machine)
 plugins/claude-cowork/    static source of the Cowork plugin (plugin.json, endor-hook.sh)
 examples/                 checked-in samples (demo creds, placeholder UUIDs)
 tests/run-tests.sh        test suite (offline by default)

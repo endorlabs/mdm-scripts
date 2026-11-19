@@ -14,10 +14,14 @@
 # Endpoint needs only curl + tar (both ship with macOS/Linux) - no git/Xcode CLT
 # and no jq/Homebrew. Windows doesn't use this - pre-generate and push via Intune
 # (see docs/deploy-windows-intune.md).
+#
+# AGENT=claude-cowork builds the Claude Cowork plugin ZIP instead of a config
+# file (also needs zip). Scope that to the one machine of the Claude organization
+# Owner who uploads the plugin, not the fleet. See docs/deploy-claude-cowork.md.
 set -eu
 
 # --- settings: edit these ---------------------------------------------------
-AGENT=cursor                                       # cursor | claude | codex | copilot
+AGENT=cursor                                       # cursor | claude | codex | copilot | claude-cowork
 REF=main                                           # pin to a reviewed tag/commit, e.g. v1.0.0
 EXTRA=                                              # extra render flags, e.g. --env ENDOR_AI_AUDIT_NO_BLOCKING=true
 DEST=                                              # override install path; empty = OS default
@@ -48,6 +52,9 @@ if [ -z "$DEST" ]; then
     # It is read by the Copilot CLI only; VS Code agent mode has no managed hook
     # path (see docs/deploy-copilot-policy.md).
     copilot:Darwin|copilot:Linux) DEST="/etc/github-copilot/policy.d/endor.json" ;;
+    # The Cowork plugin is uploaded to Claude, not read from disk: keep the ZIP
+    # beside the fetched repo.
+    claude-cowork:Darwin|claude-cowork:Linux) DEST="$(dirname "$REPO")/endor-cowork-governance.zip" ;;
     *) echo "runner.sh: set DEST for agent '$AGENT' on $os" >&2; exit 2 ;;
   esac
 fi
@@ -66,6 +73,28 @@ mkdir -p "$REPO"
 curl -fsSL --retry 5 --retry-connrefused --retry-all-errors \
   "https://codeload.github.com/$REPO_SLUG/tar.gz/$REF" \
   | tar -xz -C "$REPO" --strip-components=1
+
+# The Cowork plugin: a ZIP differs on every build (timestamps), so compare the
+# plugin's files with the last build and replace the ZIP only when they changed.
+# The output says whether it needs uploading again. Both hold the key: owner-only.
+if [ "$AGENT" = claude-cowork ]; then
+  case "$DEST" in *.zip) ;; *) echo "runner.sh: DEST must end in .zip for claude-cowork: $DEST" >&2; exit 2 ;; esac
+  umask 077
+  BUILT="$(dirname "$REPO")/cowork-plugin"
+  rm -rf "$BUILT.new"
+  sh "$REPO/agent-governance/scripts/render.sh" --agent "$AGENT" $EXTRA -o "$BUILT.new"
+  if [ -f "$DEST" ] && [ -d "$BUILT" ] && diff -rq "$BUILT.new" "$BUILT" >/dev/null 2>&1; then
+    rm -rf "$BUILT.new"
+    echo "runner.sh: plugin unchanged, nothing to upload ($DEST)"
+  else
+    sh "$REPO/agent-governance/scripts/render.sh" --agent "$AGENT" $EXTRA -o "$DEST.new.zip"
+    mv "$DEST.new.zip" "$DEST"
+    rm -rf "$BUILT"
+    mv "$BUILT.new" "$BUILT"
+    echo "runner.sh: plugin changed - upload $DEST in Claude's Organization settings > Plugins & skills"
+  fi
+  exit 0
+fi
 
 # Render the config and swap it in only if it changed. Comparing the output (not
 # the repo revision) means credential and flag changes take effect too.
