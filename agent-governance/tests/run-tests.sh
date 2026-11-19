@@ -309,6 +309,42 @@ for rel in cursor/hooks.json cursor/hooks.windows.json \
   else bad "examples/$rel is stale - regenerate it (see README \"Examples\")"; fi
 done
 
+# The Cursor CLI reads hooks.json as JSONC and removes comments with a regex before
+# parsing, inside strings too. One bare "//" in a command breaks the parse, and the
+# CLI then runs no hooks from the file.
+sec "the Cursor CLI can parse the rendered hooks.json"
+if command -v python3 >/dev/null 2>&1; then
+  # The values put both comment forms into the POSIX commands. "???" becomes "/" in
+  # the Windows base64, which the demo credentials never produce.
+  for os in macos linux windows; do
+    f="$GEN/cursor/cli.$os.json"
+    "$AG/scripts/render.sh" --agent cursor --target-os "$os" --api-key 'k//k' \
+      --api-secret '???' --namespace 'a/*b*/c' -o "$f" >/dev/null 2>&1
+    if why=$(python3 - "$f" "$os" 2>&1 <<'PY'
+import base64, json, re, sys
+raw = open(sys.argv[1]).read()
+doc = json.loads(raw)
+# What cursor-agent's parseJSONC does before JSON.parse.
+cli = re.sub(r'/\*[\s\S]*?\*/', '', re.sub(r'//.*$', '', raw, flags=re.M))
+try: seen = json.loads(cli)
+except ValueError as e: sys.exit(f'the CLI cannot parse the file ({e})')
+if seen != doc: sys.exit('the CLI reads a different document')
+# The parse above only covers these inputs. No bare "/" covers every input.
+if '/' in re.sub(r'\\.', '', raw): sys.exit('a bare "/" is left in the file')
+if '\\/' not in raw: sys.exit('the file has no "/" at all, so nothing was tested')
+for ev, hooks in doc['hooks'].items():
+    cmd = hooks[0]['command']
+    if sys.argv[2] == 'windows':
+        cmd = base64.b64decode(cmd.split()[-1]).decode('utf-16-le')
+    if 'https://' not in cmd: sys.exit(f'{ev}: the command lost its https:// URL')
+PY
+    ); then ok "cursor $os: parses to the same commands, no bare slash"
+    else bad "cursor $os: $why"; fi
+  done
+else
+  echo "  (skipped, needs python3)"
+fi
+
 sec "every embedded hook command is valid shell after JSON/TOML escaping"
 if command -v python3 >/dev/null 2>&1; then
   python3 - "$AG" "$WORK" <<'PY'
