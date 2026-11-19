@@ -113,7 +113,7 @@ gets()   { c=$(grep 'download/latest' "$H/curl.log" 2>/dev/null | grep -vc 'fsSL
 sec "syntax"
 for s in sh bash dash; do
   command -v "$s" >/dev/null || { echo "  (no $s, skipped)"; continue; }
-  for f in "$BOOT" "$AG/scripts/render.sh" "$AG/scripts/render-plist.sh" "$AG/scripts/runner.sh" \
+  for f in "$BOOT" "$AG/scripts/render.sh" "$AG/scripts/render-plist.sh" "$AG/scripts/runner.sh" "$AG/scripts/runner-cowork.sh" \
            "$AG/plugins/claude-cowork/scripts/endor-hook.sh"; do
     if $s -n "$f" 2>/dev/null; then ok "$s -n $(basename "$f")"; else bad "$s -n $(basename "$f")"; fi
   done
