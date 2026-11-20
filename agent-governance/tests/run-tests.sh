@@ -113,7 +113,8 @@ gets()   { c=$(grep 'download/latest' "$H/curl.log" 2>/dev/null | grep -vc 'fsSL
 sec "syntax"
 for s in sh bash dash; do
   command -v "$s" >/dev/null || { echo "  (no $s, skipped)"; continue; }
-  for f in "$BOOT" "$AG/scripts/render.sh" "$AG/scripts/render-plist.sh" "$AG/scripts/runner.sh"; do
+  for f in "$BOOT" "$AG/scripts/render.sh" "$AG/scripts/render-plist.sh" "$AG/scripts/runner.sh" \
+           "$AG/plugins/claude-cowork/scripts/endor-hook.sh"; do
     if $s -n "$f" 2>/dev/null; then ok "$s -n $(basename "$f")"; else bad "$s -n $(basename "$f")"; fi
   done
 done
@@ -323,6 +324,7 @@ r() { "$AG/scripts/render.sh" --api-key $K --api-secret $S --namespace $NS "$@";
   r --agent codex  --target-os windows -o "$GEN/codex/requirements.windows.toml"
   r --agent copilot -o "$GEN/copilot/policy.json"
   r --agent copilot --target-os windows -o "$GEN/copilot/policy.windows.json"
+  r --agent claude-cowork -o "$GEN/claude-cowork"     # the plugin, as a directory
 } >/dev/null 2>&1
 if command -v plutil >/dev/null 2>&1; then
   # Placeholder UUIDs, so a regenerated profile stays byte-identical.
@@ -344,11 +346,18 @@ for rel in cursor/hooks.json cursor/hooks.windows.json \
            claude/com.anthropic.claudecode.mobileconfig \
            codex/requirements.toml codex/requirements.windows.toml \
            codex/com.openai.codex.mobileconfig \
-           copilot/policy.json copilot/policy.windows.json; do
+           copilot/policy.json copilot/policy.windows.json \
+           claude-cowork/.claude-plugin/plugin.json claude-cowork/hooks/hooks.json \
+           claude-cowork/scripts/endor-hook.sh claude-cowork/scripts/bootstrap.sh \
+           claude-cowork/endor.env; do
   if [ ! -f "$GEN/$rel" ]; then echo "  (skipped $rel, needs plutil)"; continue; fi
   if cmp -s "$GEN/$rel" "$AG/examples/$rel"; then ok "examples/$rel"
   else bad "examples/$rel is stale - regenerate it (see README \"Examples\")"; fi
 done
+# Catches a stray file in the example, which the per-file comparison would miss.
+files_in() { (cd "$1" && find . -type f | sort); }
+chk "examples/claude-cowork holds exactly the files the build writes" \
+  "$(files_in "$AG/examples/claude-cowork")" "$(files_in "$GEN/claude-cowork")"
 
 # The Cursor CLI reads hooks.json as JSONC and removes comments with a regex before
 # parsing, inside strings too. One bare "//" in a command breaks the parse, and the
@@ -406,6 +415,8 @@ d = json.load(open(f'{ag}/examples/cursor/hooks.json'))
 for ev, a in d['hooks'].items(): check(f'cursor:{ev}', a[0]['command'])
 d = json.load(open(f'{ag}/examples/copilot/policy.json'))
 for ev, a in d['hooks'].items(): check(f'copilot:{ev}', a[0]['command'])
+d = json.load(open(f'{ag}/examples/claude-cowork/hooks/hooks.json'))
+for ev, a in d['hooks'].items(): check(f'claude-cowork:{ev}', a[0]['hooks'][0]['command'])
 if tomllib:
     d = tomllib.load(open(f'{ag}/examples/codex/requirements.toml', 'rb'))
     for ev, arr in d['hooks'].items():
@@ -449,7 +460,7 @@ fi
 # every shell an agent might use to run a hook.
 sec "a CRLF-converted profile still runs its session hook"
 chk "no checked-in example carries a CR" \
-  "$(cat "$AG"/examples/*/* | tr -cd '\r' | wc -c | tr -d ' ')" "0"
+  "$(find "$AG/examples" -type f -exec cat {} + | tr -cd '\r' | wc -c | tr -d ' ')" "0"
 # The bare bootstrap is what the wrapper protects; without it, CRLF is fatal.
 chk "unarmored bootstrap fails to parse with CRLF (the defect the armor covers)" \
   "$({ cat "$BOOT"; echo 'echo AUDIT-RAN'; } | sed 's/$/\r/' | /bin/sh -n 2>/dev/null && echo parses || echo fails)" "fails"
@@ -480,6 +491,109 @@ if command -v plutil >/dev/null 2>&1; then
 else
   echo "  (profile cases skipped, need plutil)"
 fi
+
+# --- Cowork plugin ----------------------------------------------------------
+# Build a plugin whose settings are hostile to quoting, then run the commands
+# as hooks.json carries them against a fake endorctl that reports its input.
+sec "cowork plugin: hooks reach endorctl with the tenant's settings"
+P="$WORK/cowork"
+CK="k'e y\$1"; CS='S"2 `x`'
+cw() { "$AG/scripts/render.sh" --agent claude-cowork "$@" 2>&1; }
+cw --api-url https://api.example.test --api-key "$CK" --api-secret "$CS" --namespace ns.child \
+   --env 'EXTRA=a b' -o "$P" >/dev/null
+chk "render writes the plugin directory" "$(have "$P/.claude-plugin/plugin.json")" "yes"
+chk "endor.env is readable by its owner only" "$(ls -l "$P/endor.env" | cut -c1-10)" "-rw-------"
+chk "no credential outside endor.env" \
+  "$(grep -rlF -e "$CK" -e "$CS" "$P" | sed "s|^$P/||" | tr '\n' ' ')" "endor.env "
+
+# Reports its arguments, the behavior envs it inherited, and its stdin.
+fake_endorctl() {
+  mkdir -p "$1/.endorctl"
+  cat > "$1/.endorctl/endorctl" <<'FAKE'
+#!/bin/sh
+case "${1:-}" in --version) echo "endorctl version v1.7.1085"; exit 0 ;; esac
+printf 'ARGS'; for a; do printf ' [%s]' "$a"; done; printf '\n'
+printf 'ENV cache=%s extra=%s\n' "${ENDOR_AI_AUDIT_CACHE_ENABLED:-}" "${EXTRA:-}"
+printf 'STDIN %s\n' "$(cat)"
+exit "${FAKE_RC:-0}"
+FAKE
+  chmod +x "$1/.endorctl/endorctl"
+}
+WANT="ARGS [--api] [https://api.example.test] [--namespace] [ns.child] [--api-key] [$CK] [--api-secret] [$CS] [ai-audit] [claudecode]
+ENV cache=true extra=a b
+STDIN {\"e\":1}"
+# hook SHELL session|audit : run the plugin's own command string under SHELL.
+hook() {
+  ( export HOME="$H" CLAUDE_PLUGIN_ROOT="$P" PATH="$STUB:$PATH" CURL_LOG="$H/curl.log"
+    printf '{"e":1}' | "$1" -c "$(cat "$WORK/cowork.$2.cmd")" )
+}
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$P/hooks/hooks.json" "$WORK" <<'PY'
+import json, sys
+h = json.load(open(sys.argv[1]))['hooks']
+open(f'{sys.argv[2]}/cowork.session.cmd', 'w').write(h['SessionStart'][0]['hooks'][0]['command'])
+open(f'{sys.argv[2]}/cowork.audit.cmd', 'w').write(h['PreToolUse'][0]['hooks'][0]['command'])
+PY
+  for s in /bin/sh dash bash; do
+    command -v "$s" >/dev/null || { echo "  (no $s, skipped)"; continue; }
+    # endorctl on disk and a fresh stamp: `session` skips the network and audits.
+    H=$(mktemp -d "$WORK/home.XXXXXX"); fake_endorctl "$H"; : > "$H/.endorctl/.update-check"
+    chk "$s: audit hook passes settings, env and stdin through" "$(hook "$s" audit 2>&1)" "$WANT"
+    chk "$s: session hook audits too once endorctl is installed" "$(hook "$s" session 2>&1)" "$WANT"
+    chk "$s: endorctl's exit code is the hook's (a block is exit 2)" \
+      "$(FAKE_RC=2 hook "$s" audit >/dev/null 2>&1; echo $?)" "2"
+  done
+
+  sec "cowork plugin: a new workspace has no endorctl yet"
+  newhome
+  out=$(hook /bin/sh audit 2>&1); rc=$?
+  chk "audit hook exits 0 and stays silent" "$rc:$out" "0:"
+  chk "and starts no download (only SessionStart does)" "$(have "$H/.endorctl")" "no"
+  out=$(hook /bin/sh session 2>&1); rc=$?
+  chk "session hook exits 0 and stays silent" "$rc:$out" "0:"
+  settle
+  chk "session hook started the background install" "$(ver)" "endorctl version v1.7.1085"
+
+  sec "cowork plugin: a plugin without endor.env says so and does not block"
+  H=$(mktemp -d "$WORK/home.XXXXXX"); fake_endorctl "$H"
+  mv "$P/endor.env" "$WORK/endor.env.aside"
+  out=$(hook /bin/sh audit 2>&1); rc=$?
+  chk "exit 1 (a non-blocking hook error), not 0 or 2" "$rc" "1"
+  chk "stderr names the missing file" "$(echo "$out" | grep -c 'endor.env is missing')" "1"
+  chk "endorctl was not run" "$(echo "$out" | grep -c ARGS)" "0"
+  mv "$WORK/endor.env.aside" "$P/endor.env"
+  chk "without CLAUDE_PLUGIN_ROOT the script finds the plugin from its own path" \
+    "$(export HOME="$H"; printf '{"e":1}' | /bin/sh "$P/scripts/endor-hook.sh" audit 2>&1)" "$WANT"
+else
+  echo "  (hook cases skipped, need python3 to read hooks.json)"
+fi
+
+sec "cowork plugin: build inputs and outputs"
+refused() { if "$AG/scripts/render.sh" --agent claude-cowork --api-key k --api-secret s "$@" >/dev/null 2>&1; then echo built; else echo refused; fi; }
+chk "a URL as the namespace is refused" "$(refused --namespace https://api.endorlabs.com -o "$WORK/no1.zip")" "refused"
+chk "--target-os windows is refused" "$(refused --namespace ns --target-os windows -o "$WORK/no2.zip")" "refused"
+chk "stdout is refused" "$(refused --namespace ns -o -)" "refused"
+chk "a non-empty output directory is refused" "$(refused --namespace ns -o "$P")" "refused"
+chk "nothing was written for a refused build" "$(have "$WORK/no1.zip")$(have "$WORK/no2.zip")" "nono"
+if command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+  Z="$WORK/plugin.zip"
+  echo "not a zip" > "$Z"                    # a stale file at the output path
+  cw --api-key k --api-secret s --namespace ns -o "$Z" >/dev/null
+  chk "the ZIP holds the plugin and nothing else (no bin/, which Cowork refuses)" \
+    "$(unzip -Z1 "$Z" 2>/dev/null | grep -v '/$' | sort | tr '\n' ' ')" \
+    ".claude-plugin/plugin.json endor.env hooks/hooks.json scripts/bootstrap.sh scripts/endor-hook.sh "
+  chk "the ZIP is readable by its owner only" "$(ls -l "$Z" | cut -c1-10)" "-rw-------"
+  chk "the ZIP is far under Cowork's 200 MB limit" \
+    "$([ "$(wc -c < "$Z" | tr -d ' ')" -lt 1048576 ] && echo yes || echo no)" "yes"
+  rm -rf "$WORK/unz"; mkdir "$WORK/unz"; unzip -q "$Z" -d "$WORK/unz"
+  chk "the ZIP unpacks to what the directory build writes" \
+    "$(cd "$WORK/unz" && find . -type f ! -name endor.env -exec cksum {} + | sort)" \
+    "$(cd "$P" && find . -type f ! -name endor.env -exec cksum {} + | sort)"
+else
+  echo "  (ZIP cases skipped, need zip and unzip)"
+fi
+chk "no temporary directory is left behind" \
+  "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'endor-cowork.*' 2>/dev/null | wc -l | tr -d ' ')" "0"
 
 # --- network ----------------------------------------------------------------
 if [ "$want_network" = 1 ]; then

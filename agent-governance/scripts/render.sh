@@ -17,6 +17,11 @@
 # so it runs whether the agent launches hooks via Git Bash, PowerShell, or cmd.
 # (The readable source is download_endorctl.ps1; the config carries its encoding.)
 #
+# --agent claude-cowork builds a Claude plugin for Claude Cowork instead of one
+# config file: -o <file>.zip writes a ZIP to upload (needs zip), any other -o
+# path writes the plugin directory. The output holds the API key (endor.env).
+# --target-os does not apply. See docs/deploy-claude-cowork.md.
+#
 # Prerequisites: only system tools (sh, sed, awk, printf); for --target-os windows
 # also iconv + base64. All ship with macOS/Linux, so this renders on a stock
 # endpoint - no jq/Homebrew, and no git/Xcode CLT (the runner fetches via curl).
@@ -45,6 +50,7 @@
 #   render.sh --agent cursor --api-key K --api-secret S --namespace NS -o hooks.json
 #   render.sh --agent claude --target-os windows --api-key K --api-secret S --namespace NS
 #   render.sh --agent copilot --api-key K --api-secret S --namespace NS -o endor.json
+#   render.sh --agent claude-cowork --api-key K --api-secret S --namespace NS -o endor-cowork-governance.zip
 set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -115,21 +121,25 @@ while [ $# -gt 0 ]; do
     --api-key)              api_key="$2"; shift 2 ;;
     --api-secret)           api_secret="$2"; shift 2 ;;
     --namespace)            namespace="$2"; shift 2 ;;
-    -h|--help)              sed -n '2,46p' "$0"; exit 0 ;;
+    -h|--help)              sed -n '2,/^set -eu$/p' "$0" | sed '$d'; exit 0 ;;
     *)                      die "unknown argument: $1" ;;
   esac
 done
 
 # --- validation ---------------------------------------------------------------
 case "$agent" in
-  claude|cursor|codex|copilot) ;;
-  "") die "--agent is required (claude|cursor|codex|copilot)" ;;
-  *) die "unknown agent: $agent (claude|cursor|codex|copilot)" ;;
+  claude|claude-cowork|cursor|codex|copilot) ;;
+  "") die "--agent is required (claude|claude-cowork|cursor|codex|copilot)" ;;
+  *) die "unknown agent: $agent (claude|claude-cowork|cursor|codex|copilot)" ;;
 esac
 case "$target_os" in
   macos|linux|windows) ;;
   *) die "unknown --target-os: $target_os (macos|linux|windows)" ;;
 esac
+# Cowork runs hooks in a Linux workspace, so there is no Windows form.
+if [ "$agent" = claude-cowork ] && [ "$target_os" = windows ]; then
+  die "--agent claude-cowork has no Windows form (Cowork runs hooks in a Linux workspace); drop --target-os"
+fi
 # The bootstrap is embedded in every session hook (and base64'd into the Windows
 # form), so its comments and blank lines are dropped on the way in - they would
 # otherwise bloat every generated profile. Only whole-line comments are removed;
@@ -157,6 +167,12 @@ prompt_if_tty() {  # prompt_if_tty VAR_NAME LABEL hide-input?
 prompt_if_tty api_key    "api-key"    secret
 prompt_if_tty api_secret "api-secret" secret
 prompt_if_tty namespace  "namespace"  plain
+# A URL pasted as the namespace makes every send fail silently.
+if [ "$agent" = claude-cowork ]; then
+  case "$namespace" in
+    */*|*:*) die "namespace looks like a URL: $namespace (pass the tenant namespace, e.g. acme.engineering; the API URL goes in --api-url)" ;;
+  esac
+fi
 
 # --- behavior envs ------------------------------------------------------------
 # env_json: pretty ",\n    \"K\": \"V\"" fragments appended into Claude's env
@@ -214,7 +230,7 @@ psenc() {
 # is resumed after a restart and never reaches hooks fired inside subagents, so
 # it is deliberately not relied on.
 # endorctl's audit subcommand per agent (Claude Code is "claudecode", not "claude").
-case "$agent" in claude) subcmd="claudecode" ;; cursor) subcmd="cursor" ;; codex) subcmd="codex" ;; copilot) subcmd="copilot" ;; esac
+case "$agent" in claude|claude-cowork) subcmd="claudecode" ;; cursor) subcmd="cursor" ;; codex) subcmd="codex" ;; copilot) subcmd="copilot" ;; esac
 posix_audit='"$HOME/.endorctl/endorctl" --api "$AGENT_HOOK_ENDOR_API" --namespace "$AGENT_HOOK_ENDOR_NAMESPACE" --api-key "$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY" --api-secret "$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET" ai-audit '"$subcmd"
 posix_inline=$(printf '%s"$HOME/.endorctl/endorctl" --api %s --namespace %s --api-key %s --api-secret %s ai-audit %s' \
   "$env_prefix" "$(sq "$api_url")" "$(sq "$namespace")" "$(sq "$api_key")" "$(sq "$api_secret")" "$subcmd")
@@ -248,6 +264,11 @@ case "$agent:$target_os" in
   claude:macos|claude:linux)
     cmd_audit="$posix_audit"
     cmd_session=$(crguard "$(printf '%s\n%s' "$boot" "$posix_audit")") ;;
+  claude-cowork:*)
+    # hooks.json has no env block, so each hook calls endor-hook.sh, which loads
+    # endor.env. Run through `sh` so the script needs no exec bit.
+    cmd_audit='sh "${CLAUDE_PLUGIN_ROOT}/scripts/endor-hook.sh" audit'
+    cmd_session='sh "${CLAUDE_PLUGIN_ROOT}/scripts/endor-hook.sh" session' ;;
   cursor:macos|cursor:linux)
     cmd_audit="$posix_inline"
     # Capture stdin first (Cursor closes its pipe quickly) into a per-user file,
@@ -314,17 +335,95 @@ build_claude() {
   printf '    "AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET": "%s",\n' "$_secret"
   printf '    "AGENT_HOOK_ENDOR_NAMESPACE": "%s"%s\n' "$_ns" "$env_json"
   printf '  },\n  "hooks": {\n'
+  claude_hook_entries "$_s" "$_a"
+  printf '  }\n}\n'
+}
+
+# Events shared by the managed settings and the Cowork plugin.
+# $1 = js-escaped session command, $2 = js-escaped audit command.
+claude_hook_entries() {
   # ConfigChange fires when a settings file or skill changes mid-session. It has no
   # matcher, so a change from every source (user, project, local, policy, skills)
   # is audited.
-  claude_hook  SessionStart       "$_s" ,
-  claude_hook  UserPromptSubmit   "$_a" ,
-  claude_mhook PreToolUse         "$_a" ,
-  claude_mhook PostToolUse        "$_a" ,
-  claude_mhook PostToolUseFailure "$_a" ,
-  claude_hook  ConfigChange       "$_a" ,
-  claude_hook  Stop               "$_a" ""
+  claude_hook  SessionStart       "$1" ,
+  claude_hook  UserPromptSubmit   "$2" ,
+  claude_mhook PreToolUse         "$2" ,
+  claude_mhook PostToolUse        "$2" ,
+  claude_mhook PostToolUseFailure "$2" ,
+  claude_hook  ConfigChange       "$2" ,
+  claude_hook  Stop               "$2" ""
+}
+
+# --- Claude Cowork plugin -----------------------------------------------------
+# hooks/hooks.json: the same events as build_claude, with no credential.
+build_cowork_hooks() {
+  printf '{\n  "description": "Endor Labs AI governance hooks for Claude Cowork (generated by render.sh)",\n  "hooks": {\n'
+  claude_hook_entries "$(js "$cmd_session")" "$(js "$cmd_audit")"
   printf '  }\n}\n'
+}
+
+# endor.env: the settings env block as shell assignments, quoted with sq.
+build_cowork_env() {
+  printf '# Endor Labs AI governance - tenant settings for the Cowork plugin (generated by render.sh).\n'
+  printf '# Holds the API key. Every member of the organization, and Claude itself, can read\n'
+  printf '# this file inside a Cowork workspace: use a key with the AI Audit role only.\n'
+  printf 'AGENT_HOOK_ENDOR_API=%s\n' "$(sq "$api_url")"
+  printf 'AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY=%s\n' "$(sq "$api_key")"
+  printf 'AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET=%s\n' "$(sq "$api_secret")"
+  printf 'AGENT_HOOK_ENDOR_NAMESPACE=%s\n' "$(sq "$namespace")"
+  if [ -n "$skip_update" ]; then printf 'ENDORCTL_SKIP_UPDATE=1\n'; fi
+  printf '%s\n' "$env_lines" | while IFS= read -r kv; do
+    [ -n "$kv" ] || continue
+    printf '%s=%s\n' "${kv%%=*}" "$(sq "${kv#*=}")"
+  done
+}
+
+# Assemble the plugin in a temporary directory, then write it as a ZIP ($1 ends
+# in .zip) or a directory. scripts/bootstrap.sh is a copy of download_endorctl.sh.
+emit_cowork() {
+  _src="$SCRIPT_DIR/../plugins/claude-cowork"
+  [ -f "$_src/.claude-plugin/plugin.json" ] && [ -f "$_src/scripts/endor-hook.sh" ] \
+    || die "plugin source not found: $_src"
+  [ "$1" != "-" ] || die "--agent claude-cowork cannot write to stdout; pass -o <file>.zip or -o <directory>"
+  _parent=$(dirname -- "$1")
+  [ -d "$_parent" ] || die "output directory does not exist: $_parent (run: mkdir -p \"$_parent\")"
+  case "$1" in
+    *.zip)
+      command -v zip >/dev/null || die "zip is required to write $1 (or pass -o <directory> to write the plugin unzipped)"
+      [ ! -d "$1" ] || die "output path is a directory: $1" ;;
+    *)
+      if [ -e "$1" ]; then
+        [ -d "$1" ] || die "output path exists and is not a directory: $1 (end it in .zip for a ZIP)"
+        [ -z "$(ls -A "$1")" ] || die "output directory is not empty: $1"
+      fi ;;
+  esac
+
+  _tmp=$(mktemp -d "${TMPDIR:-/tmp}/endor-cowork.XXXXXX") || die "could not create a temporary directory"
+  trap 'rm -rf "$_tmp"' EXIT
+  mkdir -p "$_tmp/.claude-plugin" "$_tmp/hooks" "$_tmp/scripts"
+  cp "$_src/.claude-plugin/plugin.json" "$_tmp/.claude-plugin/plugin.json"
+  cp "$_src/scripts/endor-hook.sh" "$_tmp/scripts/endor-hook.sh"
+  cp "$SCRIPT_DIR/download_endorctl.sh" "$_tmp/scripts/bootstrap.sh"
+  build_cowork_hooks > "$_tmp/hooks/hooks.json"
+  # Fixed modes, independent of the builder's umask.
+  chmod 755 "$_tmp/.claude-plugin" "$_tmp/hooks" "$_tmp/scripts" "$_tmp/scripts/endor-hook.sh"
+  chmod 644 "$_tmp/.claude-plugin/plugin.json" "$_tmp/hooks/hooks.json" "$_tmp/scripts/bootstrap.sh"
+  # 0600, like the ZIP below: both hold the key.
+  ( umask 077; build_cowork_env > "$_tmp/endor.env" )
+
+  case "$1" in
+    *.zip)
+      # zip appends to an existing archive, so remove it first.
+      _abs="$(CDPATH='' cd -- "$_parent" && pwd)/$(basename -- "$1")"
+      rm -f "$_abs"
+      ( umask 077; cd "$_tmp" && zip -qrX "$_abs" .claude-plugin hooks scripts endor.env ) \
+        || die "zip failed writing $1"
+      echo "render.sh: wrote $1 (agent=$agent, plugin ZIP; holds the API key)" >&2 ;;
+    *)
+      mkdir -p "$1"
+      cp -R "$_tmp/." "$1/"
+      echo "render.sh: wrote $1/ (agent=$agent, plugin directory; endor.env holds the API key)" >&2 ;;
+  esac
 }
 
 # Codex takes its hooks as TOML (config.toml / requirements.toml schema), not
@@ -404,10 +503,12 @@ build_copilot() {
 
 # --- emit ---------------------------------------------------------------------
 emit() { case "$agent" in claude) build_claude ;; cursor) build_cursor ;; codex) build_codex ;; copilot) build_copilot ;; esac; }
-case "$agent" in claude) def_out="claude-settings.json" ;; cursor) def_out="cursor-hooks.json" ;; codex) def_out="codex-requirements.toml" ;; copilot) def_out="copilot-hooks.json" ;; esac
+case "$agent" in claude) def_out="claude-settings.json" ;; cursor) def_out="cursor-hooks.json" ;; codex) def_out="codex-requirements.toml" ;; copilot) def_out="copilot-hooks.json" ;; claude-cowork) def_out="endor-cowork-governance.zip" ;; esac
 out_path="${output:-$def_out}"
 
-if [ "$out_path" = "-" ]; then
+if [ "$agent" = claude-cowork ]; then
+  emit_cowork "$out_path"
+elif [ "$out_path" = "-" ]; then
   emit
 else
   out_dir=$(dirname -- "$out_path")
