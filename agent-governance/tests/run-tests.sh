@@ -288,8 +288,9 @@ sec "render.sh hands a non-default API URL to the bootstrap"
 rr() { "$AG/scripts/render.sh" --api-key k --api-secret s --namespace ns -o - "$@" 2>/dev/null; }
 EU="https://api.eu.endorlabs.com"
 for a in cursor codex copilot; do
+  # Cursor's file writes "/" as "\/" (see js_cursor), so undo that before matching.
   chk "$a: --api-url is written in front of the bootstrap" \
-    "$(rr --agent $a --api-url $EU | grep -c "ENDORCTL_DOWNLOAD_API='$EU'")" "1"
+    "$(rr --agent $a --api-url $EU | sed 's:\\/:/:g' | grep -c "ENDORCTL_DOWNLOAD_API='$EU'")" "1"
   # The bootstrap itself reads ${ENDORCTL_DOWNLOAD_API:-...}; only an assignment counts.
   chk "$a: the default URL adds nothing" "$(rr --agent $a | grep -c 'ENDORCTL_DOWNLOAD_API=')" "0"
 done
@@ -348,6 +349,42 @@ for rel in cursor/hooks.json cursor/hooks.windows.json \
   if cmp -s "$GEN/$rel" "$AG/examples/$rel"; then ok "examples/$rel"
   else bad "examples/$rel is stale - regenerate it (see README \"Examples\")"; fi
 done
+
+# The Cursor CLI reads hooks.json as JSONC and removes comments with a regex before
+# parsing, inside strings too. One bare "//" in a command breaks the parse, and the
+# CLI then runs no hooks from the file.
+sec "the Cursor CLI can parse the rendered hooks.json"
+if command -v python3 >/dev/null 2>&1; then
+  # The values put both comment forms into the POSIX commands. "???" becomes "/" in
+  # the Windows base64, which the demo credentials never produce.
+  for os in macos linux windows; do
+    f="$GEN/cursor/cli.$os.json"
+    "$AG/scripts/render.sh" --agent cursor --target-os "$os" --api-key 'k//k' \
+      --api-secret '???' --namespace 'a/*b*/c' -o "$f" >/dev/null 2>&1
+    if why=$(python3 - "$f" "$os" 2>&1 <<'PY'
+import base64, json, re, sys
+raw = open(sys.argv[1]).read()
+doc = json.loads(raw)
+# What cursor-agent's parseJSONC does before JSON.parse.
+cli = re.sub(r'/\*[\s\S]*?\*/', '', re.sub(r'//.*$', '', raw, flags=re.M))
+try: seen = json.loads(cli)
+except ValueError as e: sys.exit(f'the CLI cannot parse the file ({e})')
+if seen != doc: sys.exit('the CLI reads a different document')
+# The parse above only covers these inputs. No bare "/" covers every input.
+if '/' in re.sub(r'\\.', '', raw): sys.exit('a bare "/" is left in the file')
+if '\\/' not in raw: sys.exit('the file has no "/" at all, so nothing was tested')
+for ev, hooks in doc['hooks'].items():
+    cmd = hooks[0]['command']
+    if sys.argv[2] == 'windows':
+        cmd = base64.b64decode(cmd.split()[-1]).decode('utf-16-le')
+    if 'https://' not in cmd: sys.exit(f'{ev}: the command lost its https:// URL')
+PY
+    ); then ok "cursor $os: parses to the same commands, no bare slash"
+    else bad "cursor $os: $why"; fi
+  done
+else
+  echo "  (skipped, needs python3)"
+fi
 
 sec "every embedded hook command is valid shell after JSON/TOML escaping"
 if command -v python3 >/dev/null 2>&1; then
