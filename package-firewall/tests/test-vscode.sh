@@ -166,8 +166,13 @@ for temp_name in "product.json.dpkg-new" "product.json;5f3e2a1b"; do
   sed 's/fixture-v1/fixture-v2/' "$FIXTURE" > "$dir/$temp_name"
   run_installer "$product" "$state" > "$dir.out" 2>&1 &
   pid=$!
-  sleep 3
-  if ! kill -0 "$pid" 2>/dev/null; then
+  # Until the run is waiting, which takes a slow machine a few seconds.
+  for _ in $(seq 60); do
+    grep -q "waiting for the package manager" "$dir.out" && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  if ! kill -0 "$pid" 2>/dev/null || ! grep -q "waiting for the package manager" "$dir.out"; then
     echo "the run did not wait for the package manager" >&2
     cat "$dir.out" >&2
     exit 1

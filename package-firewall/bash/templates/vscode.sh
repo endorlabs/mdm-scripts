@@ -421,6 +421,7 @@ wait_for_package_manager() {
       echo "[endor-vscode] WARNING: a package manager was still unpacking VS Code after ${SETTLE_TIMEOUT}s; patching what is there" >&2
       return 1
     fi
+    [[ "$waited" == "1" ]] || echo "[endor-vscode] waiting for the package manager to finish unpacking VS Code"
     waited=1
     sleep 1
   done
