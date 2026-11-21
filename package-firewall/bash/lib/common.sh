@@ -2,10 +2,11 @@
 # Shared runtime functions inlined into every generated MDM script by generate.sh.
 # Do NOT source this file directly — it is embedded at generation time.
 #
+# lib/attribution.sh, which generate.sh inlines before this file, has find_console_user and the
+# user attribution functions.
+#
 # Functions:
-#   find_console_user                          — finds the logged-in user when running as root;
-#                                                prints nothing when no one is logged in
-#   detect_console_user                        — the same, but exits when no one is logged in
+#   detect_console_user                        — find_console_user, but exits when no one is logged in
 #   resolve_user_home       <user>             — resolves home via dscl / getent / POSIX
 #   upsert_block            <file> <content> <owner> <group>
 #                                              — non-destructive, idempotent sentinel-block writer
@@ -54,65 +55,11 @@ ENDOR_BLOCK_END="# ===== END ENDOR PACKAGE FIREWALL ====="
 ENDOR_XML_BLOCK_START="<!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->"
 ENDOR_XML_BLOCK_END="<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->"
 
-# ── User attribution helpers ──────────────────────────────────────────────────
-# Encode <console-user>@<machine> into the Basic-auth username. The firewall
-# decodes the label, auths with the real API key, and logs it as "User".
-
-# endor_b64 — portable base64, no line wrapping (GNU wraps at 76 cols; BSD doesn't).
-endor_b64() {
-  if base64 --help 2>&1 | grep -q -- '-w'; then
-    base64 -w0
-  else
-    base64 | tr -d '\n'
-  fi
-}
+# ── Credentials ───────────────────────────────────────────────────────────────
 
 # endor_urlenc_b64 <b64> — percent-encode base64 chars (+ / =) for URL userinfo.
 endor_urlenc_b64() {
   printf '%s' "$1" | sed -e 's/+/%2B/g' -e 's#/#%2F#g' -e 's/=/%3D/g'
-}
-
-# endor_host_label — a stable, human-readable machine name for attribution.
-endor_host_label() {
-  scutil --get ComputerName 2>/dev/null || hostname 2>/dev/null || echo unknown
-}
-
-# endor_attr_username <label> <api_key_id>
-# Returns base64(base64("userattr:"+label)+":"+keyId) — the format
-# decodeAttributedUsername() expects in endorfactory's auth layer.
-endor_attr_username() {
-  local label="$1" key_id="$2" inner
-  inner=$(printf '%s' "userattr:${label}" | endor_b64)
-  printf '%s:%s' "$inner" "$key_id" | endor_b64
-}
-
-# find_console_user
-# MDM tools (Kandji, Jamf) run scripts as root. $HOME resolves to /var/root, which
-# is not where developer config files live. Prints the name of the actual logged-in
-# console user so config is written to the correct home directory, or nothing when no
-# one is logged in: the console belongs to root at the login window, and to
-# _mbsetupuser during Setup Assistant.
-find_console_user() {
-  local user=""
-
-  if command -v logname &>/dev/null; then
-    user=$(logname 2>/dev/null || true)
-  fi
-
-  if [[ -z "$user" || "$user" == "root" ]] && [[ -e /dev/console ]]; then
-    # GNU stat's -f reports on the file system instead, and doesn't take a format.
-    if stat -c %U / >/dev/null 2>&1; then
-      user=$(stat -c %U /dev/console 2>/dev/null || true)
-    else
-      user=$(stat -f '%Su' /dev/console 2>/dev/null || true)
-    fi
-  fi
-
-  case "$user" in
-    root|loginwindow|_mbsetupuser) user="" ;;
-  esac
-
-  echo "$user"
 }
 
 # detect_console_user

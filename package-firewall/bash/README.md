@@ -10,6 +10,7 @@ Generates self-contained shell scripts for IT admins to push via MDM (Kandji, Ja
 bash/
 ├── generate.sh
 ├── lib/
+│   ├── attribution.sh       ← the user attribution label, and the console user
 │   └── common.sh
 ├── templates/
 │   ├── envsh.sh             ← orchestration: writes env.sh, sources from shell profiles
