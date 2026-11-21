@@ -10,6 +10,7 @@ Generates self-contained PowerShell scripts for IT admins to push via MDM (Intun
 powershell/
 ├── generate.ps1
 ├── lib/
+│   ├── attribution.ps1      ← the user attribution label, and the console user
 │   └── common.ps1
 ├── templates/
 │   ├── script-header.ps1    ← generated script preamble (user detection, arg parsing)

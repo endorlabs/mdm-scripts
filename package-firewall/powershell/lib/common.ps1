@@ -2,8 +2,11 @@
 # Shared runtime functions inlined into every generated MDM script by generate.ps1.
 # Do NOT source this file directly — it is embedded at generation time.
 #
+# lib/attribution.ps1, which generate.ps1 inlines before this file, has Find-ConsoleUser and the
+# user attribution functions.
+#
 # Functions:
-#   Get-ConsoleUser                              — finds the logged-in user when running as SYSTEM
+#   Get-ConsoleUser                              — Find-ConsoleUser, but exits when no one is logged in
 #   Set-UserEnvVar        <name> <value> <sid>   — writes persistent HKCU env var via user SID
 #   Remove-UserEnvVar     <name> <sid>           — removes HKCU env var
 #   Send-EnvironmentChangeBroadcast              — WM_SETTINGCHANGE so new apps see HKCU env changes
@@ -51,29 +54,12 @@ $ENDOR_BLOCK_END   = '# ===== END ENDOR PACKAGE FIREWALL ====='
 $ENDOR_XML_BLOCK_START = '<!-- ===== BEGIN ENDOR PACKAGE FIREWALL (managed — do not edit) ===== -->'
 $ENDOR_XML_BLOCK_END   = '<!-- ===== END ENDOR PACKAGE FIREWALL ===== -->'
 
-# ── User attribution helpers ──────────────────────────────────────────────────
-# Encode <console-user>@<machine> into the Basic-auth username. The firewall
-# decodes the label, auths with the real API key, and logs it as "User".
-# Unverified telemetry only — never an authz signal.
-
-# Get-EndorAttrUsername <label> <apiKeyId>
-# Returns base64(base64("userattr:"+label)+":"+keyId) — the format
-# decodeAttributedUsername() expects in endorfactory's auth layer.
-function Get-EndorAttrUsername {
-    param([string]$Label, [string]$ApiKeyId)
-    $inner = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("userattr:$Label"))
-    [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("${inner}:${ApiKeyId}"))
-}
+# ── Credentials ───────────────────────────────────────────────────────────────
 
 # Get-EndorUrlEncB64 <b64> — percent-encode base64 chars (+ / =) for URL userinfo.
 function Get-EndorUrlEncB64 {
     param([string]$B64)
     $B64.Replace('+', '%2B').Replace('/', '%2F').Replace('=', '%3D')
-}
-
-# Get-EndorHostLabel — a stable, human-readable machine name for attribution.
-function Get-EndorHostLabel {
-    if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { [System.Net.Dns]::GetHostName() }
 }
 
 # Write-EndorFile <path> <lines>
@@ -86,76 +72,15 @@ function Write-EndorFile {
 }
 
 # Get-ConsoleUser
-# Intune scripts run as SYSTEM by default. Detects the logged-in interactive user
-# via explorer.exe and resolves their profile path + SID for registry writes.
-# Falls back gracefully when running directly as the logged-in user.
+# Find-ConsoleUser, for scripts that write to the user's profile: exits when no one is logged in.
 function Get-ConsoleUser {
-    $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-
-    if (-not $currentIdentity.IsSystem) {
-        # Running as the user directly (e.g. testing locally)
-        $parts   = $currentIdentity.Name -split '\\'
-        $domain  = if ($parts.Count -gt 1) { $parts[0] } else { $env:COMPUTERNAME }
-        $username = $parts[-1]
-        return [PSCustomObject]@{
-            Username    = $username
-            Domain      = $domain
-            SID         = $currentIdentity.User.Value
-            ProfilePath = $env:USERPROFILE
-            AppDataPath = $env:APPDATA
-        }
-    }
-
-    # Running as SYSTEM — detect via explorer.exe owned by the interactive user. Windows setup
-    # (OOBE, Autopilot) runs Explorer as defaultuser0, which isn't one.
-    $procs = @(Get-CimInstance Win32_Process -Filter "name='explorer.exe'" -ErrorAction SilentlyContinue)
-
-    if (-not $procs) {
-        Write-Error '[endor] ERROR: could not detect console user (no explorer.exe). Ensure a user is logged in.'
+    $problem = ''
+    $user = Find-ConsoleUser -Problem ([ref]$problem)
+    if (-not $user) {
+        Write-Error "[endor] ERROR: $problem"
         exit 1
     }
-
-    $owner = $null
-    foreach ($proc in $procs) {
-        $candidate = Invoke-CimMethod -InputObject $proc -MethodName 'GetOwner'
-        if ($candidate.User -and $candidate.User -notmatch '^defaultuser\d+$') {
-            $owner = $candidate
-            break
-        }
-    }
-    if (-not $owner) {
-        Write-Error '[endor] ERROR: could not determine a user who owns explorer.exe (only Windows setup is signed in, or none). Ensure a user is logged in.'
-        exit 1
-    }
-
-    $username = $owner.User
-    $domain   = $owner.Domain
-
-    # Resolve SID — try domain\user first, fall back to plain username
-    $sid = $null
-    foreach ($candidate in @("$domain\$username", $username)) {
-        try {
-            $ntAccount = New-Object System.Security.Principal.NTAccount($candidate)
-            $sid = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier]).Value
-            break
-        } catch { }
-    }
-    if (-not $sid) {
-        Write-Error "[endor] ERROR: could not resolve SID for user '$domain\$username'."
-        exit 1
-    }
-
-    $regKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
-    $profilePath = (Get-ItemProperty $regKey -ErrorAction Stop).ProfileImagePath
-    $appDataPath = Join-Path $profilePath 'AppData\Roaming'
-
-    [PSCustomObject]@{
-        Username    = $username
-        Domain      = $domain
-        SID         = $sid
-        ProfilePath = $profilePath
-        AppDataPath = $appDataPath
-    }
+    $user
 }
 
 # Set-UserEnvVar <name> <value> <usersid>
