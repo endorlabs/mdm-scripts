@@ -13,6 +13,8 @@ $DefaultExtensionUrlTemplate = 'https://www.vscode-unpkg.net/_gallery/{publisher
 $TempDir = Join-Path ([IO.Path]::GetTempPath()) "endor-vscode-tests-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $TempDir | Out-Null
 
+. (Join-Path $TestDir 'attribution.ps1')
+
 $SavedEnvironment = @{
     ProgramData = $env:ProgramData
     ProgramFiles = $env:ProgramFiles
@@ -32,6 +34,7 @@ function Invoke-Generate {
     $global:LASTEXITCODE = 0
     & $Generator *> $null
     if ($LASTEXITCODE) { throw "generator failed with exit code $LASTEXITCODE" }
+    Set-FakeConsoleUser
 }
 
 # True when the generator refuses these flags.
@@ -130,6 +133,24 @@ function Wait-Until {
         Start-Sleep -Milliseconds 100
     }
     [bool](& $Condition)
+}
+
+# Invoke-Worker <product> <state>: one pass of the installed worker, as its task runs it.
+function Invoke-Worker {
+    param([string]$Product, [string]$State)
+    $env:ENDOR_VSCODE_PRODUCT_JSON = $Product
+    $env:ENDOR_VSCODE_STATE_DIR = $State
+    $global:LASTEXITCODE = 0
+    & (Join-Path $State 'worker.ps1') -Mode Once *> $null
+    if ($LASTEXITCODE) { throw "the worker failed with exit code $LASTEXITCODE" }
+}
+
+# What a run can change: product.json, the worker and the label it keeps.
+function Get-StateHash {
+    param([string]$Product, [string]$State)
+    (@($Product, (Join-Path $State 'worker.ps1'), (Join-Path $State 'attr-label')) | ForEach-Object {
+        if (Test-Path -LiteralPath $_) { (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash } else { '<none>' }
+    }) -join ' '
 }
 
 function Assert-FilesEqual {
@@ -477,13 +498,181 @@ try {
     Invoke-Generate
     $global:LASTEXITCODE = 0
 
+    Write-Host 'test: every script that attributes, VS Code''s worker included, carries the same Get-EndorAttrLabel'
+    $want = [regex]::Match(((Get-Content -Raw (Join-Path $RootDir 'package-firewall\powershell\lib\attribution.ps1')) -replace '\r\n', "`n"),
+        '(?ms)^function Get-EndorAttrLabel \{.*?^\}').Value
+    if (-not $want) { throw 'lib/attribution.ps1 has no Get-EndorAttrLabel' }
+    foreach ($file in Get-ChildItem (Join-Path $RootDir "package-firewall\powershell\out\$Namespace") -Filter 'endor-*.ps1') {
+        if ($file.Name -like 'endor-vscode-disable-*') { continue }
+        $text = (Get-Content -Raw $file.FullName) -replace '\r\n', "`n"
+        # The script, and its worker.
+        $copies = if ($file.Name -in 'endor-vscode.ps1', 'endor-all.ps1') { 2 } else { 1 }
+        $found = [regex]::Matches($text, '(?ms)^function Get-EndorAttrLabel \{.*?^\}')
+        if ($found.Count -ne $copies -or @($found | Where-Object { $_.Value -cne $want }).Count) {
+            throw "$($file.Name) doesn't carry lib/attribution.ps1's Get-EndorAttrLabel $copies time(s)"
+        }
+        if ($file.Name -notin 'endor-vscode.ps1', 'endor-remove.ps1' -and
+                $text -cnotmatch '(?m)^\$ENDOR_ATTR_LABEL +?= Get-EndorAttrLabel \$ConsoleUser$') {
+            throw "$($file.Name) doesn't take its label from Get-EndorAttrLabel"
+        }
+    }
+
+    Write-Host 'test: before anyone logs in, the URL is unattributed; a user who logs in later gets it at the worker''s next pass'
+    $product = Join-Path $TempDir 'attribution-product.json'
+    $state = Join-Path $TempDir 'attribution-state'
+    Copy-Item $Fixture $product
+    $output = Invoke-InstallerOutput $product $state
+    if ($LASTEXITCODE -or -not $output.Contains('no one is logged in, so VS Code''s gallery URL keeps the user attribution it last had, if any.')) {
+        throw "no one logged in was not reported`n$output"
+    }
+    Assert-Patched $product
+    $worker = (Get-FileHash -LiteralPath (Join-Path $state 'worker.ps1') -Algorithm SHA256).Hash
+    Set-ConsoleUser 'alice'
+    Invoke-Worker $product $state
+    $alice = Get-AttributedUrl "alice@$HostLabel"
+    Assert-Patched $product $alice
+    if ((Get-FileHash -LiteralPath (Join-Path $state 'worker.ps1') -Algorithm SHA256).Hash -ne $worker) { throw 'the worker changed' }
+    if ([IO.File]::ReadAllText((Join-Path $state 'attr-label')) -cne "alice@$HostLabel") { throw 'the worker did not keep alice''s label' }
+    $output = Invoke-InstallerOutput $product $state
+    if ($LASTEXITCODE -or -not $output.Contains("VS Code user attribution -> alice@$HostLabel")) {
+        throw "the label was not reported`n$output"
+    }
+
+    Write-Host 'test: with no one logged in, the label stays; the same label changes nothing; another user''s replaces it'
+    $before = Get-StateHash $product $state
+    Set-ConsoleUser
+    Invoke-Worker $product $state
+    Invoke-Installer $product $state
+    if ((Get-StateHash $product $state) -ne $before) { throw 'a run with no one logged in changed something' }
+    # The dry run's copy of the worker takes the kept label from the real state, not from its own folder.
+    $global:LASTEXITCODE = 0
+    $env:ENDOR_VSCODE_PRODUCT_JSON = $product
+    $env:ENDOR_VSCODE_STATE_DIR = $state
+    $output = & (Join-Path $RootDir "package-firewall\powershell\out\$Namespace\endor-vscode.ps1") -DryRun *>&1 | Out-String -Width 4096
+    if ($LASTEXITCODE -or $output.Contains('action : PATCH')) { throw "the dry run didn't use the kept label`n$output" }
+    Set-ConsoleUser 'alice'
+    Invoke-Worker $product $state
+    Invoke-Installer $product $state
+    if ((Get-StateHash $product $state) -ne $before) { throw 'the same label changed something' }
+    # Not ASCII, written as a code point so Windows PowerShell 5.1 reads this file the same way.
+    $bob = "b$([char]0x00F8)b"
+    Set-ConsoleUser $bob
+    Invoke-Worker $product $state
+    Assert-Patched $product (Get-AttributedUrl "$bob@$HostLabel")
+    Set-ConsoleUser
+
+    Write-Host 'test: a deployment''s own Get-EndorAttrLabel, and what it calls, reaches every script and VS Code''s worker'
+    # Changed in lib/attribution.ps1 before generating. As one that looks the machine up would, it
+    # needs no one logged in.
+    $custom = Join-Path $TempDir 'custom\package-firewall'
+    New-Item -ItemType Directory -Path (Join-Path $custom 'powershell') -Force | Out-Null
+    Copy-Item (Join-Path $RootDir 'package-firewall\shared') $custom -Recurse
+    foreach ($part in 'lib', 'templates', 'generate.ps1') {
+        Copy-Item (Join-Path $RootDir "package-firewall\powershell\$part") (Join-Path $custom 'powershell') -Recurse
+    }
+    [IO.File]::AppendAllText((Join-Path $custom 'powershell\lib\attribution.ps1'), @'
+
+function Get-LookupUser { 'carol' }
+function Get-EndorAttrLabel { param([string]$User) "$(Get-LookupUser)@lookup" }
+'@ + "`n", [Text.UTF8Encoding]::new($false))
+    $savedGenerator = $Generator
+    $Generator = Join-Path $custom 'powershell\generate.ps1'
+    Invoke-Generate
+    $customOut = Join-Path $custom "powershell\out\$Namespace"
+    if ((Get-Content -Raw (Join-Path $customOut 'endor-js.ps1')) -notmatch '(?m)^function Get-LookupUser ') {
+        throw 'endor-js.ps1 does not carry the deployment''s lookup'
+    }
+    $product = Join-Path $TempDir 'attribution-custom-product.json'
+    $state = Join-Path $TempDir 'attribution-custom-state'
+    Copy-Item $Fixture $product
+    $output = Invoke-InstallerOutput $product $state (Join-Path $customOut 'endor-vscode.ps1')
+    if ($LASTEXITCODE -or -not $output.Contains('VS Code user attribution -> carol@lookup')) {
+        throw "the deployment's label was not reported`n$output"
+    }
+    $carol = Get-AttributedUrl 'carol@lookup'
+    Assert-Patched $product $carol
+    # The worker calls its own copy: without it, and without a kept label, it would patch the URL unattributed.
+    Remove-Item -LiteralPath (Join-Path $state 'attr-label')
+    Copy-Item $Fixture $product -Force
+    Invoke-Worker $product $state
+    Assert-Patched $product $carol
+    $Generator = $savedGenerator
+    Invoke-Generate
+
+    Write-Host 'test: a label that isn''t one, or a kept one that isn''t, leaves the URL unattributed'
+    $product = Join-Path $TempDir 'attribution-broken-product.json'
+    $state = Join-Path $TempDir 'attribution-broken-state'
+    $kept = Join-Path $state 'attr-label'
+    Copy-Item $Fixture $product
+    Invoke-Installer $product $state
+    foreach ($broken in '', "alice$([char]27)[2J@example.com") {
+        [IO.File]::WriteAllText($kept, $broken, [Text.UTF8Encoding]::new($false))
+        Invoke-Worker $product $state
+        Assert-Patched $product
+    }
+    Remove-Item -LiteralPath $kept
+    New-Item -ItemType Directory -Path $kept | Out-Null
+    Invoke-Worker $product $state
+    Assert-Patched $product
+    Remove-Item -LiteralPath $kept
+    Set-ConsoleUser "al$([char]27)[2Jice"
+    Invoke-Worker $product $state
+    Assert-Patched $product
+    if (Test-Path -LiteralPath $kept) { throw 'a label with control characters was kept' }
+    # Someone logged in whose label fails doesn't get another user's kept label.
+    [IO.File]::WriteAllText($kept, 'bob@example.com', [Text.UTF8Encoding]::new($false))
+    Invoke-Worker $product $state
+    Assert-Patched $product
+    Set-ConsoleUser
+
+    Write-Host 'test: a dry run prints no credential and writes nothing'
+    Set-ConsoleUser 'alice'
+    $product = Join-Path $TempDir 'attribution-dry-product.json'
+    $state = Join-Path $TempDir 'attribution-dry-state'
+    Copy-Item $Fixture $product
+    $global:LASTEXITCODE = 0
+    $env:ENDOR_VSCODE_PRODUCT_JSON = $product
+    $env:ENDOR_VSCODE_STATE_DIR = $state
+    $output = & (Join-Path $RootDir "package-firewall\powershell\out\$Namespace\endor-vscode.ps1") -DryRun *>&1 | Out-String -Width 4096
+    if ($LASTEXITCODE -or -not $output.Contains('/_ak/<redacted>')) { throw "the dry run did not redact the URL`n$output" }
+    if (-not $output.Contains("VS Code user attribution -> alice@$HostLabel")) { throw "the dry run did not report the label`n$output" }
+    foreach ($url in $ExpectedUrl, $alice) {
+        if ($output.Contains($url.Substring($url.LastIndexOf('/_ak/') + 5))) { throw "a dry run printed a token`n$output" }
+    }
+    if (Test-Path -LiteralPath $state) { throw 'a dry run created managed state' }
+    Set-ConsoleUser
+
+    Write-Host 'test: the watcher gives the URL to a user who logs in while it runs'
+    $product = Join-Path $TempDir 'attribution-watch-product.json'
+    $state = Join-Path $TempDir 'attribution-watch-state'
+    Copy-Item $Fixture $product
+    Invoke-Installer $product $state
+    $env:ENDOR_VSCODE_RESCAN_SECONDS = '1'
+    $watcherProcess = Start-Process -FilePath (Get-Process -Id $PID).Path -PassThru -NoNewWindow `
+        -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            ('"{0}"' -f (Join-Path $state 'worker.ps1')), '-Mode', 'Watch' `
+        -RedirectStandardOutput (Join-Path $TempDir 'attribution-watch.out') `
+        -RedirectStandardError (Join-Path $TempDir 'attribution-watch.err')
+    Start-Sleep -Seconds 2
+    Set-ConsoleUser 'alice'
+    $taken = {
+        try { (Get-Content -LiteralPath $product -Raw | ConvertFrom-Json).extensionsGallery.serviceUrl -ceq $alice } catch { $false }
+    }
+    if (-not (Wait-Until $taken 10)) {
+        throw "the watcher did not take the label within 10s: $(Get-Content -Raw (Join-Path $TempDir 'attribution-watch.err'))"
+    }
+    Stop-Process -Id $watcherProcess.Id -Force
+    $watcherProcess.WaitForExit()
+    Remove-Item Env:\ENDOR_VSCODE_RESCAN_SECONDS
+    Set-ConsoleUser
+
     Write-Host 'VS Code PowerShell tests passed'
 } finally {
     if ($watcherProcess -and -not $watcherProcess.HasExited) {
         Stop-Process -Id $watcherProcess.Id -Force -ErrorAction SilentlyContinue
         $watcherProcess.WaitForExit()
     }
-    Remove-Item Env:\ENDOR_VSCODE_RESCAN_SECONDS -ErrorAction SilentlyContinue
+    Remove-Item Env:\ENDOR_VSCODE_RESCAN_SECONDS, Env:\ENDOR_TEST_CONSOLE_FILE -ErrorAction SilentlyContinue
     $env:ProgramData = $SavedEnvironment.ProgramData
     $env:ProgramFiles = $SavedEnvironment.ProgramFiles
     $env:ProgramW6432 = $SavedEnvironment.ProgramW6432

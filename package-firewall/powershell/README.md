@@ -10,7 +10,7 @@ Generates self-contained PowerShell scripts for IT admins to push via MDM (Intun
 powershell/
 ├── generate.ps1
 ├── lib/
-│   ├── attribution.ps1      ← the user attribution label, and the console user
+│   ├── attribution.ps1      ← the user attribution label; VS Code's worker carries it too
 │   └── common.ps1
 ├── templates/
 │   ├── script-header.ps1    ← generated script preamble (user detection, arg parsing)
@@ -288,6 +288,37 @@ needs SYSTEM or an elevated administrator; otherwise the script warns and skips
 VS Code. In Intune, set **Run script in 64-bit PowerShell host** to **Yes** if
 you can; the script also works from the default 32-bit host.
 
+#### User attribution
+
+The credential carries the same label as the user's other ecosystems, so the
+firewall's logs and notifications show who installed an extension. Every
+generated script takes the label from one function in `lib/attribution.ps1`,
+`Get-EndorAttrLabel`: `<user>@<machine>` for the logged-in user. `product.json`
+and the policy are machine-wide, so they carry one label per machine, User
+Installer copies in other profiles included:
+
+- The scheduled task calls `Get-EndorAttrLabel` once a minute, so
+  `product.json` takes the label within a minute of the user logging in. At
+  enrollment, before anyone has, the URL carries none.
+- With no one logged in, the task keeps the label it had last, in `attr-label`
+  beside its state, so logging out changes nothing. Attribution assumes one user
+  per machine: with several users signed in at once, VS Code carries the one
+  whose session Windows lists first.
+- The policy takes the label at `endor-vscode.ps1`'s runs, and keeps it beside
+  its record. With the policy, run `endor-vscode.ps1` on a schedule, for example
+  as an Intune remediation.
+- To label users another way, by email or by looking the machine up, change
+  only `Get-EndorAttrLabel` in `lib/attribution.ps1` before generating. Every
+  script carries that file, and the worker that `endor-vscode.ps1` installs
+  carries it alone, so anything the function calls must be in that file too.
+  A label that needs no logged-in user attributes VS Code from enrollment on.
+  No line of the file can start with `'@`, because the worker carries it inside
+  a here-string.
+- A policy you deliver yourself (Group Policy, ADMX or the Intune Settings
+  Catalog) carries no label.
+- Each method's kept label goes with its state when the method is turned off or
+  removed.
+
 #### The patch
 
 Patches Microsoft VS Code Stable's installation-level `product.json`. It sets
@@ -297,8 +328,10 @@ Patches Microsoft VS Code Stable's installation-level `product.json`. It sets
 https://factory.endorlabs.com/v1/namespaces/<namespace>/firewall/vscode/_ak/<base64url-token>
 ```
 
-The token is the unpadded Base64 URL encoding of
-`ENDOR_API_KEY_ID:ENDOR_API_SECRET`. The structural JSON edit preserves
+The token is the unpadded Base64 URL encoding of `<username>:ENDOR_API_SECRET`,
+where the username is the attributed username the package-manager scripts use,
+or `ENDOR_API_KEY_ID` until someone has logged in (see
+[User attribution](#user-attribution)). The structural JSON edit preserves
 unrelated product and gallery fields and removes
 `extensionsGallery.extensionUrlTemplate` entirely to disable VS Code's direct
 upstream fallback.
@@ -316,7 +349,8 @@ The script:
   every minute, as a backstop. It logs what it changes to
   `%ProgramData%\Endor Labs\vscode-firewall\worker.log` (rotated at 1 MiB).
 - Modifies only `serviceUrl` and `extensionUrlTemplate`, preserving all other
-  current `product.json` values during updates and credential rotation. VS
+  current `product.json` values during updates, credential rotation and a new
+  user attribution. VS
   Code reads some of them, such as `target` and `win32VersionedUpdate`, to
   decide how to update itself.
 
@@ -497,8 +531,8 @@ To remove only one VS Code method, deploy `endor-vscode-disable-patch.ps1` or
 | `.bundle\config` | Mirror keys only — no credentials baked in (the credential is the `BUNDLE_<HOST>` registry var). ACL-restricted to owner. |
 | `.gemrc` | Contains credentials in the source URL (gem cannot use env var references). ACL-restricted to owner; `gem sources`, `gem env` and `gem install -V` print it. |
 | VS Code `product.json` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users because VS Code must consume it. |
-| `%ProgramData%\Endor Labs\vscode-firewall` | ACL-restricted to SYSTEM and Administrators; contains the remediation worker. |
+| `%ProgramData%\Endor Labs\vscode-firewall` | ACL-restricted to SYSTEM and Administrators; contains the remediation worker, and the label it carried last (`attr-label`). |
 | `HKLM\SOFTWARE\Policies\Microsoft\VSCode` | Contains the authenticated `_ak/<token>` gallery URL and is readable by local users, like every policy key. |
-| `%ProgramData%\Endor Labs\vscode-policy` | ACL-restricted to SYSTEM and Administrators. Records whether the script created the policy key and which sign-in provider it wrote; never the URL. |
+| `%ProgramData%\Endor Labs\vscode-policy` | ACL-restricted to SYSTEM and Administrators. Records whether the script created the policy key and which sign-in provider it wrote, and the label the policy carried last; never the URL. |
 | API secret in MDM | Generated scripts contain the API key and secret in plaintext (used to write registry env vars). Restrict access to the Intune policy and the generated `out/` directory. |
 | `out/` directory | Add to `.gitignore`. Do not commit generated scripts to source control. |
