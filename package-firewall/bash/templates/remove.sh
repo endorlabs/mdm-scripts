@@ -381,18 +381,51 @@ def save_record(state, record):
     write(os.path.join(state, "record.json"), record, 0o600)
 
 
+def keep_label(state, label):
+    """Keeps the user attribution the policy carries beside the record, for runs with no one logged in."""
+    path = os.path.join(state, "attr-label")
+    try:
+        try:
+            with open(path, encoding="utf-8", errors="surrogateescape") as handle:
+                if handle.read() == label + "\n":
+                    return
+        except OSError:
+            pass
+        os.makedirs(state, mode=0o700, exist_ok=True)
+        fd, temp = tempfile.mkstemp(prefix=".attr-label.endor.", dir=state)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as handle:
+                handle.write(label + "\n")
+            os.replace(temp, path)
+        except BaseException:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+            raise
+    except (OSError, ValueError) as error:
+        warn("could not keep the user attribution in " + path + ": " + str(error))
+
+
 def forget(state):
     try:
-        os.unlink(os.path.join(state, "record.json"))
+        names = os.listdir(state)
     except OSError:
-        pass
+        names = []
+    for name in names:
+        # Leftovers of an interrupted write, too.
+        if name in ("record.json", "attr-label") or name.startswith((".record.json.endor.", ".attr-label.endor.")):
+            try:
+                os.unlink(os.path.join(state, name))
+            except OSError:
+                pass
     try:
         os.rmdir(state)
     except OSError:
         pass
 
 
-def apply(path, state, url, auth, dry_run, strict):
+def apply(path, state, url, label, auth, dry_run, strict):
     folder = os.path.dirname(path)
     if not (safe(folder, strict) and safe(path, strict)):
         return 1
@@ -428,6 +461,8 @@ def apply(path, state, url, auth, dry_run, strict):
     if policy == current:
         if not dry_run and new_record != record:
             save_record(state, new_record)
+        if not dry_run and label:
+            keep_label(state, label)
         say("policy already set: " + path)
         return status
     if dry_run:
@@ -439,6 +474,8 @@ def apply(path, state, url, auth, dry_run, strict):
         os.makedirs(folder)
         os.chmod(folder, 0o755)
     write(path, policy, 0o644)
+    if label:
+        keep_label(state, label)
     say("policy set: " + path)
     return status
 
@@ -499,7 +536,8 @@ def main(argv):
     try:
         if argv[1] == "apply":
             path, state, auth, dry_run, strict = argv[2:7]
-            return apply(path, state, os.environ["ENDOR_VSCODE_POLICY_URL"], auth, dry_run == "1", strict == "1")
+            return apply(path, state, os.environ["ENDOR_VSCODE_POLICY_URL"], os.environ.get("ENDOR_VSCODE_POLICY_LABEL", ""),
+                         auth, dry_run == "1", strict == "1")
         if argv[1] == "remove":
             path, state, dry_run, strict = argv[2:6]
             return remove(path, state, dry_run == "1", strict == "1")

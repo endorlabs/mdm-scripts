@@ -19,6 +19,7 @@ $Out = Join-Path $RootDir "package-firewall\powershell\out\$Namespace"
 $TempDir = Join-Path ([IO.Path]::GetTempPath()) "endor-vscode-policy-tests-$([Guid]::NewGuid().ToString('N'))"
 $KeyRoot = "Software\Endor Labs Tests\vscode-policy-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $TempDir | Out-Null
+. (Join-Path $TestDir 'attribution.ps1')
 
 function Get-ServiceUrl {
     param([string]$ApiSecret)
@@ -38,6 +39,7 @@ function Invoke-Generate {
     $global:LASTEXITCODE = 0
     & $Generator *> $null
     if ($LASTEXITCODE) { throw "generator failed with exit code $LASTEXITCODE" }
+    Set-FakeConsoleUser
 }
 
 # Each case gets a VS Code install, product.json state, policy key and record of its own.
@@ -58,7 +60,9 @@ function New-Case {
     $env:ENDOR_VSCODE_POLICY_KEY = $Case.Key
     $env:ENDOR_VSCODE_POLICY_STATE_DIR = $Case.Record
     $env:ENDOR_VSCODE_SKIP_WATCHER = '1'
+    Set-ConsoleUser
 }
+
 
 # Runs a script and returns its output; the exit code is in $script:Rc.
 function Invoke-Script {
@@ -278,13 +282,39 @@ try {
     if ((Get-PolicyValue 'ExtensionGalleryServiceUrl') -cne $ExpectedUrl) { throw 'disable-patch touched the policy' }
     Invoke-Generate
 
+    Write-Host 'test: the policy takes the logged-in user''s label at the installer''s runs, and keeps it with no one logged in'
+    New-Case 'attribution'
+    $output = Invoke-Install
+    Assert-Rc 0 $output
+    Assert-Output $output 'no one is logged in, so VS Code''s gallery URL keeps the user attribution it last had, if any.'
+    if ((Get-PolicyValue 'ExtensionGalleryServiceUrl') -cne $ExpectedUrl) { throw 'the policy is attributed with no one logged in' }
+    Set-ConsoleUser 'alice'
+    $output = Invoke-Install
+    Assert-Rc 0 $output
+    Assert-Output $output "VS Code user attribution -> alice@$HostLabel"
+    $alice = Get-AttributedUrl "alice@$HostLabel"
+    if ((Get-PolicyValue 'ExtensionGalleryServiceUrl') -cne $alice) { throw 'the policy does not have alice''s label' }
+    if ((Get-Content -Raw (Join-Path $Case.Record 'record.json')) -match '_ak/') { throw 'the record contains the URL' }
+    if ([IO.File]::ReadAllText((Join-Path $Case.Record 'attr-label')) -cne "alice@$HostLabel") { throw 'the policy did not keep alice''s label' }
+    Set-ConsoleUser
+    $output = Invoke-Install
+    Assert-Rc 0 $output
+    Assert-Output $output 'policy already set'
+    if ((Get-PolicyValue 'ExtensionGalleryServiceUrl') -cne $alice) { throw 'the policy lost alice''s label with no one logged in' }
+    $output = Invoke-Install -DryRun
+    Assert-Rc 0 $output
+    if ($output.Contains($alice.Substring($alice.LastIndexOf('/_ak/') + 5))) { throw "a dry run printed a token`n$output" }
+    $output = Invoke-Remove
+    Assert-Rc 0 $output
+    if (Test-Path -LiteralPath $Case.Record) { throw 'the VS Code section of endor-remove.ps1 left the policy''s kept label' }
+
     $global:LASTEXITCODE = 0
     Write-Host 'VS Code policy PowerShell tests passed'
 } finally {
     [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree('Software\Endor Labs Tests', $false)
     foreach ($name in 'ENDOR_VSCODE_PRODUCT_JSON', 'ENDOR_VSCODE_STATE_DIR', 'ENDOR_VSCODE_POLICY_KEY',
             'ENDOR_VSCODE_POLICY_STATE_DIR', 'ENDOR_VSCODE_SKIP_WATCHER', 'ENDOR_VSCODE_ENABLE_PATCH',
-            'ENDOR_VSCODE_ENABLE_POLICY', 'ENDOR_VSCODE_POLICY_AUTH') {
+            'ENDOR_VSCODE_ENABLE_POLICY', 'ENDOR_VSCODE_POLICY_AUTH', 'ENDOR_TEST_CONSOLE_FILE') {
         Remove-Item "Env:\$name" -ErrorAction SilentlyContinue
     }
     Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue

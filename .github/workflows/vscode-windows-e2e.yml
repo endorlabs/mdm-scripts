@@ -10,6 +10,8 @@ on:
       - package-firewall/powershell/generate.ps1
       - package-firewall/powershell/templates/vscode.ps1
       - package-firewall/powershell/templates/remove.ps1
+      - package-firewall/powershell/lib/attribution.ps1
+      - package-firewall/powershell/lib/common.ps1
       - package-firewall/tests/e2e-vscode-windows.ps1
       - .github/workflows/vscode-windows-e2e.yml
   push:
@@ -18,6 +20,8 @@ on:
       - package-firewall/powershell/generate.ps1
       - package-firewall/powershell/templates/vscode.ps1
       - package-firewall/powershell/templates/remove.ps1
+      - package-firewall/powershell/lib/attribution.ps1
+      - package-firewall/powershell/lib/common.ps1
       - package-firewall/tests/e2e-vscode-windows.ps1
       - .github/workflows/vscode-windows-e2e.yml
   schedule:
