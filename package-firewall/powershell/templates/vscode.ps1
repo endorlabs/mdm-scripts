@@ -554,11 +554,33 @@ if (-not $_vscodeSkip -and $_vscodeEnablePatch -eq '1') {
         }
         Write-Host '[dry-run]   action : INSTALL VS Code update remediation scheduled task'
     } else {
-        New-Item -ItemType Directory -Path $_vscodeStateRoot -Force | Out-Null
-        [IO.File]::WriteAllText($_vscodeWorkerPath, $_vscodeWorkerContent, [Text.UTF8Encoding]::new($false))
-        if ($_vscodeOnWindows) {
-            & icacls.exe $_vscodeStateRoot /inheritance:r /grant:r `
-                '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+        # A task that is running keeps the worker, URL included, it started with, and IgnoreNew would
+        # leave it running, so it stops before the worker is replaced. If replacing it fails, it starts
+        # again with the worker that is there.
+        $_vscodeStopped = $false
+        if ($_vscodeOnWindows -and $env:ENDOR_VSCODE_SKIP_WATCHER -ne '1' -and
+                (Get-ScheduledTask -TaskName $_vscodeTaskName -ErrorAction SilentlyContinue).State -eq 'Running') {
+            Stop-ScheduledTask -TaskName $_vscodeTaskName -ErrorAction SilentlyContinue
+            for ($_vscodeWait = 0; $_vscodeWait -lt 120; $_vscodeWait++) {
+                if ((Get-ScheduledTask -TaskName $_vscodeTaskName -ErrorAction SilentlyContinue).State -ne 'Running') { break }
+                Start-Sleep -Milliseconds 250
+            }
+            if ((Get-ScheduledTask -TaskName $_vscodeTaskName -ErrorAction SilentlyContinue).State -eq 'Running') {
+                Write-Warning "[endor] the '$_vscodeTaskName' task didn't stop within 30s, so it keeps its old worker until the next restart."
+                $EndorWarned = $true
+            }
+            $_vscodeStopped = $true
+        }
+        try {
+            New-Item -ItemType Directory -Path $_vscodeStateRoot -Force | Out-Null
+            [IO.File]::WriteAllText($_vscodeWorkerPath, $_vscodeWorkerContent, [Text.UTF8Encoding]::new($false))
+            if ($_vscodeOnWindows) {
+                & icacls.exe $_vscodeStateRoot /inheritance:r /grant:r `
+                    '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+            }
+        } catch {
+            if ($_vscodeStopped) { Start-ScheduledTask -TaskName $_vscodeTaskName -ErrorAction SilentlyContinue }
+            throw
         }
 
         # A worker failure is reported, not thrown, so the update remediation task is still installed.
@@ -591,6 +613,7 @@ if (-not $_vscodeSkip -and $_vscodeEnablePatch -eq '1') {
             } catch {
                 Write-Warning "[endor] could not install VS Code update remediation task: $_"
                 $EndorWarned = $true
+                if ($_vscodeStopped) { Start-ScheduledTask -TaskName $_vscodeTaskName -ErrorAction SilentlyContinue }
             }
         }
     }
@@ -714,7 +737,7 @@ if (-not $_vscodeSkip -and $_vscodeEnablePolicy -eq '1') {
 }
 
 if ($_vscodeDone) { Write-Host '[endor] [done] VS Code extension firewall' }
-Remove-Variable _vscodeWorkerContent, _vscodeStateRoot, _vscodeWorkerPath, _vscodeTaskName, _vscodeOnWindows,
+Remove-Variable _vscodeWorkerContent, _vscodeStopped, _vscodeWait, _vscodeStateRoot, _vscodeWorkerPath, _vscodeTaskName, _vscodeOnWindows,
     _vscodeServiceUrl, _vscodeEnablePatch, _vscodeEnablePolicy, _vscodePolicyAuth, _vscodeLegacy,
     _vscodePolicyHive, _vscodePolicyKey, _vscodePolicyName, _vscodePolicyState, _vscodeDone, _vscodeSkip,
     _vscodeInstalls, _vscodeTempWorker, _vscodeLeft, _vscodeRecordPath, _vscodeRecord, _vscodeOurs,
