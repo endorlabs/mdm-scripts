@@ -186,7 +186,8 @@ if ($VSCODE_POLICY_AUTH -and $VSCODE_ENABLE_POLICY -ne '1') {
 # -- Compute derived values ----------------------------------------------------
 # Package-manager attribution credentials are computed at install time because
 # <console-user>@<machine> exists only on the endpoint. Machine-independent
-# values, including the VS Code path token, are derived here.
+# values, including the VS Code path token, are derived here. The token is
+# unattributed: templates/vscode.ps1 puts the label into it on the endpoint.
 $FQDN_HOST        = $FQDN -replace '^https://', ''
 $TRUSTED_HOST     = $FQDN_HOST -replace ':.*', ''
 
@@ -208,9 +209,17 @@ $OutDir = Join-Path $ScriptDir "out\$ENDOR_NAMESPACE"
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 
 # -- Template substitution -----------------------------------------------------
-# Every script inlines lib/attribution.ps1, then lib/common.ps1.
-$LibCommonText = (Get-Content (Join-Path $LibDir 'attribution.ps1') -Raw -Encoding UTF8).TrimEnd() + "`n`n" +
-    (Get-Content (Join-Path $LibDir 'common.ps1') -Raw -Encoding UTF8)
+# Every script inlines lib/attribution.ps1, then lib/common.ps1. templates/vscode.ps1's worker
+# carries lib/attribution.ps1 alone, at its "# {{LIB_ATTRIBUTION}}" line, so it labels users as
+# every script does. The worker is a single-quoted here-string, so that file can't hold a line that
+# would end it.
+$LibAttributionText = Get-Content (Join-Path $LibDir 'attribution.ps1') -Raw -Encoding UTF8
+if ($LibAttributionText -match "(?m)^'@") {
+    Write-Error "lib/attribution.ps1 has a line that starts with '@, which would end endor-vscode.ps1's worker early"
+    exit 1
+}
+$LibCommonText = $LibAttributionText.TrimEnd() + "`n`n" + (Get-Content (Join-Path $LibDir 'common.ps1') -Raw -Encoding UTF8)
+$LibAttributionEmbedded = "# -- User attribution (inlined from lib/attribution.ps1) --`n" + $LibAttributionText.TrimEnd() + "`n# --"
 
 # Uses String.Replace() (literal, not regex) to avoid issues with $ in values.
 function Invoke-Substitute {
@@ -237,6 +246,8 @@ function Invoke-Substitute {
     $r = $r.Replace('{{VSCODE_ENABLE_POLICY}}', $VSCODE_ENABLE_POLICY)
     $r = $r.Replace('{{VSCODE_POLICY_AUTH}}',   $VSCODE_POLICY_AUTH)
     $r = $r.Replace('{{VSCODE_REMOVE_SCOPE}}',  'all')
+    # The whole line only, and literally: the file is code, full of $.
+    $r = [regex]::Replace($r, '(?m)^# \{\{LIB_ATTRIBUTION\}\}(?=\r?$)', { param($m) $LibAttributionEmbedded })
     $r
 }
 
@@ -286,10 +297,17 @@ function Get-ScriptHeader {
     $r
 }
 
-# Get-SystemScriptHeader <scriptname> <description>
-# Machine-level integrations must run even when no interactive user is logged in.
+# Get-SystemScriptHeader <scriptname> <description> [-WithCommon]
+# Machine-level integrations must run even when no interactive user is logged in. With
+# -WithCommon, it inlines lib/attribution.ps1 and lib/common.ps1 too: endor-vscode.ps1 attributes
+# VS Code's gallery URL with their functions.
 function Get-SystemScriptHeader {
-    param([string]$ScriptName, [string]$Description)
+    param([string]$ScriptName, [string]$Description, [switch]$WithCommon)
+    $common = ''
+    if ($WithCommon) {
+        $common = "`n# -- Common functions (inlined from lib/attribution.ps1 and lib/common.ps1) --`n" +
+            $LibCommonText.TrimEnd() + "`n# --`n"
+    }
     @"
 #!/usr/bin/env pwsh
 # MDM-deployable: $Description
@@ -305,7 +323,7 @@ param([switch]`$DryRun)
 
 `$ErrorActionPreference = 'Stop'
 `$EndorWarned = `$false
-
+$common
 if (`$DryRun) {
     Write-Host '[endor] DRY RUN -- no files, services, or scheduled tasks will be modified.'
 }
@@ -344,7 +362,7 @@ function Build-SystemScript {
     param([string]$Template, [string]$OutputPath, [string]$Description)
     $name  = Split-Path $OutputPath -Leaf
     $parts = @(
-        (Get-SystemScriptHeader -ScriptName $name -Description $Description),
+        (Get-SystemScriptHeader -ScriptName $name -Description $Description -WithCommon),
         (Invoke-Substitute (Get-Content $Template -Raw -Encoding UTF8)),
         $ScriptFooter
     )

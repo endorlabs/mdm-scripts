@@ -14,6 +14,11 @@ IFS= read -r -d '' _VSCODE_WORKER_CONTENT <<'ENDOR_VSCODE_WORKER' || true
 #!/usr/bin/env bash
 set -uo pipefail
 
+# The generator puts lib/attribution.sh here, so the worker labels users with the same
+# endor_attr_label as every other script.
+# {{LIB_ATTRIBUTION}}
+
+# Unattributed: attribute_url puts the user attribution into it, at every run.
 FIREWALL_URL='{{VSCODE_SERVICE_URL}}'
 DEFAULT_SERVICE_URL='https://marketplace.visualstudio.com/_apis/public/gallery'
 DEFAULT_EXTENSION_URL_TEMPLATE='https://www.vscode-unpkg.net/_gallery/{publisher}/{name}/latest'
@@ -30,6 +35,21 @@ for arg in "$@"; do
     *) echo "[endor-vscode] ERROR: unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
+
+# attribute_url: puts into FIREWALL_URL the label of the user logged in now, so it arrives within a
+# minute of their login, and keeps it in STATE_DIR (only a --once that isn't a dry run). With no one
+# logged in, the one kept last. dpkg's hook runs this for whoever ran apt, an admin over SSH or
+# Ansible say, so it uses the kept one, as --status does: it reports on what the worker did, not on
+# whoever runs it. A worker from a generator that didn't put lib/attribution.sh in it leaves the URL
+# unattributed.
+attribute_url() {
+  local label url kept=""
+  declare -F endor_vscode_url >/dev/null || return 0
+  [[ "${ENDOR_VSCODE_DPKG_HOOK:-0}" != "1" && "$MODE" != status ]] || kept=--kept
+  label=$(endor_vscode_label "$STATE_DIR/attr-label" $kept) || return 0
+  [[ "$MODE" != once || "$DRY_RUN" == "1" ]] || endor_vscode_keep_label "$STATE_DIR/attr-label" "$label"
+  url=$(endor_vscode_url "$FIREWALL_URL" "$label") && FIREWALL_URL="$url"
+}
 
 list_product_files() {
   if [[ -n "${ENDOR_VSCODE_PRODUCT_JSON:-}" ]]; then
@@ -278,7 +298,8 @@ patch_one() {
   if [[ "$DRY_RUN" == "1" ]]; then
     echo "[dry-run]   action : PATCH extensionsGallery.serviceUrl and REMOVE extensionUrlTemplate"
     echo "[dry-run]   file   : $file"
-    echo "[dry-run]   URL    : $FIREWALL_URL"
+    # The token carries the secret. redact() is macOS's, with /usr/bin/sed.
+    echo "[dry-run]   URL    : ${FIREWALL_URL%%/_ak/*}/_ak/<redacted>"
     return 0
   fi
 
@@ -482,6 +503,7 @@ generic_main() {
     return "$rc"
   fi
 
+  [[ "$MODE" != once && "$MODE" != status ]] || attribute_url
   case "$MODE" in
     once) generic_once ;;
     restore) restore_all ;;
@@ -1751,6 +1773,7 @@ darwin_main() {
     warn "cannot resolve $APP_PATH"
     return 1
   fi
+  [[ "$MODE" != once && "$MODE" != status ]] || attribute_url
   URL_HASH=$(printf '%s' "$FIREWALL_URL" | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-16)
   RUN_TMP=$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/endor-vscode.XXXXXX") || return 1
   trap 'discard "$RUN_TMP"' EXIT
@@ -1951,18 +1974,51 @@ def save_record(state, record):
     write(os.path.join(state, "record.json"), record, 0o600)
 
 
+def keep_label(state, label):
+    """Keeps the user attribution the policy carries beside the record, for runs with no one logged in."""
+    path = os.path.join(state, "attr-label")
+    try:
+        try:
+            with open(path, encoding="utf-8", errors="surrogateescape") as handle:
+                if handle.read() == label + "\n":
+                    return
+        except OSError:
+            pass
+        os.makedirs(state, mode=0o700, exist_ok=True)
+        fd, temp = tempfile.mkstemp(prefix=".attr-label.endor.", dir=state)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as handle:
+                handle.write(label + "\n")
+            os.replace(temp, path)
+        except BaseException:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+            raise
+    except (OSError, ValueError) as error:
+        warn("could not keep the user attribution in " + path + ": " + str(error))
+
+
 def forget(state):
     try:
-        os.unlink(os.path.join(state, "record.json"))
+        names = os.listdir(state)
     except OSError:
-        pass
+        names = []
+    for name in names:
+        # Leftovers of an interrupted write, too.
+        if name in ("record.json", "attr-label") or name.startswith((".record.json.endor.", ".attr-label.endor.")):
+            try:
+                os.unlink(os.path.join(state, name))
+            except OSError:
+                pass
     try:
         os.rmdir(state)
     except OSError:
         pass
 
 
-def apply(path, state, url, auth, dry_run, strict):
+def apply(path, state, url, label, auth, dry_run, strict):
     folder = os.path.dirname(path)
     if not (safe(folder, strict) and safe(path, strict)):
         return 1
@@ -1998,6 +2054,8 @@ def apply(path, state, url, auth, dry_run, strict):
     if policy == current:
         if not dry_run and new_record != record:
             save_record(state, new_record)
+        if not dry_run and label:
+            keep_label(state, label)
         say("policy already set: " + path)
         return status
     if dry_run:
@@ -2009,6 +2067,8 @@ def apply(path, state, url, auth, dry_run, strict):
         os.makedirs(folder)
         os.chmod(folder, 0o755)
     write(path, policy, 0o644)
+    if label:
+        keep_label(state, label)
     say("policy set: " + path)
     return status
 
@@ -2069,7 +2129,8 @@ def main(argv):
     try:
         if argv[1] == "apply":
             path, state, auth, dry_run, strict = argv[2:7]
-            return apply(path, state, os.environ["ENDOR_VSCODE_POLICY_URL"], auth, dry_run == "1", strict == "1")
+            return apply(path, state, os.environ["ENDOR_VSCODE_POLICY_URL"], os.environ.get("ENDOR_VSCODE_POLICY_LABEL", ""),
+                         auth, dry_run == "1", strict == "1")
         if argv[1] == "remove":
             path, state, dry_run, strict = argv[2:6]
             return remove(path, state, dry_run == "1", strict == "1")
@@ -2086,7 +2147,8 @@ sys.exit(main(sys.argv))
 ENDOR_VSCODE_POLICY_PY
 
 _vscode_policy() {
-  ENDOR_VSCODE_POLICY_URL="$_VSCODE_SERVICE_URL" python3 -I -c "$_VSCODE_POLICY_PY" "$@"
+  ENDOR_VSCODE_POLICY_URL="$_vscode_policy_url" ENDOR_VSCODE_POLICY_LABEL="$_vscode_policy_label" \
+    python3 -I -c "$_VSCODE_POLICY_PY" "$@"
 }
 
 _vscode_warn() {
@@ -2124,6 +2186,19 @@ _vscode_xml() {
   printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
 
+# ── User attribution ──────────────────────────────────────────────────────────
+# product.json and the policy are machine-wide. Their gallery URL carries the label every ecosystem
+# gets from endor_attr_label (lib/attribution.sh, which this script and its worker carry): the worker
+# looks it up at every run, so the user logged in now gets it within a minute, and this script
+# does the same for the policy at its own runs. With no one logged in, each uses the label it kept
+# last, beside its state; before anyone has logged in, the URL is unattributed. So is the macOS
+# profile, which is the same for the whole fleet.
+
+_vscode_policy_url="$_VSCODE_SERVICE_URL"
+_vscode_policy_label=""
+_vscode_label=""
+_vscode_user=""
+
 if [[ "$_VSCODE_ENABLE_PATCH" == "0" && "$_VSCODE_ENABLE_POLICY" == "0" ]]; then
   if [[ "$_vscode_legacy" == "1" ]]; then
     echo "[endor] skip: the VS Code firewall is not enabled for macOS in this script."
@@ -2135,6 +2210,26 @@ if [[ "$_VSCODE_ENABLE_PATCH" == "0" && "$_VSCODE_ENABLE_POLICY" == "0" ]]; then
 elif [[ -z "$_VSCODE_STATE_DIR" ]]; then
   # This script runs as a whole, not sourced, so skip the rest rather than return.
   _vscode_warn "VS Code firewall supports macOS and Linux only in this script."
+fi
+
+if [[ ( "$_VSCODE_ENABLE_PATCH" == "1" && -n "$_VSCODE_STATE_DIR" ) \
+    || ( "$_VSCODE_ENABLE_POLICY" == "1" && "$_vscode_policy_kind" == "file" ) ]]; then
+  if ! declare -F endor_vscode_url >/dev/null; then
+    echo "[endor] note: this script was generated without lib/attribution.sh, so VS Code's gallery URL carries no user attribution."
+  elif _vscode_label=$(endor_vscode_label ""); then
+    echo "[endor] VS Code user attribution → $_vscode_label"
+  else
+    _vscode_label=""
+    _vscode_user=$(find_console_user)
+    if [[ -n "$_vscode_user" ]]; then
+      _vscode_warn "endor_attr_label gave no user attribution for ${_vscode_user}, so VS Code's gallery URL carries none."
+    else
+      echo "[endor] note: no one is logged in, so VS Code's gallery URL keeps the user attribution it last had, if any."
+    fi
+  fi
+  if [[ "$_VSCODE_ENABLE_PATCH" == "1" && "$_VSCODE_WORKER_CONTENT" == *$'\n# {{LIB_ATTRIBUTION}}\n'* ]]; then
+    echo "[endor] note: this script's worker was generated without lib/attribution.sh, so product.json carries no user attribution."
+  fi
 fi
 
 # ── The product.json patch ────────────────────────────────────────────────────
@@ -2304,10 +2399,11 @@ TIMERUNIT
             _ENDOR_WARNED=1
           else
             # dpkg runs this with sh -c after each run that installs or removes packages. The lock
-            # wait covers a path-triggered run still waiting for dpkg to finish.
+            # wait covers a path-triggered run still waiting for dpkg to finish. apt runs it as
+            # whoever ran apt, so the worker keeps the user attribution it has.
             cat > "$_vscode_dpkg_hook" <<DPKGHOOK
 # Endor Package Firewall: patch VS Code's product.json as soon as dpkg has installed it.
-post-invoke="if [ -x '$_VSCODE_WORKER_PATH' ]; then ENDOR_VSCODE_LOCK_WAIT=900 '$_VSCODE_WORKER_PATH' --once >/dev/null 2>&1; fi; true"
+post-invoke="if [ -x '$_VSCODE_WORKER_PATH' ]; then ENDOR_VSCODE_LOCK_WAIT=900 ENDOR_VSCODE_DPKG_HOOK=1 '$_VSCODE_WORKER_PATH' --once >/dev/null 2>&1; fi; true"
 DPKGHOOK
             chmod 644 "$_vscode_dpkg_hook"
           fi
@@ -2394,6 +2490,17 @@ elif [[ "$_VSCODE_ENABLE_POLICY" == "1" && "$_vscode_policy_kind" == "file" ]]; 
     _vscode_done=1
     _vscode_strict=1
     [[ -z "${ENDOR_VSCODE_POLICY_FILE:-}" ]] || _vscode_strict=0
+    # The label of the user logged in now or, with no one logged in, the one kept beside the
+    # policy's record, where the policy program keeps the label of a policy it sets or finds set.
+    _vscode_policy_label="$_vscode_label"
+    if [[ -z "$_vscode_policy_label" && -z "$_vscode_user" ]] && declare -F endor_vscode_url >/dev/null; then
+      _vscode_policy_label=$(endor_vscode_label "$_VSCODE_POLICY_STATE_DIR/attr-label" --kept) || _vscode_policy_label=""
+    fi
+    if [[ -n "$_vscode_policy_label" ]] \
+        && ! _vscode_policy_url=$(endor_vscode_url "$_VSCODE_SERVICE_URL" "$_vscode_policy_label"); then
+      _vscode_policy_url="$_VSCODE_SERVICE_URL"
+      _vscode_policy_label=""
+    fi
     _vscode_policy apply "$_VSCODE_POLICY_FILE" "$_VSCODE_POLICY_STATE_DIR" "$_VSCODE_POLICY_AUTH" \
       "${DRY_RUN:-0}" "$_vscode_strict" || _ENDOR_WARNED=1
     _vscode_version=$(_vscode_policy version "$(dirname "$_vscode_product")/package.json" 2>/dev/null || true)
@@ -2441,6 +2548,7 @@ fi
 
 [[ "$_vscode_done" != "1" ]] || echo "[endor] ✓ VS Code extension firewall done"
 unset -f _vscode_run_worker _vscode_xml _vscode_policy _vscode_warn _vscode_older _vscode_managed_policy
+unset _vscode_policy_url _vscode_label _vscode_policy_label _vscode_user
 unset _vscode_os _VSCODE_STATE_DIR _VSCODE_WORKER_PATH _VSCODE_WORKER_CONTENT _VSCODE_LOG_DIR
 unset _vscode_tmp_worker _vscode_plist _vscode_service _vscode_path _vscode_timer _vscode_dpkg_hook
 unset _vscode_log _vscode_watch _vscode_caches _vscode_left _vscode_done _vscode_product

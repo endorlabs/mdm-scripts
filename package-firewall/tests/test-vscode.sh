@@ -14,6 +14,9 @@ DEFAULT_EXTENSION_URL_TEMPLATE="https://www.vscode-unpkg.net/_gallery/{publisher
 
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
+# No one is logged in, so the URLs carry no user attribution. tests/test-vscode-policy.sh covers it.
+# shellcheck source=attribution.sh
+source "$TEST_DIR/attribution.sh"
 
 OUT="$ROOT_DIR/package-firewall/bash/out/$NAMESPACE"
 

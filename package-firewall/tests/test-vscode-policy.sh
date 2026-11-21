@@ -15,6 +15,8 @@ OUT="$ROOT_DIR/package-firewall/bash/out/$NAMESPACE"
 
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
+# shellcheck source=attribution.sh
+source "$TEST_DIR/attribution.sh"
 
 service_url() {
   printf 'https://factory.endorlabs.com/v1/namespaces/%s/firewall/vscode/_ak/%s' "$NAMESPACE" \
@@ -37,6 +39,7 @@ generate() {
     ENDOR_VSCODE_ENABLE_POLICY="${POLICY:-1}" \
     ENDOR_VSCODE_POLICY_AUTH="${AUTH:-}" \
     bash "$GENERATOR" >/dev/null 2>"$TMP_DIR/generate.err" || { cat "$TMP_DIR/generate.err" >&2; return 1; }
+  fake_console_in "$OUT/endor-vscode.sh"
 }
 
 # Each case gets a VS Code install, product.json state and policy file of its own.
@@ -127,6 +130,22 @@ PY
 }
 digest() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}' || sha256sum "$1" | awk '{print $1}'; }
 
+# product_url: the serviceUrl in the case's product.json.
+product_url() {
+  python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["extensionsGallery"]["serviceUrl"])' \
+    "$CASE/app/product.json"
+}
+
+
+# run_worker: one run of the case's installed worker, as its daemon starts it. Sets RC and OUTPUT.
+run_worker() {
+  RC=0
+  OUTPUT=$(ENDOR_VSCODE_PRODUCT_JSON="$CASE/app/product.json" \
+    ENDOR_VSCODE_STATE_DIR="$CASE/state" \
+    bash "$CASE/state/worker.sh" --once 2>&1) || RC=$?
+}
+
+
 expect_rc() {
   if [[ "$RC" -ne "$1" ]]; then
     echo "$OUTPUT" >&2
@@ -187,10 +206,11 @@ new_case foreign
 mkdir -p "$(dirname "$POLICY_FILE")"
 printf '{"ExtensionGalleryServiceUrl": "https://gallery.example.invalid/_apis/public/gallery"}\n' > "$POLICY_FILE"
 cp "$POLICY_FILE" "$CASE/before.json"
-install
+ENDOR_TEST_CONSOLE_OWNER=alice install
 expect_rc 1
 expect_output "sets ExtensionGalleryServiceUrl to another gallery"
 cmp -s "$POLICY_FILE" "$CASE/before.json" || fail "a foreign gallery was changed"
+[[ ! -e "$POLICY_STATE" ]] || fail "a policy left alone kept state, or a label"
 
 echo "test: a policy.json that isn't a JSON object is left alone"
 for content in '{"ExtensionGalleryServiceUrl": ' '["ExtensionGalleryServiceUrl"]'; do
@@ -420,6 +440,13 @@ PY
   install_mac
   expect_rc 0
   expect_output "VS Code's policy is set by a configuration profile."
+  # The profile is the same for every Mac, so it has no user attribution, and still matches when
+  # the patch's URL has one.
+  ENDOR_TEST_CONSOLE_OWNER=alice install_mac
+  expect_rc 0
+  expect_output "VS Code user attribution → alice@$HOST_LABEL"
+  expect_output "VS Code's policy is set by a configuration profile."
+  [[ "$(product_url)" == "$(attributed_url "alice@$HOST_LABEL")" ]] || fail "the patch's URL is not attributed"
   new_mac_case mac-user
   managed_prefs "$CASE/managed/alice/com.microsoft.VSCode.plist" "$EXPECTED_URL"
   install_mac
@@ -496,12 +523,6 @@ PY
   generate
 fi
 
-# product_url: the serviceUrl in the case's product.json.
-product_url() {
-  python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["extensionsGallery"]["serviceUrl"])' \
-    "$CASE/app/product.json"
-}
-
 # disable <patch|policy> [--dry-run]: runs endor-vscode-disable-<method>.sh for the current case.
 # Sets RC and OUTPUT.
 disable() {
@@ -562,25 +583,10 @@ for script in "$OUT/endor-vscode-disable-patch.sh" "$OUT/endor-vscode-disable-po
   fi
 done
 
-# A Mac with no one logged in: logname finds no login, and the console belongs to
-# ENDOR_TEST_CONSOLE_OWNER. Other stat calls go to the real stat.
-NO_USER_BIN="$TMP_DIR/no-user-bin"
-mkdir -p "$NO_USER_BIN"
-printf '#!/bin/sh\nexit 1\n' > "$NO_USER_BIN/logname"
-cat > "$NO_USER_BIN/stat" <<'STAT'
-#!/bin/sh
-for arg in "$@"; do
-  if [ "$arg" = /dev/console ]; then
-    echo "$ENDOR_TEST_CONSOLE_OWNER"
-    exit 0
-  fi
-done
-exec /usr/bin/stat "$@"
-STAT
-chmod 755 "$NO_USER_BIN/logname" "$NO_USER_BIN/stat"
-# console_user_with <owner>: what find_console_user prints when the console belongs to owner.
+# console_user_with <owner>: what find_console_user prints when the console belongs to owner
+# (tests/attribution.sh).
 console_user_with() {
-  PATH="$NO_USER_BIN:$PATH" ENDOR_TEST_CONSOLE_OWNER="$1" bash -c 'source "$1"; find_console_user' _ \
+  ENDOR_TEST_CONSOLE_OWNER="$1" bash -c 'source "$1"; find_console_user' _ \
     "$ROOT_DIR/package-firewall/bash/lib/attribution.sh"
 }
 
@@ -596,10 +602,12 @@ for owner in root _mbsetupuser; do
   # Otherwise endor-remove.sh would change this machine's own dotfiles.
   [[ -z "$(console_user_with "$owner")" ]] || fail "the fakes don't hide the user logged in here"
   new_case "no-user-$owner"
-  install
+  # alice's label, kept beside each method's state, goes with it.
+  ENDOR_TEST_CONSOLE_OWNER=alice install
   expect_rc 0
+  [[ -f "$CASE/state/attr-label" && -f "$POLICY_STATE/attr-label" ]] || fail "alice's label was not kept"
   RC=0
-  OUTPUT=$(PATH="$NO_USER_BIN:$PATH" ENDOR_TEST_CONSOLE_OWNER="$owner" \
+  OUTPUT=$(ENDOR_TEST_CONSOLE_OWNER="$owner" \
     ENDOR_VSCODE_PRODUCT_JSON="$CASE/app/product.json" \
     ENDOR_VSCODE_STATE_DIR="$CASE/state" \
     ENDOR_VSCODE_POLICY_FILE="$POLICY_FILE" \
@@ -616,8 +624,220 @@ for owner in root _mbsetupuser; do
     || fail "endor-remove.sh did not restore product.json with no one logged in"
   [[ ! -e "$CASE/state" ]] || fail "endor-remove.sh left the patch's state with no one logged in"
   [[ ! -e "$POLICY_FILE" ]] || fail "endor-remove.sh left the policy file with no one logged in"
+  [[ ! -e "$POLICY_STATE" ]] || fail "endor-remove.sh left the policy's state with no one logged in"
 done
 generate
+
+# expect_urls <product.json's URL> <the policy's URL>
+expect_urls() {
+  [[ "$(product_url)" == "$1" ]] || fail "product.json has $(product_url), not $1"
+  [[ "$(policy_value ExtensionGalleryServiceUrl)" == "$2" ]] \
+    || fail "the policy has $(policy_value ExtensionGalleryServiceUrl), not $2"
+}
+# case_digest: everything a run can change.
+case_digest() {
+  local file
+  for file in "$CASE/app/product.json" "$POLICY_FILE" "$CASE/state/worker.sh" "$POLICY_STATE/record.json" \
+      "$CASE/state/attr-label" "$POLICY_STATE/attr-label"; do
+    printf '%s %s\n' "$file" "$(digest "$file")"
+  done
+}
+# label_function <script>: the endor_attr_label a script carries.
+label_function() { sed -n '/^endor_attr_label() {$/,/^}$/p' "$1"; }
+
+echo "test: every script that attributes, VS Code's worker included, carries the same endor_attr_label"
+want=$(label_function "$ROOT_DIR/package-firewall/bash/lib/attribution.sh")
+[[ -n "$want" ]] || fail "lib/attribution.sh has no endor_attr_label"
+for script in "$OUT"/endor-*.sh; do
+  case "$script" in
+    */endor-vscode-disable-*.sh) continue ;;
+    # The script, and its worker.
+    */endor-vscode.sh|*/endor-all.sh) copies=2 ;;
+    *) copies=1 ;;
+  esac
+  [[ "$(grep -c '^endor_attr_label() {$' "$script")" == "$copies" \
+      && "$(label_function "$script")" == "$(for ((i = 0; i < copies; i++)); do printf '%s\n' "$want"; done)" ]] \
+    || fail "$script doesn't carry lib/attribution.sh's endor_attr_label $copies time(s)"
+  case "$script" in
+    */endor-vscode.sh|*/endor-remove.sh) ;;
+    *)
+      grep -qxF 'ENDOR_ATTR_LABEL="$(endor_attr_label "$CONSOLE_USER")" || ENDOR_ATTR_LABEL=""' "$script" \
+        || fail "$script doesn't take its label from endor_attr_label" ;;
+  esac
+done
+
+echo "test: before anyone logs in, the URL is unattributed; a user who logs in later gets it at the worker's next run"
+PATCH=1 generate
+new_case attribution
+install
+expect_rc 0
+expect_output "no one is logged in, so VS Code's gallery URL keeps the user attribution it last had, if any."
+expect_urls "$EXPECTED_URL" "$EXPECTED_URL"
+worker=$(digest "$CASE/state/worker.sh")
+ENDOR_TEST_CONSOLE_OWNER=alice run_worker
+expect_rc 0
+alice=$(attributed_url "alice@$HOST_LABEL")
+expect_urls "$alice" "$EXPECTED_URL"
+[[ "$(digest "$CASE/state/worker.sh")" == "$worker" ]] || fail "the worker changed"
+python3 -I - "$(product_url)" "$KEY_ID" "$SECRET" "alice@$HOST_LABEL" <<'PY' || fail "the token is not the label, the key ID and the secret"
+import base64
+import os
+import sys
+url, key_id, secret, label = sys.argv[1:5]
+token = url.rsplit("/_ak/", 1)[1]
+user, _, password = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).partition(b":")
+inner, _, key = base64.b64decode(user).partition(b":")
+assert password == secret.encode(), password
+assert key == key_id.encode(), key
+assert base64.b64decode(inner) == b"userattr:" + os.fsencode(label), inner
+PY
+# The policy has no worker: it takes the label at the installer's next run.
+ENDOR_TEST_CONSOLE_OWNER=alice install
+expect_rc 0
+expect_output "VS Code user attribution → alice@$HOST_LABEL"
+expect_urls "$alice" "$alice"
+if grep -qF "/_ak/" "$POLICY_STATE/record.json"; then fail "the record contains the URL"; fi
+for kept in "$CASE/state/attr-label" "$POLICY_STATE/attr-label"; do
+  [[ "$(cat "$kept")" == "alice@$HOST_LABEL" ]] || fail "$kept doesn't have alice's label"
+  [[ "$(file_mode "$kept")" == "600" ]] || fail "$kept is not mode 600"
+done
+
+echo "test: with no one logged in, both keep the label; the same label changes nothing; another user's, or a rotated credential, replaces it"
+before=$(case_digest)
+run_worker
+expect_rc 0
+install
+expect_rc 0
+expect_output "no one is logged in"
+[[ "$(case_digest)" == "$before" ]] || fail "a run with no one logged in changed something"
+ENDOR_TEST_CONSOLE_OWNER=alice run_worker
+expect_rc 0
+ENDOR_TEST_CONSOLE_OWNER=alice install
+expect_rc 0
+[[ "$(case_digest)" == "$before" ]] || fail "the same label changed something"
+# apt runs dpkg's hook as whoever ran it, an admin over SSH say: the worker keeps alice's label.
+grep -qF "ENDOR_VSCODE_DPKG_HOOK=1 '\$_VSCODE_WORKER_PATH' --once" "$OUT/endor-vscode.sh" \
+  || fail "the dpkg hook doesn't tell the worker it runs from dpkg"
+ENDOR_TEST_CONSOLE_OWNER=admin ENDOR_VSCODE_DPKG_HOOK=1 run_worker
+expect_rc 0
+[[ "$(case_digest)" == "$before" ]] || fail "a run from the dpkg hook took the label of whoever ran apt"
+ENDOR_TEST_CONSOLE_OWNER="bøb" run_worker
+expect_rc 0
+ENDOR_TEST_CONSOLE_OWNER="bøb" install
+expect_rc 0
+bob=$(attributed_url "bøb@$HOST_LABEL")
+expect_urls "$bob" "$bob"
+PATCH=1 generate "ci-smoke-rotated-secret"
+install
+expect_rc 0
+bob=$(attributed_url "bøb@$HOST_LABEL" ci-smoke-rotated-secret)
+expect_urls "$bob" "$bob"
+PATCH=1 generate
+install
+expect_rc 0
+
+echo "test: the disable scripts remove each method's kept label with its state"
+disable policy
+expect_rc 0
+[[ ! -e "$POLICY_STATE" ]] || fail "endor-vscode-disable-policy.sh left the policy's state"
+[[ -f "$CASE/state/attr-label" ]] || fail "endor-vscode-disable-policy.sh removed the patch's label"
+disable patch
+expect_rc 0
+[[ ! -e "$CASE/state" ]] || fail "endor-vscode-disable-patch.sh left the patch's state"
+
+echo "test: a deployment's own endor_attr_label, and what it calls, reaches every script and VS Code's worker"
+# Changed in lib/attribution.sh before generating. As one that looks the machine up would, it needs
+# no one logged in.
+custom="$TMP_DIR/custom/package-firewall"
+mkdir -p "$custom/bash"
+cp -R "$ROOT_DIR/package-firewall/shared" "$custom/"
+cp -R "$ROOT_DIR/package-firewall/bash/lib" "$ROOT_DIR/package-firewall/bash/templates" \
+  "$ROOT_DIR/package-firewall/bash/generate.sh" "$custom/bash/"
+cat >> "$custom/bash/lib/attribution.sh" <<'CUSTOM'
+lookup_user() { printf 'carol'; }
+endor_attr_label() { printf '%s@lookup' "$(lookup_user)"; }
+CUSTOM
+saved_generator="$GENERATOR"
+saved_out="$OUT"
+GENERATOR="$custom/bash/generate.sh"
+OUT="$custom/bash/out/$NAMESPACE"
+PATCH=1 generate
+grep -q '^lookup_user() ' "$OUT/endor-js.sh" || fail "endor-js.sh doesn't carry the deployment's lookup"
+new_case attribution-custom
+install
+expect_rc 0
+expect_output "VS Code user attribution → carol@lookup"
+carol=$(attributed_url carol@lookup)
+expect_urls "$carol" "$carol"
+# The worker calls its own copy: without it, and without a kept label, it would unattribute the URL.
+rm -f "$CASE/state/attr-label"
+run_worker
+expect_rc 0
+expect_urls "$carol" "$carol"
+[[ "$(cat "$CASE/state/attr-label")" == "carol@lookup" ]] || fail "the worker didn't call the deployment's endor_attr_label"
+GENERATOR="$saved_generator"
+OUT="$saved_out"
+
+echo "test: a label that isn't one, or a kept one that isn't, leaves the URL unattributed"
+PATCH=1 generate
+new_case attribution-broken
+install
+expect_rc 0
+mkdir -p "$POLICY_STATE"
+for broken in empty control link; do
+  for kept in "$CASE/state/attr-label" "$POLICY_STATE/attr-label"; do
+    rm -f "$kept"
+    case "$broken" in
+      empty) : > "$kept" ;;
+      control) printf 'alice\033[2J@example.com\n' > "$kept" ;;
+      link)
+        printf 'mallory@example.com\n' > "$CASE/elsewhere"
+        ln -s "$CASE/elsewhere" "$kept" ;;
+    esac
+  done
+  run_worker
+  expect_rc 0
+  install
+  expect_rc 0
+  expect_urls "$EXPECTED_URL" "$EXPECTED_URL"
+done
+rm -f "$CASE/state/attr-label" "$POLICY_STATE/attr-label"
+ENDOR_TEST_CONSOLE_OWNER=$'al\033[2Jice' run_worker
+expect_rc 0
+ENDOR_TEST_CONSOLE_OWNER=$'al\033[2Jice' install
+expect_rc 1
+expect_output "gave no user attribution for"
+expect_urls "$EXPECTED_URL" "$EXPECTED_URL"
+[[ ! -e "$CASE/state/attr-label" && ! -e "$POLICY_STATE/attr-label" ]] || fail "a label with control characters was kept"
+# Someone logged in whose label fails doesn't get another user's kept label.
+printf 'bob@example.com\n' > "$CASE/state/attr-label"
+printf 'bob@example.com\n' > "$POLICY_STATE/attr-label"
+ENDOR_TEST_CONSOLE_OWNER=$'al\033[2Jice' run_worker
+expect_rc 0
+ENDOR_TEST_CONSOLE_OWNER=$'al\033[2Jice' install
+expect_rc 1
+expect_urls "$EXPECTED_URL" "$EXPECTED_URL"
+
+echo "test: a dry run prints no credential and writes nothing"
+new_case attribution-dry-run
+ENDOR_TEST_CONSOLE_OWNER=alice install --dry-run
+expect_rc 0
+expect_output "VS Code user attribution → alice@$HOST_LABEL"
+expect_output "/_ak/<redacted>"
+for url in "$EXPECTED_URL" "$alice"; do
+  if grep -qF "${url##*/_ak/}" <<<"$OUTPUT"; then fail "a dry run printed a token"; fi
+done
+[[ ! -e "$CASE/state" && ! -e "$POLICY_STATE" && ! -e "$POLICY_FILE" ]] || fail "a dry run wrote something"
+generate
+
+echo "test: a policy left alone keeps the label it had"
+new_case attribution-foreign
+ENDOR_TEST_CONSOLE_OWNER=alice install
+expect_rc 0
+printf '{"ExtensionGalleryServiceUrl": "https://gallery.example.invalid/_apis/public/gallery"}\n' > "$POLICY_FILE"
+ENDOR_TEST_CONSOLE_OWNER=bob install
+expect_rc 1
+[[ "$(cat "$POLICY_STATE/attr-label")" == "alice@$HOST_LABEL" ]] || fail "a policy left alone took bob's label"
 
 echo "test: the generator refuses a remove template without exactly one marked VS Code section"
 copy="$TMP_DIR/generator-copy"
