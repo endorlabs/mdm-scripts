@@ -106,18 +106,25 @@ function Get-ConsoleUser {
         }
     }
 
-    # Running as SYSTEM — detect via explorer.exe owned by the interactive user
-    $proc = Get-CimInstance Win32_Process -Filter "name='explorer.exe'" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+    # Running as SYSTEM — detect via explorer.exe owned by the interactive user. Windows setup
+    # (OOBE, Autopilot) runs Explorer as defaultuser0, which isn't one.
+    $procs = @(Get-CimInstance Win32_Process -Filter "name='explorer.exe'" -ErrorAction SilentlyContinue)
 
-    if (-not $proc) {
+    if (-not $procs) {
         Write-Error '[endor] ERROR: could not detect console user (no explorer.exe). Ensure a user is logged in.'
         exit 1
     }
 
-    $owner = Invoke-CimMethod -InputObject $proc -MethodName 'GetOwner'
-    if (-not $owner.User) {
-        Write-Error '[endor] ERROR: could not determine owner of explorer.exe.'
+    $owner = $null
+    foreach ($proc in $procs) {
+        $candidate = Invoke-CimMethod -InputObject $proc -MethodName 'GetOwner'
+        if ($candidate.User -and $candidate.User -notmatch '^defaultuser\d+$') {
+            $owner = $candidate
+            break
+        }
+    }
+    if (-not $owner) {
+        Write-Error '[endor] ERROR: could not determine a user who owns explorer.exe (only Windows setup is signed in, or none). Ensure a user is logged in.'
         exit 1
     }
 
