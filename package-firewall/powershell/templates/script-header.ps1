@@ -13,7 +13,7 @@ param([switch]$DryRun)
 
 $ErrorActionPreference = 'Stop'
 
-# -- Common functions (inlined from lib/common.ps1) --
+# -- Common functions (inlined from lib/attribution.ps1 and lib/common.ps1) --
 {{COMMON_CONTENT}}
 # --
 

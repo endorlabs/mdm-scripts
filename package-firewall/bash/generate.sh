@@ -287,10 +287,15 @@ substitute() {
     -e "s|{{VSCODE_REMOVE_SCOPE}}|all|g"
 }
 
-# inline_common
+# inline_lib <file>: a lib file without its comment lines and blank lines.
+inline_lib() {
+  grep -v '^# ' "$1" | sed '/^[[:space:]]*$/d' || cat "$1"
+}
+
+# inline_common: lib/attribution.sh, then lib/common.sh, for the script headers.
 inline_common() {
-  grep -v '^# ' "$LIB_DIR/common.sh" | sed '/^[[:space:]]*$/d' \
-    || cat "$LIB_DIR/common.sh"
+  inline_lib "$LIB_DIR/attribution.sh"
+  inline_lib "$LIB_DIR/common.sh"
 }
 
 # emit_block_assignment <varname> <file>
@@ -392,7 +397,11 @@ credentials_block() {
 ENDOR_API_KEY_ID='{{API_KEY_ID}}'
 ENDOR_API_SECRET='{{API_SECRET}}'
 
-ENDOR_ATTR_LABEL="${CONSOLE_USER}@$(endor_host_label)"
+ENDOR_ATTR_LABEL="$(endor_attr_label "$CONSOLE_USER")" || ENDOR_ATTR_LABEL=""
+if [[ -z "$ENDOR_ATTR_LABEL" ]]; then
+  echo "[endor] ERROR: endor_attr_label gave no user attribution for ${CONSOLE_USER}." >&2
+  exit 1
+fi
 ENDOR_ATTR_USER="$(endor_attr_username "$ENDOR_ATTR_LABEL" "$ENDOR_API_KEY_ID")"
 
 # npm _auth = base64(username:password)
@@ -426,7 +435,7 @@ script_header() {
   echo ""
   echo "set -euo pipefail"
   echo ""
-  echo "# ── Common functions (inlined from lib/common.sh) ────────────────────────────"
+  echo "# ── Common functions (inlined from lib/attribution.sh and lib/common.sh) ─────"
   inline_common
   echo "# ─────────────────────────────────────────────────────────────────────────────"
   echo ""

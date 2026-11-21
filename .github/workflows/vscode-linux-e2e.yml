@@ -11,6 +11,7 @@ on:
       - package-firewall/bash/templates/vscode.sh
       - package-firewall/bash/templates/remove.sh
       - package-firewall/bash/lib/common.sh
+      - package-firewall/bash/lib/attribution.sh
       - package-firewall/tests/e2e-vscode-linux.sh
       - .github/workflows/vscode-linux-e2e.yml
   push:
@@ -20,6 +21,7 @@ on:
       - package-firewall/bash/templates/vscode.sh
       - package-firewall/bash/templates/remove.sh
       - package-firewall/bash/lib/common.sh
+      - package-firewall/bash/lib/attribution.sh
       - package-firewall/tests/e2e-vscode-linux.sh
       - .github/workflows/vscode-linux-e2e.yml
   schedule:
