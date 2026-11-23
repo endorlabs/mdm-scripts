@@ -14,13 +14,19 @@
 # Endpoint needs only curl + tar (both ship with macOS/Linux) - no git/Xcode CLT
 # and no jq/Homebrew. Windows doesn't use this - pre-generate and push via Intune
 # (see docs/deploy-windows-intune.md).
+#
+# AGENT=cortexcode is different: Cortex Code reads hooks only from a file in the
+# user's home, so the runner hands the rendered file to install-cortexcode.sh,
+# which finds the user(s), merges with their own hooks, and writes as the user
+# (see docs/deploy-cortexcode-runner.md).
 set -eu
 
 # --- settings: edit these ---------------------------------------------------
-AGENT=cursor                                       # cursor | claude | codex | copilot
+AGENT=cursor                                       # cursor | claude | codex | copilot | cortexcode
 REF=main                                           # pin to a reviewed tag/commit, e.g. v1.0.0
 EXTRA=                                              # extra render flags, e.g. --env ENDOR_AI_AUDIT_NO_BLOCKING=true
-DEST=                                              # override install path; empty = OS default
+DEST=                                              # override install path; empty = OS default (cortexcode: may be '~/...', quoted)
+TARGET_USER=                                       # cortexcode only: user(s) to install for; empty = console user (macOS), session users (Linux)
 REPO_SLUG=endorlabs/mdm-scripts                    # owner/repo the tarball is fetched from
 # -----------------------------------------------------------------------------
 
@@ -48,11 +54,16 @@ if [ -z "$DEST" ]; then
     # It is read by the Copilot CLI only; VS Code agent mode has no managed hook
     # path (see docs/deploy-copilot-policy.md).
     copilot:Darwin|copilot:Linux) DEST="/etc/github-copilot/policy.d/endor.json" ;;
+    # Per user: install-cortexcode.sh resolves ~/.snowflake/cortex/hooks.json.
+    cortexcode:Darwin|cortexcode:Linux) ;;
     *) echo "runner.sh: set DEST for agent '$AGENT' on $os" >&2; exit 2 ;;
   esac
 fi
 
-mkdir -p "$(dirname "$REPO")" "$(dirname "$DEST")"
+mkdir -p "$(dirname "$REPO")"
+# Root never creates a directory in a user's home: install-cortexcode.sh does
+# that as the user.
+[ "$AGENT" = cortexcode ] || mkdir -p "$(dirname "$DEST")"
 
 # Fetch this repo at the pinned ref as a tarball with curl - no git, so no Xcode
 # Command Line Tools (macOS /usr/bin/git is a CLT stub that fails with no GUI
@@ -66,6 +77,14 @@ mkdir -p "$REPO"
 curl -fsSL --retry 5 --retry-connrefused --retry-all-errors \
   "https://codeload.github.com/$REPO_SLUG/tar.gz/$REF" \
   | tar -xz -C "$REPO" --strip-components=1
+
+if [ "$AGENT" = cortexcode ]; then
+  work=$(mktemp -d "$(dirname "$REPO")/cortexcode.XXXXXX")
+  trap 'rm -rf "$work"' EXIT
+  sh "$REPO/agent-governance/scripts/render.sh" --agent cortexcode $EXTRA -o "$work/hooks.json"
+  sh "$REPO/agent-governance/scripts/install-cortexcode.sh" --users "$TARGET_USER" --dest "$DEST" "$work/hooks.json"
+  exit 0
+fi
 
 # Render the config and swap it in only if it changed. Comparing the output (not
 # the repo revision) means credential and flag changes take effect too.

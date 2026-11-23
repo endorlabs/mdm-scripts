@@ -18,6 +18,9 @@ There's no native "push a file" feature — file delivery is just a Command that
 | Copilot CLI | macOS | Command → `runner.sh (AGENT=copilot)` → `/etc/github-copilot/policy.d/endor.json` |
 | Copilot CLI | Linux | Command → `runner.sh (AGENT=copilot)` → `/etc/github-copilot/policy.d/endor.json` |
 | Copilot CLI | Windows | Command (PowerShell) writes the pre-generated config to `C:\ProgramData\GitHub\Copilot\policy.d\endor.json` |
+| Cortex Code | macOS | Command → `runner.sh (AGENT=cortexcode)` → the console user's `~/.snowflake/cortex/hooks.json` ([runbook](deploy-cortexcode-runner.md)) |
+| Cortex Code | Linux (untested) | Command → `runner.sh (AGENT=cortexcode)` → each session user's `~/.snowflake/cortex/hooks.json` ([runbook](deploy-cortexcode-runner.md)) |
+| Cortex Code | Windows (untested) | Command, **Run As Signed In User**, writes the pre-generated config to `%USERPROFILE%\.snowflake\cortex\hooks.json` |
 
 ## macOS — Claude via profile
 

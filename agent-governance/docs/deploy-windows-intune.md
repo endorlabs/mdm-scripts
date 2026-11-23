@@ -1,6 +1,6 @@
 # Deploy on Windows via Intune
 
-Windows has no Configuration Profiles for these tools — each agent reads a plain config file from a known path (Cursor/Claude/Copilot as JSON, Codex as TOML). So the pattern is different from macOS: you **pre-generate the config on a macOS/Linux admin machine** (the generator is a POSIX shell script; a plain Windows laptop has no `sh`) and use **Microsoft Intune** to place the file. The endpoint never runs the generator.
+Windows has no Configuration Profiles for these tools — each agent reads a plain config file from a known path (Cursor/Claude/Copilot/Cortex Code as JSON, Codex as TOML). So the pattern is different from macOS: you **pre-generate the config on a macOS/Linux admin machine** (the generator is a POSIX shell script; a plain Windows laptop has no `sh`) and use **Microsoft Intune** to place the file. The endpoint never runs the generator.
 
 ## How the Windows hook runs
 
@@ -44,6 +44,7 @@ Add `--env ENDOR_AI_AUDIT_NO_BLOCKING=true` for a monitor-only rollout, or `--sk
 | **Claude Code** | `C:\Program Files\ClaudeCode\managed-settings.json` (+ `managed-settings.d\`) | managed settings; users can't override |
 | **Codex** | `%ProgramData%\OpenAI\Codex\requirements.toml` | managed requirements; hooks auto-trusted, users can't disable |
 | **GitHub Copilot** | `C:\ProgramData\GitHub\Copilot\policy.d\endor.json` | policy level: outranks user/project config, ignores `disableAllHooks`, applies regardless of folder trust. Read by the **Copilot CLI only** — VS Code agent mode has no managed hook path ([details](deploy-copilot-policy.md#scope-the-cli-is-covered-vs-code-agent-mode-is-not)) |
+| **Cortex Code** (untested) | `%USERPROFILE%\.snowflake\cortex\hooks.json` (per-user only) | no managed path: run the script **as the signed-in user**, not in system context; overwrites the user's own hooks ([details](deploy-cortexcode-runner.md#windows-pre-generate-untested)) |
 
 ## 3. Push with Intune
 

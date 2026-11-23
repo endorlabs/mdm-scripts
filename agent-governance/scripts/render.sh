@@ -6,11 +6,13 @@
 # (.mobileconfig) is produced by piping this script's Claude output through
 # render-plist.sh.
 #
-# Outputs: --agent {claude,cursor,copilot} emit JSON; --agent codex emits a Codex
-# requirements.toml (managed hooks, auto-trusted) - wrap it for the macOS profile
-# by piping through 'render-plist.sh --style mcx'. Copilot's JSON is a policy hook
-# file for /etc/github-copilot/policy.d, the one Copilot config level a user cannot
-# bypass (see docs/deploy-copilot-policy.md). The hook command strings are
+# Outputs: --agent {claude,cursor,copilot,cortexcode} emit JSON; --agent codex emits
+# a Codex requirements.toml (managed hooks, auto-trusted) - wrap it for the macOS
+# profile by piping through 'render-plist.sh --style mcx'. Copilot's JSON is a policy
+# hook file for /etc/github-copilot/policy.d, the one Copilot config level a user
+# cannot bypass (see docs/deploy-copilot-policy.md). Cortex Code's JSON is the user
+# file ~/.snowflake/cortex/hooks.json, because Cortex Code has no managed hooks path
+# (see docs/deploy-cortexcode-runner.md). The hook command strings are
 # emitted for --target-os: macos/linux share a POSIX shell form; windows inlines the
 # PowerShell bootstrap + audit, invoked as a self-contained, shell-agnostic
 #   powershell -NoProfile -EncodedCommand <base64-UTF16LE>
@@ -30,8 +32,8 @@
 # The session hook also downloads endorctl from --api-url.
 #
 # Behavior settings go through --env KEY=VALUE (repeatable), routed to Claude's
-# env block / inlined into every Cursor, Codex, and Copilot hook command (none of
-# which has a managed env block). Cache is on by default; monitor-only is just
+# env block / inlined into every Cursor, Codex, Copilot, and Cortex Code hook
+# command (none of which has a managed env block). Cache is on by default; monitor-only is just
 # --env ENDOR_AI_AUDIT_NO_BLOCKING=true. --skip-endorctl-update uses an installed
 # endorctl as-is (no version check at all), installing only when missing.
 #
@@ -45,6 +47,7 @@
 #   render.sh --agent cursor --api-key K --api-secret S --namespace NS -o hooks.json
 #   render.sh --agent claude --target-os windows --api-key K --api-secret S --namespace NS
 #   render.sh --agent copilot --api-key K --api-secret S --namespace NS -o endor.json
+#   render.sh --agent cortexcode --api-key K --api-secret S --namespace NS -o hooks.json
 set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -115,16 +118,16 @@ while [ $# -gt 0 ]; do
     --api-key)              api_key="$2"; shift 2 ;;
     --api-secret)           api_secret="$2"; shift 2 ;;
     --namespace)            namespace="$2"; shift 2 ;;
-    -h|--help)              sed -n '2,46p' "$0"; exit 0 ;;
+    -h|--help)              sed -n '2,49p' "$0"; exit 0 ;;
     *)                      die "unknown argument: $1" ;;
   esac
 done
 
 # --- validation ---------------------------------------------------------------
 case "$agent" in
-  claude|cursor|codex|copilot) ;;
-  "") die "--agent is required (claude|cursor|codex|copilot)" ;;
-  *) die "unknown agent: $agent (claude|cursor|codex|copilot)" ;;
+  claude|cursor|codex|copilot|cortexcode) ;;
+  "") die "--agent is required (claude|cursor|codex|copilot|cortexcode)" ;;
+  *) die "unknown agent: $agent (claude|cursor|codex|copilot|cortexcode)" ;;
 esac
 case "$target_os" in
   macos|linux|windows) ;;
@@ -162,8 +165,9 @@ prompt_if_tty namespace  "namespace"  plain
 # env_json: pretty ",\n    \"K\": \"V\"" fragments appended into Claude's env
 #   block (each begins with a comma - the block always has the AGENT_HOOK_* keys
 #   before it); indented to match the 2-space layout the builders emit.
-# env_prefix: "K='V' " inline prefix for every POSIX Cursor/Codex hook command.
-# ps_env_sets: "$env:K = 'V'" lines for every PowerShell Cursor/Codex hook command.
+# env_prefix: "K='V' " inline prefix for every POSIX hook command of an agent
+#   with no managed env block (all but Claude).
+# ps_env_sets: "$env:K = 'V'" lines for every such PowerShell hook command.
 # Keys are validated [A-Za-z_][A-Za-z0-9_]* (add_env), so they need no escaping.
 env_json=$(printf '%s\n' "$env_lines" | while IFS= read -r kv; do
   [ -n "$kv" ] || continue
@@ -207,14 +211,14 @@ psenc() {
 
 # The audit invocation each hook runs. Claude reads creds from its managed env
 # block at hook time (hook-scoped AGENT_HOOK_ENDOR_* names, see build_claude).
-# Cursor, Codex, and Copilot have no managed env block, so creds and behavior envs are
-# inlined literally into every hook command (*_inline): each hook is
-# self-contained and depends on nothing an earlier hook set up. Cursor can inject
+# Cursor, Codex, Copilot, and Cortex Code have no managed env block, so creds and
+# behavior envs are inlined literally into every hook command (*_inline): each
+# hook is self-contained and depends on nothing an earlier hook set up. Cursor can inject
 # env from a sessionStart hook's output, but that env is lost when a conversation
 # is resumed after a restart and never reaches hooks fired inside subagents, so
 # it is deliberately not relied on.
 # endorctl's audit subcommand per agent (Claude Code is "claudecode", not "claude").
-case "$agent" in claude) subcmd="claudecode" ;; cursor) subcmd="cursor" ;; codex) subcmd="codex" ;; copilot) subcmd="copilot" ;; esac
+case "$agent" in claude) subcmd="claudecode" ;; cursor) subcmd="cursor" ;; codex) subcmd="codex" ;; copilot) subcmd="copilot" ;; cortexcode) subcmd="cortexcode" ;; esac
 posix_audit='"$HOME/.endorctl/endorctl" --api "$AGENT_HOOK_ENDOR_API" --namespace "$AGENT_HOOK_ENDOR_NAMESPACE" --api-key "$AGENT_HOOK_ENDOR_API_CREDENTIALS_KEY" --api-secret "$AGENT_HOOK_ENDOR_API_CREDENTIALS_SECRET" ai-audit '"$subcmd"
 posix_inline=$(printf '%s"$HOME/.endorctl/endorctl" --api %s --namespace %s --api-key %s --api-secret %s ai-audit %s' \
   "$env_prefix" "$(sq "$api_url")" "$(sq "$namespace")" "$(sq "$api_key")" "$(sq "$api_secret")" "$subcmd")
@@ -268,14 +272,15 @@ case "$agent:$target_os" in
     # whose setter throws on a piped handle).
     cmd_session=$(psenc "$(printf '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n$in = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $OutputEncoding).ReadToEnd()\n%s\n%s\n$in | %s' \
       "$boot" "$ps_env_sets" "$ps_inline")") ;;
-  codex:macos|codex:linux|copilot:macos|copilot:linux)
-    # Codex and Copilot both keep the event pipe open (POSIX inherits it), so
-    # endorctl reads the event JSON from stdin directly - no capture-to-file dance
-    # is needed (that is a Cursor-only quirk). The generated file is itself the
-    # credential-bearing artifact.
+  codex:macos|codex:linux|copilot:macos|copilot:linux|cortexcode:macos|cortexcode:linux)
+    # Codex, Copilot, and Cortex Code keep the event pipe open (POSIX inherits it),
+    # so endorctl reads the event JSON from stdin directly - no capture-to-file
+    # dance is needed (that is a Cursor-only quirk). Cortex Code runs hooks the way
+    # Claude Code does, and Claude Code's hooks read stdin directly too. The
+    # generated file is itself the credential-bearing artifact.
     cmd_audit="$posix_inline"
     cmd_session=$(printf '%s\n%s' "$boot" "$posix_inline") ;;
-  codex:windows|copilot:windows)
+  codex:windows|copilot:windows|cortexcode:windows)
     # As with Cursor on Windows, the EncodedCommand does not inherit the event
     # pipe, so each hook reads stdin and pipes it into endorctl.
     cmd_audit=$(psenc "$ps_inline_event")
@@ -402,9 +407,37 @@ build_copilot() {
   printf '  }\n}\n'
 }
 
+# Cortex Code takes the Claude Code hooks format, with the "*" matcher on every
+# event. The event set is the one endorctl audits for Cortex Code; Stop,
+# Notification, and PermissionRequest are not audited, so registering them would
+# only add a process start per event. The installer (install-cortexcode.sh)
+# finds Endor's entries in a user's file by the "ai-audit cortexcode" in the
+# command, so a merge into an existing file can replace them on the next run.
+cortexcode_hook() {  # $1=event  $2=js-escaped command  $3=timeout secs  $4=trailing "," or ""
+  printf '    "%s": [\n      {\n        "matcher": "*",\n        "hooks": [\n          {\n            "type": "command",\n            "command": "%s",\n            "timeout": %s\n          }\n        ]\n      }\n    ]%s\n' \
+    "$1" "$2" "$3" "$4"
+}
+
+build_cortexcode() {
+  _s=$(js "$cmd_session"); _a=$(js "$cmd_audit")
+  # As for Copilot: only the Windows session hook downloads inline, so only it
+  # gets a ceiling longer than 30s.
+  case "$target_os" in
+    windows) _session_timeout=1800 ;;
+    *)       _session_timeout=30 ;;
+  esac
+  printf '{\n  "hooks": {\n'
+  cortexcode_hook SessionStart     "$_s" "$_session_timeout" ,
+  cortexcode_hook UserPromptSubmit "$_a" 30 ,
+  cortexcode_hook PreToolUse       "$_a" 30 ,
+  cortexcode_hook PostToolUse      "$_a" 30 ,
+  cortexcode_hook SessionEnd       "$_a" 30 ""
+  printf '  }\n}\n'
+}
+
 # --- emit ---------------------------------------------------------------------
-emit() { case "$agent" in claude) build_claude ;; cursor) build_cursor ;; codex) build_codex ;; copilot) build_copilot ;; esac; }
-case "$agent" in claude) def_out="claude-settings.json" ;; cursor) def_out="cursor-hooks.json" ;; codex) def_out="codex-requirements.toml" ;; copilot) def_out="copilot-hooks.json" ;; esac
+emit() { case "$agent" in claude) build_claude ;; cursor) build_cursor ;; codex) build_codex ;; copilot) build_copilot ;; cortexcode) build_cortexcode ;; esac; }
+case "$agent" in claude) def_out="claude-settings.json" ;; cursor) def_out="cursor-hooks.json" ;; codex) def_out="codex-requirements.toml" ;; copilot) def_out="copilot-hooks.json" ;; cortexcode) def_out="cortexcode-hooks.json" ;; esac
 out_path="${output:-$def_out}"
 
 if [ "$out_path" = "-" ]; then
