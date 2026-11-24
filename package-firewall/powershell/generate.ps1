@@ -208,6 +208,10 @@ $OutDir = Join-Path $ScriptDir "out\$ENDOR_NAMESPACE"
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 
 # -- Template substitution -----------------------------------------------------
+# Every script inlines lib/attribution.ps1, then lib/common.ps1.
+$LibCommonText = (Get-Content (Join-Path $LibDir 'attribution.ps1') -Raw -Encoding UTF8).TrimEnd() + "`n`n" +
+    (Get-Content (Join-Path $LibDir 'common.ps1') -Raw -Encoding UTF8)
+
 # Uses String.Replace() (literal, not regex) to avoid issues with $ in values.
 function Invoke-Substitute {
     param([string]$Content)
@@ -274,7 +278,7 @@ function Get-AllBlocks {
 function Get-ScriptHeader {
     param([string]$ScriptName, [string]$Description)
     $tpl    = Get-Content (Join-Path $TmplDir 'script-header.ps1') -Raw -Encoding UTF8
-    $common = Get-Content (Join-Path $LibDir  'common.ps1')        -Raw -Encoding UTF8
+    $common = $LibCommonText
     $r = Invoke-Substitute $tpl
     $r = $r.Replace('{{DESCRIPTION}}',    $Description)
     $r = $r.Replace('{{SCRIPTNAME}}',     $ScriptName)

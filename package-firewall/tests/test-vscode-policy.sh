@@ -581,7 +581,7 @@ chmod 755 "$NO_USER_BIN/logname" "$NO_USER_BIN/stat"
 # console_user_with <owner>: what find_console_user prints when the console belongs to owner.
 console_user_with() {
   PATH="$NO_USER_BIN:$PATH" ENDOR_TEST_CONSOLE_OWNER="$1" bash -c 'source "$1"; find_console_user' _ \
-    "$ROOT_DIR/package-firewall/bash/lib/common.sh"
+    "$ROOT_DIR/package-firewall/bash/lib/attribution.sh"
 }
 
 echo "test: the console user is found, and no one at the login window or in Setup Assistant"
