@@ -68,6 +68,26 @@ function Get-CommitProduct {
     Join-Path $App "$($Commit.Substring(0, 10))\resources\app\product.json"
 }
 
+# Get-UrlLabel <url>: the user attribution in a gallery URL's token, or nothing. The token is
+# base64url(base64(base64("userattr:" + label) + ":" + key ID) + ":" + secret).
+function Get-UrlLabel {
+    param([string]$Url)
+    $utf8 = [Text.Encoding]::UTF8
+    try {
+        $token = $Url.Substring($Url.LastIndexOf('/_ak/') + 5).Replace('-', '+').Replace('_', '/')
+        $token += '=' * ((4 - $token.Length % 4) % 4)
+        $user = $utf8.GetString([Convert]::FromBase64String($token)).Split(':')[0]
+        $inner = $utf8.GetString([Convert]::FromBase64String($user)).Split(':')[0]
+        $attr = $utf8.GetString([Convert]::FromBase64String($inner))
+        if ($attr.StartsWith('userattr:')) { $attr.Substring(9) }
+    } catch {
+    }
+}
+
+# The installer runs as this account, so it labels it; the SYSTEM task keeps that label, or takes the
+# same one from the account's Explorer.
+$ExpectedLabel = "$env:USERNAME@$env:COMPUTERNAME"
+
 function Test-Patched {
     param([string]$Path)
     try {
@@ -163,6 +183,9 @@ try {
     if ($LASTEXITCODE) { Stop-Test "endor-vscode.ps1 exited with $LASTEXITCODE" }
     if (-not (Test-Patched $oldProduct)) { Stop-Test 'the installer did not patch the 64-bit install' }
     Write-Pass 'the installer, run from 32-bit PowerShell, patched the 64-bit install'
+    $label = Get-UrlLabel ([string](Get-Product $oldProduct).extensionsGallery.serviceUrl)
+    if ($label -ne $ExpectedLabel) { Stop-Test "product.json carries the user attribution '$label', not '$ExpectedLabel'" }
+    Write-Pass "product.json carries the user attribution $ExpectedLabel"
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if (-not $task -or $task.State -ne 'Running') { Stop-Test "the task is $($task.State), not running" }
     if ($task.Principal.UserId -notin 'SYSTEM', 'NT AUTHORITY\SYSTEM') {
@@ -203,6 +226,8 @@ try {
     if (-not ([string]$key.GetValue('ExtensionGalleryServiceUrl')).StartsWith($FirewallPrefix)) {
         Stop-Test 'HKLM does not set the Endor ExtensionGalleryServiceUrl'
     }
+    $label = Get-UrlLabel ([string]$key.GetValue('ExtensionGalleryServiceUrl'))
+    if ($label -ne $ExpectedLabel) { Stop-Test "the policy carries the user attribution '$label', not '$ExpectedLabel'" }
     if ($env:ENDOR_VSCODE_POLICY_AUTH -and $key.GetValue('ExtensionGalleryAuthProvider') -ne 'microsoft') {
         Stop-Test 'HKLM does not set ExtensionGalleryAuthProvider'
     }
@@ -248,6 +273,8 @@ try {
     if ($latency -gt 5) { Stop-Test "the watcher took ${latency}s to patch the new product.json" }
     Write-Pass 'the watcher patched the new version within 5s of Setup writing it'
     $product = Get-Product (Get-CommitProduct $newCommit)
+    $label = Get-UrlLabel ([string]$product.extensionsGallery.serviceUrl)
+    if ($label -ne $ExpectedLabel) { Stop-Test "the SYSTEM task's patch carries the user attribution '$label', not '$ExpectedLabel'" }
     if ($product.target -ne 'system' -or $product.win32VersionedUpdate -ne $true -or $newCommit.Length -ne 40) {
         Stop-Test 'the patch lost target, win32VersionedUpdate or commit, which VS Code uses to choose how to update'
     }

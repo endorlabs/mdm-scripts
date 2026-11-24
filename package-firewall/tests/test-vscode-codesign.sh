@@ -41,6 +41,9 @@ cleanup() {
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
+# No one is logged in until a test logs someone in.
+# shellcheck source=attribution.sh
+source "$TEST_DIR/attribution.sh"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -99,6 +102,7 @@ generate() {
   local secret="${1:-$SECRET}"
   ENDOR_NAMESPACE="$NAMESPACE" ENDOR_API_KEY_ID="$KEY_ID" ENDOR_API_SECRET="$secret" \
     ENDOR_VSCODE_ENABLE_PATCH="${PATCH:-1}" bash "$GENERATOR" >/dev/null
+  fake_console_in "$INSTALLER"
   EXPECTED_URL=$(firewall_url "$secret")
 }
 
@@ -456,5 +460,27 @@ run_worker "$state" --once || true
 [[ "$(tree_digest "$STAGED")" == "$digest" ]] || fail "an update for an app that isn't ours was modified"
 stop_fakes
 run_worker "$state" --purge || fail "purge failed"
+
+echo "test: a user who logs in later re-patches and re-signs once, with the same identity"
+state="$TMP_DIR/state-attribution"
+build_app "$APP" 1.0.0
+install "$state" || fail "installer failed"
+assert_firewalled "$APP" "$state"
+cert=$(cert_of "$state")
+before=$(inode "$APP")
+ENDOR_TEST_CONSOLE_OWNER=alice run_worker "$state" --once || fail "the worker failed with alice logged in"
+EXPECTED_URL=$(attributed_url "alice@$HOST_LABEL")
+[[ "$(inode "$APP")" != "$before" ]] || fail "the attributed app was not swapped in"
+assert_firewalled "$APP" "$state"
+[[ "$(cert_of "$state")" == "$cert" ]] || fail "the label replaced the signing identity"
+before=$(inode "$APP")
+digest=$(tree_digest "$APP")
+ENDOR_TEST_CONSOLE_OWNER=alice run_worker "$state" --once || fail "a second run with alice logged in failed"
+run_worker "$state" --once || fail "a run after alice logged out failed"
+[[ "$(inode "$APP")" == "$before" && "$(tree_digest "$APP")" == "$digest" ]] \
+  || fail "the same label, or no one logged in, changed the app"
+run_worker "$state" --restore || fail "restore failed"
+run_worker "$state" --purge || fail "purge failed"
+generate
 
 echo "VS Code code-signing tests passed"

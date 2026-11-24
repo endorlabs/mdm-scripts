@@ -254,6 +254,8 @@ GEM_MIRROR_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/gem/"
 # Bundler keys credentials by host name: upper-case, '.' → '__', '-' → '___', no port.
 BUNDLE_HOST_KEY=$(printf '%s' "${TRUSTED_HOST}" | tr '[:lower:]' '[:upper:]' | sed -e 's/-/___/g' -e 's/\./__/g')
 API_SECRET_B64=$(printf '%s' "${ENDOR_API_SECRET}" | base64 | tr -d '\n')
+# Unattributed. On the device, endor-vscode.sh puts the user attribution (endor_attr_label) into
+# the token; the macOS profile keeps this URL.
 VSCODE_TOKEN=$(printf '%s:%s' "${ENDOR_API_KEY_ID}" "${ENDOR_API_SECRET}" \
   | base64 | tr -d '\n=' | tr '+/' '-_')
 VSCODE_SERVICE_URL="${FQDN}/v1/namespaces/${ENDOR_NAMESPACE}/firewall/vscode/_ak/${VSCODE_TOKEN}"
@@ -284,7 +286,8 @@ substitute() {
     -e "s|{{VSCODE_ENABLE_POLICY}}|${VSCODE_ENABLE_POLICY}|g" \
     -e "s|{{VSCODE_POLICY_AUTH}}|${VSCODE_POLICY_AUTH}|g" \
     -e "s|{{VSCODE_MACOS_DAEMON}}|${VSCODE_ENABLE_PATCH}|g" \
-    -e "s|{{VSCODE_REMOVE_SCOPE}}|all|g"
+    -e "s|{{VSCODE_REMOVE_SCOPE}}|all|g" \
+    | embed_attribution
 }
 
 # inline_lib <file>: a lib file without its comment lines and blank lines.
@@ -297,6 +300,26 @@ inline_common() {
   inline_lib "$LIB_DIR/attribution.sh"
   inline_lib "$LIB_DIR/common.sh"
 }
+
+# embed_attribution: replaces each "# {{LIB_ATTRIBUTION}}" line with lib/attribution.sh, inlined as
+# in the script headers. templates/vscode.sh's worker carries it this way, so it labels users as
+# every script does.
+ATTRIBUTION_INLINED="$(inline_lib "$LIB_DIR/attribution.sh")"
+embed_attribution() {
+  ATTRIBUTION_INLINED="$ATTRIBUTION_INLINED" awk '
+    $0 == "# {{LIB_ATTRIBUTION}}" {
+      print "# ── User attribution (inlined from lib/attribution.sh) ───────────────────────"
+      print ENVIRON["ATTRIBUTION_INLINED"]
+      print "# ─────────────────────────────────────────────────────────────────────────────"
+      next
+    }
+    { print }'
+}
+# The worker is a quoted heredoc, which a line of the file could end.
+if grep -qx 'ENDOR_VSCODE_WORKER' "$LIB_DIR/attribution.sh"; then
+  echo "ERROR: lib/attribution.sh has a line 'ENDOR_VSCODE_WORKER', which would end endor-vscode.sh's worker early." >&2
+  exit 1
+fi
 
 # emit_block_assignment <varname> <file>
 # Reads a block file, applies substitutions, and emits a quoted heredoc
@@ -445,11 +468,14 @@ script_header() {
   echo ""
 }
 
-# system_script_header <output> <description>
-# Used by machine-level integrations that do not require an interactive user.
+# system_script_header <output> <description> [with_common]
+# Used by machine-level integrations that do not require an interactive user. With with_common,
+# it inlines lib/attribution.sh and lib/common.sh too: endor-vscode.sh attributes VS Code's gallery
+# URL with their functions.
 system_script_header() {
   local output="$1"
   local description="$2"
+  local with_common="${3:-}"
   echo "#!/usr/bin/env bash"
   echo "# MDM-deployable: ${description}"
   echo "# Generated for namespace=${ENDOR_NAMESPACE} fqdn=${FQDN}."
@@ -458,6 +484,12 @@ system_script_header() {
   echo ""
   echo "set -euo pipefail"
   echo ""
+  if [[ -n "$with_common" ]]; then
+    echo "# ── Common functions (inlined from lib/attribution.sh and lib/common.sh) ─────"
+    inline_common
+    echo "# ─────────────────────────────────────────────────────────────────────────────"
+    echo ""
+  fi
   arg_parsing_block
   echo ""
 }
@@ -493,7 +525,7 @@ build_system_script() {
   local description="$3"
 
   {
-    system_script_header "$output" "$description"
+    system_script_header "$output" "$description" with_common
     substitute < "$template"
     echo ""
     script_footer
